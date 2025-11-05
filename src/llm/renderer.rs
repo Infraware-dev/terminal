@@ -1,8 +1,8 @@
 /// Markdown and code rendering for LLM responses
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style, ThemeSet};
+use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
-use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
+use syntect::util::as_24_bit_terminal_escaped;
 
 /// Renderer for LLM responses with basic markdown support
 pub struct ResponseRenderer {

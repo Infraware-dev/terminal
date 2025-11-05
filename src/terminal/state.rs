@@ -1,5 +1,4 @@
 /// Terminal state management
-use anyhow::Result;
 
 /// Represents the current mode of the terminal
 #[derive(Debug, Clone, PartialEq)]
