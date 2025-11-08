@@ -1,11 +1,21 @@
-/// Package Manager Strategy Pattern
-///
-/// This module implements the Strategy pattern for package managers,
-/// allowing easy extension with new package managers without modifying existing code.
+//! Package Manager Strategy Pattern
+//!
+//! This module implements the Strategy pattern for package managers,
+//! allowing easy extension with new package managers without modifying existing code.
+//!
+//! TODO: Remove #![allow(dead_code)] once fully integrated
+#![allow(dead_code)]
+
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::executor::command::CommandExecutor;
+
+// Priority constants for package manager selection
+const PRIORITY_VERY_HIGH: u8 = 90;
+const PRIORITY_HIGH: u8 = 85;
+const PRIORITY_MEDIUM: u8 = 80;
+const PRIORITY_LOW: u8 = 70;
 
 /// Trait defining the interface for package managers
 #[async_trait]
@@ -17,6 +27,13 @@ pub trait PackageManager: Send + Sync + std::fmt::Debug {
     fn is_available(&self) -> bool;
 
     /// Install a package using this package manager
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The package manager command fails to execute
+    /// - The installation returns a non-zero exit code
+    /// - sudo privileges are required but not available
     async fn install(&self, package: &str) -> Result<()>;
 
     /// Get the priority of this package manager (higher = preferred)
@@ -39,16 +56,25 @@ impl PackageManager for AptPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo(
+        let output = CommandExecutor::execute_sudo(
             "apt-get",
             &["install".to_string(), "-y".to_string(), package.to_string()],
         )
         .await?;
+
+        if !output.is_success() {
+            anyhow::bail!(
+                "Package installation failed (exit code {}): {}",
+                output.exit_code,
+                output.stderr.trim()
+            );
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u8 {
-        80 // High priority on Debian/Ubuntu systems
+        PRIORITY_MEDIUM // Standard priority on Debian/Ubuntu systems
     }
 }
 
@@ -67,16 +93,25 @@ impl PackageManager for YumPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo(
+        let output = CommandExecutor::execute_sudo(
             "yum",
             &["install".to_string(), "-y".to_string(), package.to_string()],
         )
         .await?;
+
+        if !output.is_success() {
+            anyhow::bail!(
+                "Package installation failed (exit code {}): {}",
+                output.exit_code,
+                output.stderr.trim()
+            );
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u8 {
-        80
+        PRIORITY_MEDIUM
     }
 }
 
@@ -95,16 +130,25 @@ impl PackageManager for DnfPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo(
+        let output = CommandExecutor::execute_sudo(
             "dnf",
             &["install".to_string(), "-y".to_string(), package.to_string()],
         )
         .await?;
+
+        if !output.is_success() {
+            anyhow::bail!(
+                "Package installation failed (exit code {}): {}",
+                output.exit_code,
+                output.stderr.trim()
+            );
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u8 {
-        85 // Prefer DNF over YUM on Fedora
+        PRIORITY_HIGH // Prefer DNF over YUM on Fedora
     }
 }
 
@@ -123,7 +167,7 @@ impl PackageManager for PacmanPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo(
+        let output = CommandExecutor::execute_sudo(
             "pacman",
             &[
                 "-S".to_string(),
@@ -132,11 +176,20 @@ impl PackageManager for PacmanPackageManager {
             ],
         )
         .await?;
+
+        if !output.is_success() {
+            anyhow::bail!(
+                "Package installation failed (exit code {}): {}",
+                output.exit_code,
+                output.stderr.trim()
+            );
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u8 {
-        80
+        PRIORITY_MEDIUM
     }
 }
 
@@ -155,12 +208,22 @@ impl PackageManager for BrewPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        CommandExecutor::execute("brew", &["install".to_string(), package.to_string()]).await?;
+        let output =
+            CommandExecutor::execute("brew", &["install".to_string(), package.to_string()]).await?;
+
+        if !output.is_success() {
+            anyhow::bail!(
+                "Package installation failed (exit code {}): {}",
+                output.exit_code,
+                output.stderr.trim()
+            );
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u8 {
-        90 // High priority on macOS
+        PRIORITY_VERY_HIGH // Highest priority on macOS
     }
 }
 
@@ -179,16 +242,25 @@ impl PackageManager for ChocoPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        CommandExecutor::execute(
+        let output = CommandExecutor::execute(
             "choco",
             &["install".to_string(), "-y".to_string(), package.to_string()],
         )
         .await?;
+
+        if !output.is_success() {
+            anyhow::bail!(
+                "Package installation failed (exit code {}): {}",
+                output.exit_code,
+                output.stderr.trim()
+            );
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u8 {
-        70
+        PRIORITY_LOW
     }
 }
 
@@ -207,12 +279,23 @@ impl PackageManager for WingetPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        CommandExecutor::execute("winget", &["install".to_string(), package.to_string()]).await?;
+        let output =
+            CommandExecutor::execute("winget", &["install".to_string(), package.to_string()])
+                .await?;
+
+        if !output.is_success() {
+            anyhow::bail!(
+                "Package installation failed (exit code {}): {}",
+                output.exit_code,
+                output.stderr.trim()
+            );
+        }
+
         Ok(())
     }
 
     fn priority(&self) -> u8 {
-        80 // Prefer winget over choco on modern Windows
+        PRIORITY_MEDIUM // Prefer winget over choco on modern Windows
     }
 }
 

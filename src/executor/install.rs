@@ -42,6 +42,12 @@ impl PackageInstaller {
     }
 
     /// Install a package using the best available package manager
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No package manager is available on the system
+    /// - The selected package manager fails to install the package
     pub async fn install_package(&self, package: &str) -> Result<()> {
         let manager = self.select_package_manager()?;
         manager.install(package).await

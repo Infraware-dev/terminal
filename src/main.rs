@@ -173,7 +173,7 @@ impl InfrawareTerminal {
                 .colorize("╔══════════════════════════════════════════════════════════════╗"),
         );
         self.state.add_output(
-            AnsiColor::Cyan.colorize("║   Infraware Terminal - AI-Assisted DevOps Shell         ║"),
+            AnsiColor::Cyan.colorize("║   Infraware Terminal - AI-Assisted DevOps Shell      ║"),
         );
         self.state.add_output(
             AnsiColor::Cyan

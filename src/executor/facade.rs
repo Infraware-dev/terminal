@@ -1,7 +1,11 @@
-/// Command Execution Facade Pattern
-///
-/// This module provides a simplified, high-level interface for command execution
-/// that handles all the complexity of checking existence, executing, and handling errors.
+//! Command Execution Facade Pattern
+//!
+//! This module provides a simplified, high-level interface for command execution
+//! that handles all the complexity of checking existence, executing, and handling errors.
+//!
+//! TODO: Remove #![allow(dead_code)] once integrated into main terminal flow
+#![allow(dead_code)]
+
 use anyhow::Result;
 
 use super::command::{CommandExecutor, CommandOutput};
@@ -24,11 +28,13 @@ pub enum ExecutionResult {
 
 impl ExecutionResult {
     /// Check if the execution was successful
+    #[must_use]
     pub fn is_success(&self) -> bool {
         matches!(self, ExecutionResult::Success(_))
     }
 
     /// Get the command output if successful
+    #[must_use]
     pub fn output(&self) -> Option<&CommandOutput> {
         match self {
             ExecutionResult::Success(output) => Some(output),
@@ -37,6 +43,7 @@ impl ExecutionResult {
     }
 
     /// Get the error message if failed
+    #[must_use]
     pub fn error_message(&self) -> Option<String> {
         match self {
             ExecutionResult::CommandNotFound {
@@ -86,6 +93,13 @@ impl CommandExecutionFacade {
     /// 2. Execute if found
     /// 3. Provide installation suggestions if not found
     /// 4. Handle execution errors gracefully
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the command execution system fails internally.
+    /// Command-level failures are captured in `ExecutionResult` variants:
+    /// - `ExecutionResult::CommandNotFound` - command not in PATH
+    /// - `ExecutionResult::ExecutionError` - command failed during execution
     pub async fn execute_with_fallback(
         &self,
         cmd: &str,
@@ -114,6 +128,12 @@ impl CommandExecutionFacade {
     ///
     /// This method will attempt to install the command if it's not found
     /// and the user confirms the installation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The command execution system fails internally
+    /// - Package installation fails (captured in `ExecutionResult::ExecutionError`)
     pub async fn execute_or_install(
         &self,
         cmd: &str,
@@ -144,16 +164,19 @@ impl CommandExecutionFacade {
     }
 
     /// Check if a command is available for execution
+    #[must_use]
     pub fn is_command_available(&self, cmd: &str) -> bool {
         CommandExecutor::command_exists(cmd)
     }
 
     /// Check if package installation is available
+    #[must_use]
     pub fn can_install_packages(&self) -> bool {
         self.installer.is_available()
     }
 
     /// Get the available package manager name
+    #[must_use]
     pub fn get_package_manager(&self) -> Option<&str> {
         self.installer.get_package_manager()
     }
