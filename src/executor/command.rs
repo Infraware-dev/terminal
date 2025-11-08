@@ -5,7 +5,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
 
 /// Output from a command execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,

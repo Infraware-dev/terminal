@@ -305,7 +305,7 @@ impl InfrawareTerminal {
             self.state
                 .add_output(MessageFormatter::command_not_found(cmd));
             self.state.add_output(MessageFormatter::install_suggestion(
-                PackageInstaller::is_available(),
+                PackageInstaller::is_available_static(),
             ));
             return Ok(());
         }
