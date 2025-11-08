@@ -15,7 +15,6 @@ use ratatui::{
 use std::io;
 
 use super::state::{TerminalMode, TerminalState};
-use crate::utils::ansi::strip_ansi_codes;
 
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
@@ -110,9 +109,16 @@ fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
         state.output.lines()[start..]
             .iter()
             .map(|line| {
-                // Strip ANSI codes since ratatui doesn't interpret them
-                let clean_line = strip_ansi_codes(line);
-                Line::from(clean_line)
+                // Parse ANSI codes and convert to ratatui spans with proper styling
+                use ansi_to_tui::IntoText;
+                match line.into_text() {
+                    Ok(text) => text
+                        .lines
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| Line::from(line.clone())),
+                    Err(_) => Line::from(line.clone()),
+                }
             })
             .collect()
     };

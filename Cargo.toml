@@ -23,6 +23,7 @@ serde_json = "1.0"
 
 # Syntax highlighting
 syntect = "5.2"
+ansi-to-tui = "7.0"
 
 # Error handling
 anyhow = "1.0"

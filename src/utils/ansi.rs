@@ -99,9 +99,12 @@ impl AnsiStyle {
 }
 
 /// Lazy-initialized regex for stripping ANSI codes
+#[allow(dead_code)]
 static ANSI_REGEX: OnceLock<regex::Regex> = OnceLock::new();
 
 /// Strip ANSI codes from a string
+/// Kept for tests and potential future use (logging, export, etc.)
+#[allow(dead_code)]
 pub fn strip_ansi_codes(text: &str) -> String {
     let re = ANSI_REGEX
         .get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;]*m").expect("Invalid ANSI regex pattern"));
