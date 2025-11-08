@@ -53,6 +53,14 @@ async fn test_llm_response_rendering() {
     let rendered = renderer.render(&response);
 
     assert!(!rendered.is_empty());
+
+    // Print to verify colors (for manual inspection)
+    println!("\n=== RAW RESPONSE ===");
+    println!("{}", response);
+    println!("\n=== RENDERED WITH ANSI COLORS ===");
+    for line in &rendered {
+        println!("{}", line);
+    }
 }
 
 #[test]
