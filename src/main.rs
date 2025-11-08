@@ -1,6 +1,7 @@
 mod executor;
 mod input;
 mod llm;
+mod orchestrators;
 /// Infraware Terminal - Hybrid Command Interpreter with AI Assistance
 ///
 /// This is a TUI-based terminal that accepts user input and intelligently
@@ -15,22 +16,34 @@ mod utils;
 use anyhow::Result;
 use std::time::Duration;
 
-use executor::{CommandExecutor, PackageInstaller, TabCompletion};
 use input::{InputClassifier, InputType};
 use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
+use orchestrators::{CommandOrchestrator, NaturalLanguageOrchestrator, TabCompletionHandler};
 use std::sync::Arc;
 use terminal::events::TerminalEvent;
 use terminal::{EventHandler, TerminalMode, TerminalState, TerminalUI};
 use utils::MessageFormatter;
 
 /// Main application structure
+///
+/// Following Single Responsibility Principle (SRP), this struct now delegates
+/// specific workflows to specialized orchestrators:
+/// - CommandOrchestrator: Handles command execution workflow
+/// - NaturalLanguageOrchestrator: Handles LLM query workflow
+/// - TabCompletionHandler: Handles tab completion workflow
+///
+/// InfrawareTerminal's single responsibility is to:
+/// - Manage the event loop
+/// - Route events to appropriate handlers
+/// - Coordinate between UI, state, and orchestrators
 pub struct InfrawareTerminal {
     ui: TerminalUI,
     state: TerminalState,
     classifier: InputClassifier,
     event_handler: EventHandler,
-    llm_client: Arc<dyn LLMClientTrait>,
-    renderer: ResponseRenderer,
+    command_orchestrator: CommandOrchestrator,
+    nl_orchestrator: NaturalLanguageOrchestrator,
+    tab_completion_handler: TabCompletionHandler,
 }
 
 /// Builder for InfrawareTerminal
@@ -50,7 +63,7 @@ pub struct InfrawareTerminal {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct InfrawareTerminalBuilder {
     ui: Option<TerminalUI>,
     state: Option<TerminalState>,
@@ -58,6 +71,26 @@ pub struct InfrawareTerminalBuilder {
     event_handler: Option<EventHandler>,
     llm_client: Option<Arc<dyn LLMClientTrait>>,
     renderer: Option<ResponseRenderer>,
+    command_orchestrator: Option<CommandOrchestrator>,
+    tab_completion_handler: Option<TabCompletionHandler>,
+}
+
+impl std::fmt::Debug for InfrawareTerminalBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InfrawareTerminalBuilder")
+            .field("ui", &self.ui.is_some())
+            .field("state", &self.state.is_some())
+            .field("classifier", &self.classifier.is_some())
+            .field("event_handler", &self.event_handler.is_some())
+            .field("llm_client", &self.llm_client.is_some())
+            .field("renderer", &self.renderer.is_some())
+            .field("command_orchestrator", &self.command_orchestrator.is_some())
+            .field(
+                "tab_completion_handler",
+                &self.tab_completion_handler.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl InfrawareTerminalBuilder {
@@ -70,6 +103,8 @@ impl InfrawareTerminalBuilder {
             event_handler: None,
             llm_client: None,
             renderer: None,
+            command_orchestrator: None,
+            tab_completion_handler: None,
         }
     }
 
@@ -118,12 +153,18 @@ impl InfrawareTerminalBuilder {
     /// - EventHandler: Default EventHandler
     /// - LLM Client: MockLLMClient (for development/testing)
     /// - Renderer: Default ResponseRenderer with syntax highlighting
+    /// - Orchestrators: Default instances
     ///
     /// # Errors
     ///
     /// Returns an error if TerminalUI initialization fails. This can occur when
     /// the terminal backend cannot be initialized or when entering raw mode fails.
     pub fn build(self) -> Result<InfrawareTerminal> {
+        let llm_client = self
+            .llm_client
+            .unwrap_or_else(|| Arc::new(MockLLMClient::new()));
+        let renderer = self.renderer.unwrap_or_default();
+
         Ok(InfrawareTerminal {
             ui: match self.ui {
                 Some(ui) => ui,
@@ -132,10 +173,9 @@ impl InfrawareTerminalBuilder {
             state: self.state.unwrap_or_default(),
             classifier: self.classifier.unwrap_or_default(),
             event_handler: self.event_handler.unwrap_or_default(),
-            llm_client: self
-                .llm_client
-                .unwrap_or_else(|| Arc::new(MockLLMClient::new())),
-            renderer: self.renderer.unwrap_or_default(),
+            command_orchestrator: self.command_orchestrator.unwrap_or_default(),
+            nl_orchestrator: NaturalLanguageOrchestrator::new(llm_client, renderer),
+            tab_completion_handler: self.tab_completion_handler.unwrap_or_default(),
         })
     }
 }
@@ -172,7 +212,7 @@ impl InfrawareTerminal {
             "╔══════════════════════════════════════════════════════════════╗",
         ));
         self.state.add_output(MessageFormatter::banner_line(
-            "║   Infraware Terminal - AI-Assisted DevOps Shell/cleasd      ║",
+            "║   Infraware Terminal - AI-Assisted DevOps Shell/cleasd       ║",
         ));
         self.state.add_output(MessageFormatter::banner_line(
             "╚══════════════════════════════════════════════════════════════╝",
@@ -282,125 +322,33 @@ impl InfrawareTerminal {
     }
 
     /// Handle command execution
+    ///
+    /// Delegates to CommandOrchestrator (SRP compliance)
     async fn handle_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
         self.state.mode = TerminalMode::ExecutingCommand;
 
-        // Handle special built-in commands that would interfere with TUI
-        if cmd == "clear" {
-            // Clear the output buffer instead of executing the system clear command
-            self.state.output_buffer.clear();
-            self.state.scroll_position = 0;
-            // Force a complete terminal clear to prevent spurious characters
-            self.ui.clear()?;
-            return Ok(());
-        }
-
-        // Check if command exists
-        if !CommandExecutor::command_exists(cmd) {
-            self.state
-                .add_output(MessageFormatter::command_not_found(cmd));
-            self.state.add_output(MessageFormatter::install_suggestion(
-                PackageInstaller::is_available_static(),
-            ));
-            return Ok(());
-        }
-
-        // Execute the command
-        match CommandExecutor::execute(cmd, args).await {
-            Ok(output) => {
-                // Show stdout as-is
-                if !output.stdout.is_empty() {
-                    for line in output.stdout.lines() {
-                        self.state.add_output(line.to_string());
-                    }
-                }
-
-                // Show stderr - only colorize red if command failed
-                if !output.stderr.is_empty() {
-                    for line in output.stderr.lines() {
-                        if output.is_success() {
-                            // Command succeeded, stderr is just informational
-                            self.state.add_output(line.to_string());
-                        } else {
-                            // Command failed, highlight stderr in red
-                            self.state.add_output(MessageFormatter::stderr_error(line));
-                        }
-                    }
-                }
-
-                if !output.is_success() {
-                    self.state
-                        .add_output(MessageFormatter::command_failed(output.exit_code));
-                }
-            }
-            Err(e) => {
-                self.state
-                    .add_output(MessageFormatter::execution_error(e.to_string()));
-            }
-        }
-
-        Ok(())
+        self.command_orchestrator
+            .handle_command(cmd, args, &mut self.state, &mut self.ui)
+            .await
     }
 
     /// Handle natural language query
+    ///
+    /// Delegates to NaturalLanguageOrchestrator (SRP compliance)
     async fn handle_natural_language(&mut self, query: &str) -> Result<()> {
         self.state.mode = TerminalMode::WaitingLLM;
-        self.state
-            .add_output(MessageFormatter::info("Querying AI assistant..."));
 
-        // Render to show "waiting" state
-        self.ui.render(&self.state)?;
-
-        // Query the LLM (using mock for now)
-        match self.llm_client.query(query).await {
-            Ok(response) => {
-                // Remove the "Querying..." message
-                self.state.output_buffer.pop();
-
-                // Render the response with formatting
-                let formatted_lines = self.renderer.render(&response);
-                self.state.add_output_lines(formatted_lines);
-            }
-            Err(e) => {
-                self.state.output_buffer.pop();
-                self.state.add_output(MessageFormatter::error(format!(
-                    "Error querying LLM: {}",
-                    e
-                )));
-            }
-        }
-
-        Ok(())
+        self.nl_orchestrator
+            .handle_query(query, &mut self.state, &mut self.ui)
+            .await
     }
 
     /// Handle tab completion
+    ///
+    /// Delegates to TabCompletionHandler (SRP compliance)
     fn handle_tab_completion(&mut self) {
-        let input = self.state.input_buffer.clone();
-        let completions = TabCompletion::get_completions(&input);
-
-        if completions.is_empty() {
-            return;
-        }
-
-        if completions.len() == 1 {
-            // Single completion - auto-complete
-            self.state.input_buffer = completions[0].clone();
-            self.state.cursor_position = self.state.input_buffer.len();
-        } else {
-            // Multiple completions - show them
-            self.state
-                .add_output(MessageFormatter::info("Possible completions:"));
-            for completion in &completions {
-                self.state.add_output(format!("  {}", completion));
-            }
-
-            // Auto-complete to common prefix
-            let common_prefix = TabCompletion::get_common_prefix(&completions);
-            if common_prefix.len() > input.len() {
-                self.state.input_buffer = common_prefix;
-                self.state.cursor_position = self.state.input_buffer.len();
-            }
-        }
+        self.tab_completion_handler
+            .handle_tab_completion(&mut self.state);
     }
 }
 
