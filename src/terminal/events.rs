@@ -4,6 +4,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::time::Duration;
 
 /// Event handler for terminal input
+#[derive(Debug)]
 pub struct EventHandler {
     // Configuration can be added here later
 }

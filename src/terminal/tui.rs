@@ -22,6 +22,14 @@ pub struct TerminalUI {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
 }
 
+impl std::fmt::Debug for TerminalUI {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalUI")
+            .field("terminal", &"<Terminal>")
+            .finish()
+    }
+}
+
 impl TerminalUI {
     /// Create a new TUI instance
     pub fn new() -> Result<Self> {

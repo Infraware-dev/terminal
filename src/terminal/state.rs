@@ -15,6 +15,7 @@ pub enum TerminalMode {
 }
 
 /// Main terminal state structure
+#[derive(Debug)]
 pub struct TerminalState {
     /// Command/LLM output history
     pub output_buffer: Vec<String>,

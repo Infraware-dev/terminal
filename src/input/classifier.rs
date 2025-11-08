@@ -32,6 +32,14 @@ pub struct InputClassifier {
     chain: ClassifierChain,
 }
 
+impl std::fmt::Debug for InputClassifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputClassifier")
+            .field("chain", &"<ClassifierChain>")
+            .finish()
+    }
+}
+
 impl InputClassifier {
     /// Create a new input classifier with default chain
     pub fn new() -> Self {

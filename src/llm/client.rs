@@ -26,7 +26,7 @@ pub struct LLMResponse {
 /// This trait allows different LLM backends (mock, HTTP, OpenAI, etc.)
 /// to be used interchangeably via dependency injection
 #[async_trait]
-pub trait LLMClientTrait: Send + Sync {
+pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     /// Query the LLM with natural language input
     async fn query(&self, text: &str) -> Result<String>;
 
@@ -53,6 +53,15 @@ pub trait LLMClientTrait: Send + Sync {
 pub struct HttpLLMClient {
     base_url: String,
     client: reqwest::Client,
+}
+
+impl std::fmt::Debug for HttpLLMClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpLLMClient")
+            .field("base_url", &self.base_url)
+            .field("client", &"<reqwest::Client>")
+            .finish()
+    }
 }
 
 impl HttpLLMClient {
@@ -110,7 +119,7 @@ impl LLMClientTrait for HttpLLMClient {
 }
 
 /// Mock LLM client for testing and development
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MockLLMClient;
 
 impl MockLLMClient {

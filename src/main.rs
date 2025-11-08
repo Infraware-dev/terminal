@@ -50,6 +50,7 @@ pub struct InfrawareTerminal {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Debug, Default)]
 pub struct InfrawareTerminalBuilder {
     ui: Option<TerminalUI>,
     state: Option<TerminalState>,
@@ -117,6 +118,11 @@ impl InfrawareTerminalBuilder {
     /// - EventHandler: Default EventHandler
     /// - LLM Client: MockLLMClient (for development/testing)
     /// - Renderer: Default ResponseRenderer with syntax highlighting
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TerminalUI initialization fails. This can occur when
+    /// the terminal backend cannot be initialized or when entering raw mode fails.
     pub fn build(self) -> Result<InfrawareTerminal> {
         Ok(InfrawareTerminal {
             ui: match self.ui {
@@ -131,12 +137,6 @@ impl InfrawareTerminalBuilder {
                 .unwrap_or_else(|| Arc::new(MockLLMClient::new())),
             renderer: self.renderer.unwrap_or_default(),
         })
-    }
-}
-
-impl Default for InfrawareTerminalBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

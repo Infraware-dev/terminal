@@ -10,6 +10,15 @@ pub struct ResponseRenderer {
     theme_set: ThemeSet,
 }
 
+impl std::fmt::Debug for ResponseRenderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseRenderer")
+            .field("syntax_set", &"<SyntaxSet>")
+            .field("theme_set", &"<ThemeSet>")
+            .finish()
+    }
+}
+
 impl ResponseRenderer {
     /// Create a new response renderer
     pub fn new() -> Self {
