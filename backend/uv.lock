@@ -12,6 +12,7 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "langgraph" },
+    { name = "langgraph-supervisor" },
     { name = "python-dotenv" },
 ]
 
@@ -33,6 +34,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "langgraph", specifier = ">=1.0.0" },
+    { name = "langgraph-supervisor", specifier = ">=0.0.30" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.1" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.1" },
@@ -346,7 +348,7 @@ name = "exceptiongroup"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0b/9f/a65090624ecf468cdca03533906e7c69ed7588582240cfe7cc9e770b50eb/exceptiongroup-1.3.0.tar.gz", hash = "sha256:b241f5885f560bc56a59ee63ca4c6a8bfa46ae4ad651af316d4e81817bb9fd88", size = 29749, upload-time = "2025-05-10T17:42:51.123Z" }
 wheels = [
@@ -764,6 +766,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/23/d8/40e01190a73c564a4744e29a6c902f78d34d43dad9b652a363a92a67059c/langgraph_sdk-0.2.9.tar.gz", hash = "sha256:b3bd04c6be4fa382996cd2be8fbc1e7cc94857d2bc6b6f4599a7f2a245975303", size = 99802, upload-time = "2025-09-20T18:49:14.734Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/66/05/b2d34e16638241e6f27a6946d28160d4b8b641383787646d41a3727e0896/langgraph_sdk-0.2.9-py3-none-any.whl", hash = "sha256:fbf302edadbf0fb343596f91c597794e936ef68eebc0d3e1d358b6f9f72a1429", size = 56752, upload-time = "2025-09-20T18:49:13.346Z" },
+]
+
+[[package]]
+name = "langgraph-supervisor"
+version = "0.0.30"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "langchain-core" },
+    { name = "langgraph" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/af/f51cb47bac3e19e67221c07e80434a93e6d6ed8a00f48a6ad67ef836e4f7/langgraph_supervisor-0.0.30.tar.gz", hash = "sha256:29236297a8d34aafac095d6606c055718d1bc48c39a1eb1fbf22cbc58fbdbcd0", size = 21697, upload-time = "2025-10-22T14:43:53.529Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/71/1322d118893cdbd83054b4507d368536318891118064279f1f6c18929d19/langgraph_supervisor-0.0.30-py3-none-any.whl", hash = "sha256:510ace6a2a35d4c45fbe7b4482e0092f654e6a5220d4fb76d5843a192a2eaa59", size = 16375, upload-time = "2025-10-22T14:43:52.243Z" },
 ]
 
 [[package]]
