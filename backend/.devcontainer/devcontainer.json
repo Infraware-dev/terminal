@@ -12,7 +12,7 @@
 	// "forwardPorts": [],
 
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "pip3 install uv && uv sync && pip3 install langgraph-cli && pip install -U 'langgraph-cli[inmem]'"
+	"postCreateCommand": "pip3 install uv && uv sync && pip3 install langgraph-cli && pip install -U 'langgraph-cli[inmem]' && pip install -e . "
 
 	// Configure tool-specific properties.
 	// "customizations": {},
