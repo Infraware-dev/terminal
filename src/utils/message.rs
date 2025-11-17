@@ -136,4 +136,116 @@ mod tests {
         assert!(msg.contains("Test"));
         assert!(msg.contains("⚠"));
     }
+
+    #[test]
+    fn test_warning_message() {
+        let msg = MessageFormatter::warning("Be careful");
+        assert!(msg.contains("Be careful"));
+        assert!(msg.contains("⚠"));
+    }
+
+    #[test]
+    fn test_info_message() {
+        let msg = MessageFormatter::info("Information");
+        assert!(msg.contains("Information"));
+        assert!(msg.contains("ℹ"));
+    }
+
+    #[test]
+    fn test_command_message() {
+        let msg = MessageFormatter::command("ls -la");
+        assert!(msg.contains("ls -la"));
+        assert!(msg.contains("❯"));
+    }
+
+    #[test]
+    fn test_question_message() {
+        let msg = MessageFormatter::question("Continue?");
+        assert!(msg.contains("Continue?"));
+        assert!(msg.contains("?"));
+    }
+
+    #[test]
+    fn test_suggestion_message() {
+        let msg = MessageFormatter::suggestion("Try this");
+        assert!(msg.contains("Try this"));
+        assert!(msg.contains("→"));
+    }
+
+    #[test]
+    fn test_command_failed() {
+        let msg = MessageFormatter::command_failed(127);
+        assert!(msg.contains("127"));
+        assert!(msg.contains("exited"));
+    }
+
+    #[test]
+    fn test_execution_error() {
+        let msg = MessageFormatter::execution_error("Permission denied");
+        assert!(msg.contains("Permission denied"));
+        assert!(msg.contains("Error executing"));
+    }
+
+    #[test]
+    fn test_install_suggestion_available() {
+        let msg = MessageFormatter::install_suggestion(true);
+        assert!(msg.contains("install"));
+    }
+
+    #[test]
+    fn test_install_suggestion_unavailable() {
+        let msg = MessageFormatter::install_suggestion(false);
+        assert!(msg.contains("Package manager"));
+        assert!(msg.contains("not available"));
+    }
+
+    #[test]
+    fn test_banner_line() {
+        let msg = MessageFormatter::banner_line("Welcome");
+        assert!(msg.contains("Welcome"));
+    }
+
+    #[test]
+    fn test_banner_hint() {
+        let msg = MessageFormatter::banner_hint("Press Ctrl+C to quit");
+        assert!(msg.contains("Press Ctrl+C"));
+    }
+
+    #[test]
+    fn test_stderr_error() {
+        let msg = MessageFormatter::stderr_error("Error line");
+        assert!(msg.contains("Error line"));
+    }
+
+    #[test]
+    fn test_format_all_types() {
+        let types = vec![
+            (MessageType::Error, "✗"),
+            (MessageType::Warning, "⚠"),
+            (MessageType::Success, "✓"),
+            (MessageType::Info, "ℹ"),
+            (MessageType::Command, "❯"),
+            (MessageType::Question, "?"),
+        ];
+
+        for (msg_type, symbol) in types {
+            let msg = MessageFormatter::format(msg_type, "test");
+            assert!(msg.contains("test"));
+            assert!(msg.contains(symbol));
+        }
+    }
+
+    #[test]
+    fn test_message_type_debug() {
+        let debug_str = format!("{:?}", MessageType::Error);
+        assert_eq!(debug_str, "Error");
+    }
+
+    #[test]
+    fn test_as_ref_str_compatibility() {
+        // Test that methods work with both &str and String
+        let _ = MessageFormatter::error("string literal");
+        let _ = MessageFormatter::error(String::from("owned string"));
+        let _ = MessageFormatter::warning(&"reference".to_string());
+    }
 }

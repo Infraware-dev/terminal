@@ -134,4 +134,88 @@ mod tests {
         let infra_err: InfraError = io_err.into();
         assert!(matches!(infra_err, InfraError::Io(_)));
     }
+
+    #[test]
+    fn test_llm_request_error() {
+        let err = InfraError::llm_request("API timeout");
+        assert_eq!(err.to_string(), "LLM request failed: API timeout");
+        assert!(err.message().contains("API timeout"));
+    }
+
+    #[test]
+    fn test_parse_error() {
+        let err = InfraError::parse("Invalid syntax");
+        assert_eq!(err.to_string(), "Parse error: Invalid syntax");
+    }
+
+    #[test]
+    fn test_terminal_ui_error() {
+        let err = InfraError::terminal_ui("Render failed");
+        assert_eq!(err.to_string(), "Terminal UI error: Render failed");
+    }
+
+    #[test]
+    fn test_package_install_error() {
+        let err = InfraError::package_install("apt-get failed");
+        assert_eq!(err.to_string(), "Package installation failed: apt-get failed");
+    }
+
+    #[test]
+    fn test_config_error() {
+        let err = InfraError::config("Invalid config file");
+        assert_eq!(err.to_string(), "Configuration error: Invalid config file");
+    }
+
+    #[test]
+    fn test_generic_error() {
+        let err = InfraError::generic("Something went wrong");
+        assert_eq!(err.to_string(), "Error: Something went wrong");
+    }
+
+    #[test]
+    fn test_no_package_manager() {
+        let err = InfraError::NoPackageManager;
+        assert_eq!(err.to_string(), "No supported package manager found on this system");
+    }
+
+    #[test]
+    fn test_is_command_not_found_negative() {
+        let err = InfraError::command_execution("test");
+        assert!(!err.is_command_not_found());
+    }
+
+    #[test]
+    fn test_message_method() {
+        let err = InfraError::CommandNotFound("kubectl".to_string());
+        let msg = err.message();
+        assert!(msg.contains("kubectl"));
+        assert!(msg.contains("not found"));
+    }
+
+    #[test]
+    fn test_from_anyhow_error() {
+        let anyhow_err = anyhow::anyhow!("test error");
+        let infra_err: InfraError = anyhow_err.into();
+        assert!(matches!(infra_err, InfraError::Other(_)));
+    }
+
+    #[test]
+    fn test_all_error_constructors() {
+        // Test that all constructor methods work
+        let _ = InfraError::command_execution("test");
+        let _ = InfraError::command_not_found("test");
+        let _ = InfraError::llm_request("test");
+        let _ = InfraError::parse("test");
+        let _ = InfraError::terminal_ui("test");
+        let _ = InfraError::package_install("test");
+        let _ = InfraError::config("test");
+        let _ = InfraError::generic("test");
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = InfraError::CommandNotFound("test".to_string());
+        let debug_str = format!("{:?}", err);
+        assert!(debug_str.contains("CommandNotFound"));
+    }
 }

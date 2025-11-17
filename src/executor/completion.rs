@@ -156,6 +156,79 @@ mod tests {
     }
 
     #[test]
+    fn test_complete_command_no_match() {
+        let completions = TabCompletion::complete_command("zzz_nonexistent_cmd");
+        // Should be empty for non-existent commands
+        assert!(completions.is_empty() || completions.iter().all(|c| c.starts_with("zzz_nonexistent_cmd")));
+    }
+
+    #[test]
+    fn test_complete_command_deduplication() {
+        // Commands should be deduplicated
+        let completions = TabCompletion::complete_command("l");
+        let unique_count = completions.len();
+        let mut sorted = completions.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(unique_count, sorted.len());
+    }
+
+    #[test]
+    fn test_get_completions_command() {
+        // No space means command completion
+        let completions = TabCompletion::get_completions("ec");
+        assert!(!completions.is_empty());
+    }
+
+    #[test]
+    fn test_get_completions_file_path() {
+        // With space means file path completion
+        let _completions = TabCompletion::get_completions("ls /tmp/");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_complete_file_path_basic() {
+        // Basic test to ensure file path completion doesn't panic
+        let _completions = TabCompletion::complete_file_path("cat ");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_complete_file_path_with_slash() {
+        // Test that paths with slashes are handled
+        let _completions = TabCompletion::complete_file_path("cat /etc/host");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_complete_file_path_rsplitn() {
+        // Test the rsplitn logic with multiple spaces
+        let _completions = TabCompletion::complete_file_path("cat -n file.txt");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_complete_file_path_empty_partial() {
+        let _completions = TabCompletion::complete_file_path("");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_complete_file_path_single_word() {
+        // Test completion with single word (no space)
+        let _completions = TabCompletion::complete_file_path("file");
+        // Should not panic
+    }
+
+    #[test]
+    fn test_complete_file_path_dot_prefix() {
+        // Test completion with dot directory
+        let _completions = TabCompletion::complete_file_path("cat ./");
+        // Should not panic
+    }
+
+    #[test]
     fn test_get_common_prefix() {
         let completions = vec![
             "hello.txt".to_string(),
@@ -178,5 +251,26 @@ mod tests {
         let completions: Vec<String> = vec![];
         let prefix = TabCompletion::get_common_prefix(&completions);
         assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_get_common_prefix_no_common() {
+        let completions = vec![
+            "abc.txt".to_string(),
+            "xyz.md".to_string(),
+            "123.rs".to_string(),
+        ];
+        let prefix = TabCompletion::get_common_prefix(&completions);
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn test_get_common_prefix_partial_match() {
+        let completions = vec![
+            "testing.txt".to_string(),
+            "test.md".to_string(),
+        ];
+        let prefix = TabCompletion::get_common_prefix(&completions);
+        assert_eq!(prefix, "test");
     }
 }

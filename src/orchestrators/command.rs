@@ -146,4 +146,106 @@ mod tests {
             .iter()
             .any(|line| line.contains("hello")));
     }
+
+    #[tokio::test]
+    async fn test_execute_command_with_failure() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Execute command that fails
+        orchestrator
+            .execute_and_display("sh", &["-c".to_string(), "exit 1".to_string()], &mut state)
+            .await
+            .unwrap();
+
+        // Should have error message about exit code
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("exited")));
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_with_stderr_success() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Command succeeds but outputs to stderr
+        orchestrator
+            .execute_and_display("sh", &["-c".to_string(), "echo warning >&2".to_string()], &mut state)
+            .await
+            .unwrap();
+
+        // Should have stderr output (not colorized since command succeeded)
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("warning")));
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_with_stderr_failure() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Command fails and outputs to stderr
+        orchestrator
+            .execute_and_display("sh", &["-c".to_string(), "echo error >&2; exit 1".to_string()], &mut state)
+            .await
+            .unwrap();
+
+        // Should have stderr output (colorized since command failed)
+        let output_str = state.output.lines().join("\n");
+        assert!(output_str.contains("error"));
+    }
+
+    #[test]
+    fn test_orchestrator_default() {
+        let _ = CommandOrchestrator::default();
+    }
+
+    #[test]
+    fn test_orchestrator_debug() {
+        let orchestrator = CommandOrchestrator::new();
+        let debug_str = format!("{:?}", orchestrator);
+        assert!(debug_str.contains("CommandOrchestrator"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_nonexistent_command() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Try to execute using execute_and_display on nonexistent command
+        // This would fail before reaching execute_and_display in real flow,
+        // but we test the executor's error handling
+        let result = orchestrator
+            .execute_and_display("nonexistentcmd123", &[], &mut state)
+            .await;
+
+        // Should complete successfully (error is captured in state)
+        assert!(result.is_ok());
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Error executing")));
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_empty_output() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Execute command with no output
+        orchestrator
+            .execute_and_display("true", &[], &mut state)
+            .await
+            .unwrap();
+
+        // true command produces no output, state might be empty or have minimal output
+        // Just verify it doesn't panic
+    }
 }

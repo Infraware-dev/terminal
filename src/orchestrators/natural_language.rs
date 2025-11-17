@@ -131,4 +131,87 @@ mod tests {
         assert!(state.output.lines()[0].contains("Error querying LLM"));
         assert!(state.output.lines()[0].contains("Test error"));
     }
+
+    #[test]
+    fn test_orchestrator_new() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let _ = NaturalLanguageOrchestrator::new(llm_client, renderer);
+    }
+
+    #[test]
+    fn test_orchestrator_debug() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+        let debug_str = format!("{:?}", orchestrator);
+        assert!(debug_str.contains("NaturalLanguageOrchestrator"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_success_with_markdown() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+
+        // Test with markdown response
+        orchestrator.handle_success("**Bold** text".to_string(), &mut state);
+
+        assert!(!state.output.lines().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_success_removes_waiting_message() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+        state.add_output("Querying AI assistant...".to_string());
+
+        orchestrator.handle_success("Response".to_string(), &mut state);
+
+        // The "Querying..." message should be removed
+        assert!(!state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Querying AI assistant")));
+    }
+
+    #[tokio::test]
+    async fn test_handle_error_removes_waiting_message() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+        state.add_output("Querying AI assistant...".to_string());
+
+        let error = anyhow::anyhow!("Network error");
+        orchestrator.handle_error(error, &mut state);
+
+        // The "Querying..." message should be removed
+        assert!(!state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Querying AI assistant") && !line.contains("Error")));
+    }
+
+    #[tokio::test]
+    async fn test_handle_success_with_multiline_response() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+
+        orchestrator.handle_success("Line 1\nLine 2\nLine 3".to_string(), &mut state);
+
+        // Should have multiple lines of output
+        assert!(state.output.lines().len() >= 3);
+    }
 }

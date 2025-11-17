@@ -169,6 +169,59 @@ impl LLMClientTrait for MockLLMClient {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_llm_client_new() {
+        let client = HttpLLMClient::new("http://localhost:8080".to_string());
+        assert_eq!(client.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_llm_client_with_timeout() {
+        let client = HttpLLMClient::with_timeout("http://localhost:8080".to_string(), 30);
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        assert_eq!(client.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_llm_request_serialization() {
+        let request = LLMRequest {
+            query: "test query".to_string(),
+            context: Some("test context".to_string()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("test query"));
+        assert!(json.contains("test context"));
+    }
+
+    #[test]
+    fn test_llm_request_serialization_no_context() {
+        let request = LLMRequest {
+            query: "test query".to_string(),
+            context: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("test query"));
+        // Context should be skipped when None
+        assert!(!json.contains("context"));
+    }
+
+    #[test]
+    fn test_llm_response_deserialization() {
+        let json = r#"{"text":"response text","metadata":{"key":"value"}}"#;
+        let response: LLMResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.text, "response text");
+        assert!(response.metadata.is_some());
+    }
+
+    #[test]
+    fn test_llm_response_deserialization_no_metadata() {
+        let json = r#"{"text":"response text"}"#;
+        let response: LLMResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.text, "response text");
+        assert!(response.metadata.is_none());
+    }
+
     #[tokio::test]
     async fn test_mock_llm() {
         let mock = MockLLMClient;
@@ -180,6 +233,35 @@ mod tests {
     async fn test_mock_llm_docker() {
         let mock = MockLLMClient;
         let response = mock.query("what is docker").await.unwrap();
+        assert!(response.contains("Docker"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_llm_kubernetes() {
+        let mock = MockLLMClient;
+        let response = mock.query("what is kubernetes").await.unwrap();
+        assert!(response.contains("Kubernetes"));
+        assert!(response.contains("kubectl"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_llm_k8s() {
+        let mock = MockLLMClient;
+        let response = mock.query("help with k8s").await.unwrap();
+        assert!(response.contains("Kubernetes"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_llm_fallback() {
+        let mock = MockLLMClient;
+        let response = mock.query("something random").await.unwrap();
+        assert!(response.contains("mock LLM"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_llm_case_insensitive() {
+        let mock = MockLLMClient;
+        let response = mock.query("DOCKER containers").await.unwrap();
         assert!(response.contains("Docker"));
     }
 }
