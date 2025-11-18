@@ -5,7 +5,6 @@
 /// - `TypoDetectionHandler`: For typo detection and suggestions
 ///
 /// Maintaining a single list ensures consistency and reduces maintenance burden.
-
 /// Returns the default list of known DevOps and shell commands
 ///
 /// # Categories

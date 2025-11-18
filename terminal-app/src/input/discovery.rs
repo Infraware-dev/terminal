@@ -213,7 +213,13 @@ impl CommandCache {
     /// Get statistics about cache contents (for debugging/monitoring)
     #[allow(dead_code)]
     pub fn stats() -> CacheStats {
-        let cache = COMMAND_CACHE.read().unwrap();
+        let cache = match COMMAND_CACHE.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
         CacheStats {
             available_count: cache.available.len(),
             unavailable_count: cache.unavailable.len(),
@@ -320,7 +326,13 @@ mod tests {
         assert_eq!(exists, exists_cached);
 
         // Verify it's in cache (should be in available since sh/cmd always exist)
-        let cache = COMMAND_CACHE.read().unwrap();
+        let cache = match COMMAND_CACHE.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache read lock was poisoned in test, recovering...");
+                poisoned.into_inner()
+            }
+        };
         assert!(
             cache.available.contains(test_cmd) || cache.unavailable.contains(test_cmd),
             "Command '{}' should be in cache after is_available() call",
@@ -420,7 +432,15 @@ mod tests {
 
         // Manually add an alias for testing
         {
-            let mut cache = COMMAND_CACHE.write().unwrap();
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => {
+                    eprintln!(
+                        "Warning: Command cache write lock was poisoned in test, recovering..."
+                    );
+                    poisoned.into_inner()
+                }
+            };
             cache
                 .aliases
                 .insert("test_alias".to_string(), "echo test".to_string());
@@ -438,7 +458,15 @@ mod tests {
 
         // Manually add an alias
         {
-            let mut cache = COMMAND_CACHE.write().unwrap();
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => {
+                    eprintln!(
+                        "Warning: Command cache write lock was poisoned in test, recovering..."
+                    );
+                    poisoned.into_inner()
+                }
+            };
             cache.aliases.insert("ll".to_string(), "ls -la".to_string());
         }
 
