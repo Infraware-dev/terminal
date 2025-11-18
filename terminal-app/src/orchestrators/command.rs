@@ -29,10 +29,18 @@ impl CommandOrchestrator {
     /// - Command existence checking
     /// - Command execution
     /// - Output formatting and display
+    ///
+    /// # Arguments
+    /// * `cmd` - The command name
+    /// * `args` - The command arguments
+    /// * `original_input` - Optional original input string (for shell operators like pipes)
+    /// * `state` - Terminal state
+    /// * `ui` - Terminal UI
     pub async fn handle_command(
         &self,
         cmd: &str,
         args: &[String],
+        original_input: Option<&str>,
         state: &mut TerminalState,
         ui: &mut TerminalUI,
     ) -> Result<()> {
@@ -41,14 +49,15 @@ impl CommandOrchestrator {
             return self.handle_clear_command(state, ui);
         }
 
-        // Check if command exists
-        if !CommandExecutor::command_exists(cmd) {
+        // Check if command exists (skip check if using shell interpretation)
+        if original_input.is_none() && !CommandExecutor::command_exists(cmd) {
             self.handle_command_not_found(cmd, state);
             return Ok(());
         }
 
         // Execute the command
-        self.execute_and_display(cmd, args, state).await
+        self.execute_and_display(cmd, args, original_input, state)
+            .await
     }
 
     /// Handle the built-in "clear" command
@@ -73,9 +82,10 @@ impl CommandOrchestrator {
         &self,
         cmd: &str,
         args: &[String],
+        original_input: Option<&str>,
         state: &mut TerminalState,
     ) -> Result<()> {
-        match CommandExecutor::execute(cmd, args).await {
+        match CommandExecutor::execute(cmd, args, original_input).await {
             Ok(output) => {
                 // Show stdout as-is
                 if !output.stdout.is_empty() {
@@ -134,7 +144,7 @@ mod tests {
 
         // Execute "echo hello"
         orchestrator
-            .execute_and_display("echo", &["hello".to_string()], &mut state)
+            .execute_and_display("echo", &["hello".to_string()], None, &mut state)
             .await
             .unwrap();
 
@@ -154,7 +164,12 @@ mod tests {
 
         // Execute command that fails
         orchestrator
-            .execute_and_display("sh", &["-c".to_string(), "exit 1".to_string()], &mut state)
+            .execute_and_display(
+                "sh",
+                &["-c".to_string(), "exit 1".to_string()],
+                None,
+                &mut state,
+            )
             .await
             .unwrap();
 
@@ -176,6 +191,7 @@ mod tests {
             .execute_and_display(
                 "sh",
                 &["-c".to_string(), "echo warning >&2".to_string()],
+                None,
                 &mut state,
             )
             .await
@@ -199,6 +215,7 @@ mod tests {
             .execute_and_display(
                 "sh",
                 &["-c".to_string(), "echo error >&2; exit 1".to_string()],
+                None,
                 &mut state,
             )
             .await
@@ -230,7 +247,7 @@ mod tests {
         // This would fail before reaching execute_and_display in real flow,
         // but we test the executor's error handling
         let result = orchestrator
-            .execute_and_display("nonexistentcmd123", &[], &mut state)
+            .execute_and_display("nonexistentcmd123", &[], None, &mut state)
             .await;
 
         // Should complete successfully (error is captured in state)
@@ -249,7 +266,7 @@ mod tests {
 
         // Execute command with no output
         orchestrator
-            .execute_and_display("true", &[], &mut state)
+            .execute_and_display("true", &[], None, &mut state)
             .await
             .unwrap();
 

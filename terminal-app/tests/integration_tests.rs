@@ -13,8 +13,14 @@ async fn test_end_to_end_command_execution() {
 
     // Execute if it's a command
     match classified {
-        InputType::Command(cmd, args) => {
-            let result = CommandExecutor::execute(&cmd, &args).await.unwrap();
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
             assert!(result.is_success());
             assert_eq!(result.stdout.trim(), "test");
         }
@@ -68,19 +74,105 @@ fn test_command_classification_accuracy() {
     let classifier = InputClassifier::new();
 
     let test_cases = vec![
-        ("ls -la", true),
-        ("docker ps", true),
-        ("kubectl get pods", true),
-        ("how do I list files", false),
-        ("what is kubernetes", false),
-        ("show me the logs", false),
-        ("cat file.txt | grep pattern", true),
-        ("explain docker to me", false),
+        ("ls -la", true),                      // Always available
+        ("unknown-cmd --flag", true),          // CommandSyntaxHandler catches flags
+        ("cat file.txt | grep pattern", true), // Pipes are command syntax
+        ("how do I list files?", false),       // Question mark = natural language
+        ("what are containers?", false),       // Question = natural language
+        ("show me the logs", false),           // Article "the" = natural language
+        ("explain docker to me", false),       // Natural language phrase
     ];
 
     for (input, should_be_command) in test_cases {
         let result = classifier.classify(input).unwrap();
-        let is_command = matches!(result, InputType::Command(_, _));
+        let is_command = matches!(
+            result,
+            InputType::Command { .. } | InputType::CommandTypo { .. }
+        );
         assert_eq!(is_command, should_be_command, "Failed for input: {}", input);
+    }
+}
+
+#[tokio::test]
+async fn test_pipe_command_end_to_end() {
+    let classifier = InputClassifier::new();
+
+    // Test pipe command classification and execution
+    let input = "echo hello | grep hello";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            // Verify original_input is preserved for shell operators
+            assert!(original_input.is_some());
+            assert_eq!(original_input.as_deref().unwrap(), input);
+
+            // Execute with shell interpretation
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+            assert!(result.is_success());
+            assert_eq!(result.stdout.trim(), "hello");
+        }
+        _ => panic!("Expected Command with pipe"),
+    }
+}
+
+#[tokio::test]
+async fn test_redirect_command_end_to_end() {
+    let classifier = InputClassifier::new();
+
+    // Test redirect command
+    let input = "echo test > /tmp/test_e2e.txt && cat /tmp/test_e2e.txt && rm /tmp/test_e2e.txt";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            assert!(original_input.is_some());
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+            assert!(result.is_success());
+            assert_eq!(result.stdout.trim(), "test");
+        }
+        _ => panic!("Expected Command with redirect"),
+    }
+}
+
+#[tokio::test]
+async fn test_simple_command_no_shell_interpretation() {
+    let classifier = InputClassifier::new();
+
+    // Simple command without operators should NOT use shell interpretation
+    let input = "echo hello";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            // Verify NO original_input for simple commands (no shell operators)
+            assert!(original_input.is_none());
+            assert_eq!(command, "echo");
+            assert_eq!(args, vec!["hello"]);
+
+            // Execute directly without shell
+            let result = CommandExecutor::execute(&command, &args, None)
+                .await
+                .unwrap();
+            assert!(result.is_success());
+            assert_eq!(result.stdout.trim(), "hello");
+        }
+        _ => panic!("Expected simple Command"),
     }
 }

@@ -209,7 +209,8 @@ impl PackageManager for BrewPackageManager {
 
     async fn install(&self, package: &str) -> Result<()> {
         let output =
-            CommandExecutor::execute("brew", &["install".to_string(), package.to_string()]).await?;
+            CommandExecutor::execute("brew", &["install".to_string(), package.to_string()], None)
+                .await?;
 
         if !output.is_success() {
             anyhow::bail!(
@@ -245,6 +246,7 @@ impl PackageManager for ChocoPackageManager {
         let output = CommandExecutor::execute(
             "choco",
             &["install".to_string(), "-y".to_string(), package.to_string()],
+            None,
         )
         .await?;
 
@@ -279,9 +281,12 @@ impl PackageManager for WingetPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        let output =
-            CommandExecutor::execute("winget", &["install".to_string(), package.to_string()])
-                .await?;
+        let output = CommandExecutor::execute(
+            "winget",
+            &["install".to_string(), package.to_string()],
+            None,
+        )
+        .await?;
 
         if !output.is_success() {
             anyhow::bail!(
