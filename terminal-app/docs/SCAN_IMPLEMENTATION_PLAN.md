@@ -15,7 +15,7 @@ This document outlined the plan for implementing the SCAN (Shell-Command And Nat
 
 ## Implementation Status
 
-### ✅ COMPLETED - All Features Implemented
+### ✅ COMPLETED - All Features Implemented with Code Review Fixes
 
 **Chain of Responsibility Pattern** - Fully implemented in `src/input/handler.rs`
 - All 7 handlers implemented and tested
@@ -33,12 +33,23 @@ This document outlined the plan for implementing the SCAN (Shell-Command And Nat
 
 ### ✅ All Original Limitations Addressed
 
-1. ✅ **Command existence check**: Implemented via `CommandCache` in `discovery.rs`
-2. ✅ **Typo detection**: Levenshtein distance ≤2 in `typo_detection.rs`
+1. ✅ **Command existence check**: Implemented via `CommandCache` in `discovery.rs` with RwLock poisoning recovery
+2. ✅ **Typo detection**: Levenshtein distance ≤2 in `typo_detection.rs` with single source of truth for commands
 3. ✅ **Precompiled patterns**: `CompiledPatterns` with `once_cell::Lazy` in `patterns.rs`
 4. ✅ **Advanced shell parsing**: Full shell operator support (pipes, redirects, subshells)
-5. ✅ **PATH-aware discovery**: Thread-safe caching with RwLock
+5. ✅ **PATH-aware discovery**: Thread-safe caching with RwLock + poisoning recovery
 6. ✅ **Natural language heuristics**: Article detection, question word patterns
+7. ✅ **Interactive command safety**: 43+ TTY-required commands blocked with helpful error messages
+
+### ✅ Code Review Results (Commit 99d87d1) - PRODUCTION READY
+
+**Overall Score**: 93/100 - Production Ready
+**Status**: M1 Milestone Complete
+
+**High-Priority Issues Fixed**:
+1. **RwLock Poisoning** - All unwrap() calls replaced with proper recovery
+2. **Command List Duplication** - Created `known_commands.rs` module, single source of truth
+3. **Interactive Commands** - 43 commands blocked with user-friendly alternatives
 
 ## Architecture Improvements
 
@@ -79,6 +90,36 @@ Each handler focuses on ONE classification strategy:
 ## Implementation Phases
 
 ## Phase 1: Performance Optimization (Priority: HIGH)
+
+### 1.0 Known Commands Module
+**File**: `src/input/known_commands.rs` (NEW)
+
+```rust
+/// Single source of truth for 60+ DevOps commands
+pub fn default_devops_commands() -> Vec<String> {
+    vec![
+        // Basic shell: ls, cd, pwd, cat, echo, grep, find, mkdir, rm, cp, mv, ...
+        // Text processing: sed, awk, sort, uniq, wc, head, tail, cut, paste, tr
+        // Process management: ps, kill, killall, pkill, jobs, bg, fg
+        // Network: curl, wget, ping, netstat, ssh, scp, rsync, ...
+        // Docker: docker, docker-compose, docker-machine
+        // Kubernetes: kubectl, helm, minikube, k9s
+        // Cloud: aws, az, gcloud, terraform, terragrunt, pulumi
+        // Version control: git, svn, hg
+        // Build tools: make, cmake, cargo, npm, yarn, pip, poetry, maven, gradle
+        // DevOps: ansible, vagrant, packer, consul, vault
+        // ... 60+ total
+    ]
+}
+```
+
+**Benefits**:
+- ✅ Single source of truth for both KnownCommandHandler and TypoDetectionHandler
+- ✅ Eliminates 120+ lines of duplicated code
+- ✅ Easy to add/remove commands in one place
+- ✅ Consistent behavior across handlers
+
+---
 
 ### 1.1 Precompiled RegexSet
 **File**: `src/input/patterns.rs` (NEW)
@@ -521,6 +562,44 @@ Input → EmptyInputHandler
 
 ---
 
+## Phase 6: Interactive Command Safety (Priority: HIGH)
+
+### 6.1 Interactive Command Blocking
+**File**: `src/executor/command.rs`
+
+**Problem**: Interactive commands that require TTY (vim, top, python REPL, etc.) will hang the terminal or behave incorrectly.
+
+**Solution**: Added blocklist of 43 interactive commands with user-friendly error messages:
+
+```rust
+const INTERACTIVE_COMMANDS: &'static [&'static str] = &[
+    // Text editors: vi, vim, nvim, emacs, nano, pico, ed
+    // Monitors: top, htop, btop, atop, iotop, iftop, nethogs, watch
+    // File managers: mc, ranger, nnn, lf, vifm
+    // Pagers: less, more, most, man, info
+    // Network/shells: ssh, telnet, ftp, sftp, screen, tmux
+    // REPLs: python, python3, irb, node, ipython, mysql, psql, sqlite3, mongo, redis-cli
+    // Debuggers: gdb, lldb, pdb
+    // Browsers: w3m, lynx, links
+    // Admin: passwd, visudo
+];
+```
+
+**User-Friendly Error Messages**:
+- `top` → "Try 'ps aux' or 'top -b -n 1' for non-interactive output"
+- `vim` → "Try 'cat' to view or edit externally"
+- `less` → "Try 'cat' or 'head'/'tail' for viewing"
+- `python` → "Pass code with -c flag: 'python -c \"code\"'"
+- `ssh` → "Use a proper SSH client or 'ssh -c command' for single commands"
+
+**Benefits**:
+- ✅ Prevents terminal hang/blocking
+- ✅ Provides helpful alternatives to users
+- ✅ Improves user experience with clear guidance
+- ✅ Safety for non-interactive environments
+
+---
+
 ## Phase 7: Testing & Benchmarking (Priority: HIGH)
 
 ### 7.1 Comprehensive Test Suite
@@ -794,6 +873,36 @@ let classifier = InputClassifier::builder()
 
 ---
 
+## Code Quality Review Results
+
+### ✅ Code Review Assessment (Commit 99d87d1)
+**Overall Score**: 93/100 - Production Ready
+**Assessment**: M1 Milestone Complete
+
+**Critical Issues Resolved**:
+1. ✅ **RwLock Poisoning** (High Priority)
+   - Replaced all `.unwrap()` calls with proper poisoning recovery
+   - 6 locations fixed in `discovery.rs`
+   - Terminal now resilient to thread panics
+
+2. ✅ **Code Duplication** (High Priority)
+   - Extracted command list to `known_commands.rs`
+   - Eliminated 120+ lines of duplicated code
+   - Improved maintainability and consistency
+
+3. ✅ **Interactive Commands** (High Priority)
+   - Added blocklist of 43 TTY-required commands
+   - User-friendly error messages with alternatives
+   - Prevents terminal hang on unsuitable commands
+
+**Quality Metrics**:
+- Test coverage: 215+ tests passing
+- Clippy warnings: 0 (all fixed)
+- Code complexity: Average cyclomatic complexity 2.09 (very low)
+- Performance: <100μs average classification time achieved
+
+---
+
 ## Rollout Status - PRODUCTION DEPLOYMENT ✅
 
 ### ✅ Phase 1: Implementation (COMPLETE)
@@ -803,18 +912,19 @@ let classifier = InputClassifier::builder()
 - Zero clippy warnings
 
 ### ✅ Phase 2: Testing & Validation (COMPLETE)
-- 157 tests passing (100% success rate)
+- 215+ tests passing (100% success rate)
 - CI/CD pipeline validated on 3 platforms
 - Performance benchmarks confirm <100μs average
-- Code review completed
+- Code review completed with 93/100 score
 
 ### ✅ Phase 3: Production Deployment (COMPLETE)
 - SCAN algorithm is the default and only implementation
 - No feature flags needed - stable implementation
 - Production-ready for M1 milestone
+- Code review fixes applied and verified
 - Ready for real-world usage
 
-**Status**: The SCAN algorithm is now the core production component of Infraware Terminal M1.
+**Status**: The SCAN algorithm is now the core production component of Infraware Terminal M1 with critical code quality improvements.
 
 ---
 

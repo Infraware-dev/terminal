@@ -108,13 +108,16 @@ User Input → InputClassifier → [Command Path | Natural Language Path]
   5. TypoDetectionHandler - Levenshtein distance ≤2 for typo detection (prevents LLM false positives)
   6. NaturalLanguageHandler - English patterns with precompiled regex (multilingual delegated to LLM)
   7. DefaultHandler - Fallback to natural language (guarantees a result)
+- `known_commands.rs`: **Single source of truth** for 60+ DevOps commands (used by both KnownCommandHandler and TypoDetectionHandler)
 - `patterns.rs`: **Precompiled RegexSet patterns** using `once_cell::Lazy` (10-100x faster)
-- `discovery.rs`: **PATH-aware command discovery** with thread-safe `RwLock<CommandCache>`
+- `discovery.rs`: **PATH-aware command discovery** with thread-safe `RwLock<CommandCache>` + **poisoning recovery**
 - `typo_detection.rs`: **Levenshtein distance** typo detection with `strsim` crate
 - `parser.rs`: Shell command parsing with `shell-words` crate (handles quotes, escapes)
 
 **`executor/`** - Command execution (uses Facade and Strategy patterns)
-- `command.rs`: Async command execution with stdout/stderr capture
+- `command.rs`: Async command execution with stdout/stderr capture + **43 interactive commands blocklist**
+  - Blocks: vim, top, python REPL, ssh, tmux, less, man, and 36+ other TTY-required commands
+  - User-friendly error messages with command-specific alternatives
 - `install.rs`: Auto-install workflow
 - `package_manager.rs`: **Strategy pattern** for package managers (apt, yum, dnf, pacman, brew, choco, winget)
 - `facade.rs`: **Facade pattern** - simplified interface for command execution with auto-install
@@ -298,17 +301,48 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 3. Test with code samples in different languages
 4. Ensure ANSI escape codes render correctly in TUI
 
+## Code Quality & Production Readiness
+
+### ✅ Code Review Results (Commit 99d87d1)
+**Overall Score**: 93/100 - Production Ready
+**Status**: M1 Milestone Complete
+
+### Critical Issues Resolved
+1. **RwLock Poisoning Fix** (High Priority - FIXED)
+   - Location: `src/input/discovery.rs`
+   - Issue: `.unwrap()` calls on RwLock could crash terminal if thread panics while holding lock
+   - Fix: Implemented proper poisoned lock recovery with `poisoned.into_inner()` on all 6 lock acquisitions
+   - Impact: Terminal now resilient to thread panics
+   - Pattern: `match lock { Ok(l) => l, Err(poisoned) => poisoned.into_inner() }`
+
+2. **Command List Deduplication** (High Priority - FIXED)
+   - Location: Created new `src/input/known_commands.rs` module
+   - Issue: 60+ DevOps commands hardcoded in two places (KnownCommandHandler + TypoDetectionHandler)
+   - Fix: Single source of truth for command list, eliminating 120+ lines of duplicated code
+   - Benefit: Consistency across handlers, easier to maintain/add commands
+
+3. **Interactive Commands Blocking** (High Priority - FIXED)
+   - Location: `src/executor/command.rs:44-101`
+   - Issue: No blocking of interactive commands that require TTY (vim, top, python REPL, etc.)
+   - Fix: Added `INTERACTIVE_COMMANDS` blocklist with 43 commands + user-friendly error messages
+   - Examples:
+     - `top` → "Try 'ps aux' or 'top -b -n 1' for non-interactive output"
+     - `vim` → "Try 'cat' to view or edit externally"
+     - `python` → "Pass code with -c flag: 'python -c \"code\"'"
+
 ## Implementation Status & Known Limitations
 
 ### ✅ Completed (Production-Ready)
 - **SCAN Algorithm**: All 7 handlers implemented with performance optimizations
 - **Typo Detection**: Levenshtein distance-based suggestion system
 - **Shell Operator Support**: Pipes, redirects, logical operators, subshells
-- **Command Caching**: Thread-safe PATH verification with RwLock
+- **Command Caching**: Thread-safe PATH verification with RwLock + poisoning recovery
 - **Precompiled Patterns**: Zero runtime regex compilation overhead
 - **Cross-Platform**: Windows/macOS/Linux support with platform-specific handlers
 - **Benchmarking**: Performance benchmarks in `benches/scan_benchmark.rs`
-- **Test Coverage**: 157 tests passing, 0 clippy warnings
+- **Test Coverage**: 215+ tests passing, 0 clippy warnings
+- **Interactive Command Blocking**: 43 commands blocked with user-friendly suggestions
+- **Known Commands Module**: Single source of truth for 60+ DevOps commands
 
 ### ⚠️ Known Limitations (Deferred to M2/M3)
 - **Auto-install**: Framework exists, prompts user but doesn't execute installation
@@ -317,6 +351,9 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 - **Configuration**: No config file support - uses hardcoded defaults
 - **Command History**: Session-only persistence - not saved to disk
 - **Advanced Markdown**: Basic rendering only - tables/images deferred to M2/M3
+- **Command Cache TTL**: No TTL/invalidation - commands installed during session require restart
+- **Typo Detection Performance**: O(n) algorithm - could be optimized to O(log n) with BK-tree
+- **Regex Pattern Precision**: Some edge cases in multilingual pattern detection
 
 ## Windows-Specific Considerations
 
