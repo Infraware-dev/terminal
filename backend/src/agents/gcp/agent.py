@@ -9,7 +9,7 @@ gcp_agent = create_agent(
     model=model,
     tools=[get_ip_gcp],
     system_prompt=(
-        "You are an gcp assistan agent.\n\n"
+        "You are an gcp assistan agent.\n\n" 
         "INSTRUCTIONS:\n"
         "- Assist ONLY with gcp-related tasks, DO NOT do any action related to other cloud providers\n"
         "- After you're done with your tasks, respond to the supervisor directly\n"
