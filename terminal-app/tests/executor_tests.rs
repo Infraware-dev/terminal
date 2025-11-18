@@ -3,7 +3,7 @@ use infraware_terminal::executor::CommandExecutor;
 
 #[tokio::test]
 async fn test_execute_simple_command() {
-    let result = CommandExecutor::execute("echo", &["hello".to_string()])
+    let result = CommandExecutor::execute("echo", &["hello".to_string()], None)
         .await
         .unwrap();
 
@@ -14,9 +14,10 @@ async fn test_execute_simple_command() {
 
 #[tokio::test]
 async fn test_execute_command_with_args() {
-    let result = CommandExecutor::execute("echo", &["hello".to_string(), "world".to_string()])
-        .await
-        .unwrap();
+    let result =
+        CommandExecutor::execute("echo", &["hello".to_string(), "world".to_string()], None)
+            .await
+            .unwrap();
 
     assert!(result.is_success());
     assert_eq!(result.stdout.trim(), "hello world");
@@ -24,7 +25,7 @@ async fn test_execute_command_with_args() {
 
 #[tokio::test]
 async fn test_command_not_found() {
-    let result = CommandExecutor::execute("nonexistentcommand12345", &[]).await;
+    let result = CommandExecutor::execute("nonexistentcommand12345", &[], None).await;
     assert!(result.is_err());
 }
 
@@ -38,7 +39,7 @@ async fn test_command_exists() {
 #[tokio::test]
 async fn test_command_with_failure() {
     // ls with invalid directory should fail
-    let result = CommandExecutor::execute("ls", &["/nonexistent/directory/path".to_string()])
+    let result = CommandExecutor::execute("ls", &["/nonexistent/directory/path".to_string()], None)
         .await
         .unwrap();
 

@@ -305,11 +305,24 @@ impl InfrawareTerminal {
 
         // Classify the input
         match self.classifier.classify(&input)? {
-            InputType::Command(cmd, args) => {
-                self.handle_command(&cmd, &args).await?;
+            InputType::Command {
+                command,
+                args,
+                original_input,
+            } => {
+                self.handle_command(&command, &args, original_input.as_deref())
+                    .await?;
             }
             InputType::NaturalLanguage(query) => {
                 self.handle_natural_language(&query).await?;
+            }
+            InputType::CommandTypo {
+                input,
+                suggestion,
+                distance,
+            } => {
+                self.handle_command_typo(&input, &suggestion, distance)
+                    .await?;
             }
             InputType::Empty => {}
         }
@@ -323,12 +336,36 @@ impl InfrawareTerminal {
     /// Handle command execution
     ///
     /// Delegates to CommandOrchestrator (SRP compliance)
-    async fn handle_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
+    async fn handle_command(
+        &mut self,
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+    ) -> Result<()> {
         self.state.mode = TerminalMode::ExecutingCommand;
 
         self.command_orchestrator
-            .handle_command(cmd, args, &mut self.state, &mut self.ui)
+            .handle_command(cmd, args, original_input, &mut self.state, &mut self.ui)
             .await
+    }
+
+    /// Handle command typo
+    ///
+    /// Informs the user about a potential typo and suggests the correct command
+    async fn handle_command_typo(
+        &mut self,
+        input: &str,
+        suggestion: &str,
+        distance: usize,
+    ) -> Result<()> {
+        let message = format!(
+            "Command not found: '{}'\nDid you mean '{}'? (Levenshtein distance: {})",
+            input.split_whitespace().next().unwrap_or(input),
+            suggestion,
+            distance
+        );
+        self.state.add_output(MessageFormatter::error(&message));
+        Ok(())
     }
 
     /// Handle natural language query

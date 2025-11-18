@@ -1,6 +1,9 @@
 pub mod classifier;
+pub mod discovery;
 pub mod handler;
 pub mod parser;
+pub mod patterns;
+pub mod typo_detection;
 
 pub use classifier::{InputClassifier, InputType};
 
@@ -8,5 +11,5 @@ pub use classifier::{InputClassifier, InputType};
 #[allow(unused_imports)]
 pub use handler::{
     ClassifierChain, CommandSyntaxHandler, DefaultHandler, EmptyInputHandler, InputHandler,
-    KnownCommandHandler, NaturalLanguageHandler,
+    KnownCommandHandler, NaturalLanguageHandler, PathCommandHandler,
 };

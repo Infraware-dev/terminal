@@ -40,7 +40,44 @@ pub struct CommandExecutor;
 
 impl CommandExecutor {
     /// Execute a command asynchronously with a 5-minute timeout
-    pub async fn execute(cmd: &str, args: &[String]) -> Result<CommandOutput> {
+    ///
+    /// # Arguments
+    /// * `cmd` - The command name
+    /// * `args` - The command arguments
+    /// * `original_input` - Optional original input string. When present, the command
+    ///   contains shell operators (pipes, redirects, etc.) and will be executed via
+    ///   `sh -c` for proper shell interpretation.
+    ///
+    /// # Shell Interpretation
+    /// If `original_input` is provided, the entire command is passed to `sh -c` for
+    /// proper shell operator handling (pipes, redirects, subshells, etc.).
+    /// Otherwise, the command is executed directly for better security and performance.
+    pub async fn execute(
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+    ) -> Result<CommandOutput> {
+        // If original_input is provided, use sh -c for shell operator interpretation
+        if let Some(shell_input) = original_input {
+            let execution = TokioCommand::new("sh")
+                .arg("-c")
+                .arg(shell_input)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+
+            let output = timeout(Duration::from_secs(300), execution)
+                .await
+                .context("Command execution timed out after 5 minutes")??;
+
+            return Ok(CommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+            });
+        }
+
+        // Direct execution (no shell operators)
         // Check if command exists
         if !Self::command_exists(cmd) {
             anyhow::bail!("Command '{}' not found", cmd);
@@ -109,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_command() {
-        let output = CommandExecutor::execute("echo", &["hello".to_string()])
+        let output = CommandExecutor::execute("echo", &["hello".to_string()], None)
             .await
             .unwrap();
         assert!(output.is_success());
@@ -118,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found() {
-        let result = CommandExecutor::execute("nonexistentcommand123", &[]).await;
+        let result = CommandExecutor::execute("nonexistentcommand123", &[], None).await;
         assert!(result.is_err());
     }
 
@@ -130,9 +167,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_multiple_args() {
-        let output = CommandExecutor::execute("echo", &["hello".to_string(), "world".to_string()])
-            .await
-            .unwrap();
+        let output =
+            CommandExecutor::execute("echo", &["hello".to_string(), "world".to_string()], None)
+                .await
+                .unwrap();
         assert!(output.is_success());
         assert_eq!(output.stdout.trim(), "hello world");
     }
@@ -140,10 +178,13 @@ mod tests {
     #[tokio::test]
     async fn test_command_with_stderr() {
         // Use a command that outputs to stderr (grep with no match)
-        let output =
-            CommandExecutor::execute("sh", &["-c".to_string(), "echo error >&2".to_string()])
-                .await
-                .unwrap();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "echo error >&2".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
         assert!(output.is_success());
         assert!(output.stderr.contains("error"));
     }
@@ -151,9 +192,10 @@ mod tests {
     #[tokio::test]
     async fn test_command_exit_code() {
         // Use false command which exits with code 1
-        let output = CommandExecutor::execute("sh", &["-c".to_string(), "exit 42".to_string()])
-            .await
-            .unwrap();
+        let output =
+            CommandExecutor::execute("sh", &["-c".to_string(), "exit 42".to_string()], None)
+                .await
+                .unwrap();
         assert!(!output.is_success());
         assert_eq!(output.exit_code, 42);
     }
@@ -263,8 +305,72 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_empty_args() {
-        let output = CommandExecutor::execute("pwd", &[]).await.unwrap();
+        let output = CommandExecutor::execute("pwd", &[], None).await.unwrap();
         assert!(output.is_success());
         assert!(!output.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pipe_execution() {
+        // Test pipe execution via original_input
+        let output = CommandExecutor::execute(
+            "echo",
+            &["hello".to_string()],
+            Some("echo hello | grep hello"),
+        )
+        .await
+        .unwrap();
+        assert!(output.is_success());
+        assert_eq!(output.stdout.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_pipe_with_multiple_commands() {
+        // Test multiple pipes
+        let output = CommandExecutor::execute(
+            "echo",
+            &[],
+            Some("echo 'line1\nline2\nline3' | grep line2 | wc -l"),
+        )
+        .await
+        .unwrap();
+        assert!(output.is_success());
+        assert_eq!(output.stdout.trim(), "1");
+    }
+
+    #[tokio::test]
+    async fn test_redirect_execution() {
+        // Test redirect via original_input
+        // Create temp file, write to it, read it back
+        let output = CommandExecutor::execute(
+            "echo",
+            &[],
+            Some("echo test > /tmp/test_redirect.txt && cat /tmp/test_redirect.txt && rm /tmp/test_redirect.txt"),
+        )
+        .await
+        .unwrap();
+        assert!(output.is_success());
+        assert_eq!(output.stdout.trim(), "test");
+    }
+
+    #[tokio::test]
+    async fn test_logical_and_operator() {
+        // Test && operator
+        let output = CommandExecutor::execute("echo", &[], Some("echo first && echo second"))
+            .await
+            .unwrap();
+        assert!(output.is_success());
+        assert!(output.stdout.contains("first"));
+        assert!(output.stdout.contains("second"));
+    }
+
+    #[tokio::test]
+    async fn test_subshell_execution() {
+        // Test subshell via $()
+        let output = CommandExecutor::execute("echo", &[], Some("echo $(echo nested)"))
+            .await
+            .unwrap();
+        assert!(output.is_success());
+        assert_eq!(output.stdout.trim(), "nested");
     }
 }

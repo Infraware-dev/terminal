@@ -115,7 +115,7 @@ impl CommandExecutionFacade {
         }
 
         // Execute the command
-        match CommandExecutor::execute(cmd, args).await {
+        match CommandExecutor::execute(cmd, args, None).await {
             Ok(output) => Ok(ExecutionResult::Success(output)),
             Err(e) => Ok(ExecutionResult::ExecutionError {
                 command: cmd.to_string(),
