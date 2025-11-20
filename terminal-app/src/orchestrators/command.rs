@@ -50,6 +50,11 @@ impl CommandOrchestrator {
             return self.handle_clear_command(state, ui);
         }
 
+        // Handle reload-aliases built-in command
+        if cmd == "reload-aliases" {
+            return self.handle_reload_aliases_command(state).await;
+        }
+
         // Check if command exists (skip check if using shell interpretation)
         if original_input.is_none() && !CommandExecutor::command_exists(cmd) {
             self.handle_command_not_found(cmd, state);
@@ -67,6 +72,39 @@ impl CommandOrchestrator {
         state.output.clear();
         // Force a complete terminal clear to prevent spurious characters
         ui.clear()?;
+        Ok(())
+    }
+
+    /// Handle the built-in "reload-aliases" command
+    ///
+    /// Reloads system aliases from /etc/bash.bashrc, /etc/bashrc, etc.
+    /// Uses spawn_blocking to avoid blocking the async executor during file I/O.
+    async fn handle_reload_aliases_command(&self, state: &mut TerminalState) -> Result<()> {
+        use crate::input::discovery::CommandCache;
+
+        state.add_output(MessageFormatter::info("Reloading system aliases..."));
+
+        // Spawn blocking task to avoid blocking the async executor
+        // File I/O is blocking, so we use spawn_blocking as recommended by Tokio
+        let result = tokio::task::spawn_blocking(CommandCache::load_system_aliases).await;
+
+        match result {
+            Ok(Ok(())) => {
+                state.add_output(MessageFormatter::success(
+                    "System aliases reloaded successfully",
+                ));
+            }
+            Ok(Err(e)) => {
+                state.add_output(MessageFormatter::error(format!(
+                    "Failed to reload aliases: {}",
+                    e
+                )));
+            }
+            Err(e) => {
+                state.add_output(MessageFormatter::error(format!("Task panicked: {}", e)));
+            }
+        }
+
         Ok(())
     }
 

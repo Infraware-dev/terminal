@@ -98,7 +98,48 @@ impl InputClassifier {
     }
 
     /// Classify the input as command or natural language
+    ///
+    /// Performs alias expansion before classification:
+    /// 1. Extract first word from input
+    /// 2. Check if it's an alias
+    /// 3. If alias, expand and classify the expanded command
+    /// 4. If not alias, classify original input
     pub fn classify(&self, input: &str) -> Result<InputType> {
+        use super::discovery::CommandCache;
+
+        let trimmed = input.trim();
+
+        // Extract first word to check for alias
+        if let Some(first_word) = trimmed.split_whitespace().next() {
+            // Check if first word is an alias
+            if let Some(expansion) = CommandCache::expand_alias(first_word) {
+                // Get the rest of the arguments (everything after first word)
+                // Use byte offset instead of strip_prefix to avoid fragile invariant
+                let first_word_len = first_word.len();
+                let rest = if first_word_len < trimmed.len() {
+                    trimmed[first_word_len..].trim_start()
+                } else {
+                    ""
+                };
+
+                // Construct expanded input: expansion + rest
+                let expanded_input = if rest.is_empty() {
+                    expansion
+                } else {
+                    format!("{} {}", expansion, rest)
+                };
+
+                // Classify the expanded input
+                return self.classify_internal(&expanded_input);
+            }
+        }
+
+        // Not an alias, classify as-is
+        self.classify_internal(trimmed)
+    }
+
+    /// Internal classification method (without alias expansion)
+    fn classify_internal(&self, input: &str) -> Result<InputType> {
         // Process through the chain of handlers
         match self.chain.process(input) {
             Some(result) => Ok(result),

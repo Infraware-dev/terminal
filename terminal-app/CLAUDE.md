@@ -83,11 +83,11 @@ cargo clean
 
 ### Core Flow
 ```
-User Input → InputClassifier → [Command Path | Natural Language Path]
-              ↓                           ↓
-         CommandExecutor             LLMClient
-              ↓                           ↓
-         Shell Output              ResponseRenderer
+User Input → Alias Expansion → InputClassifier → [Command Path | Natural Language Path]
+              (if matches)        ↓                           ↓
+                              CommandExecutor             LLMClient
+                                   ↓                           ↓
+                              Shell Output              ResponseRenderer
 ```
 
 ### Module Structure
@@ -99,7 +99,7 @@ User Input → InputClassifier → [Command Path | Natural Language Path]
 - `events.rs`: Keyboard event handling
 
 **`input/`** - Input classification and parsing (**SCAN Algorithm** - Shell-Command And Natural-language)
-- `classifier.rs`: Main InputClassifier coordinating the 7-handler chain
+- `classifier.rs`: Main InputClassifier coordinating the 7-handler chain with **alias expansion** support
 - `handler.rs`: **Chain of Responsibility** implementation with 7 handlers:
   1. EmptyInputHandler - Fast path for empty/whitespace input
   2. PathCommandHandler - Executable paths (./script.sh, /usr/bin/cmd) with platform-specific checks
@@ -110,7 +110,12 @@ User Input → InputClassifier → [Command Path | Natural Language Path]
   7. DefaultHandler - Fallback to natural language (guarantees a result)
 - `known_commands.rs`: **Single source of truth** for 60+ DevOps commands (used by both KnownCommandHandler and TypoDetectionHandler)
 - `patterns.rs`: **Precompiled RegexSet patterns** using `once_cell::Lazy` (10-100x faster)
-- `discovery.rs`: **PATH-aware command discovery** with thread-safe `RwLock<CommandCache>` + **poisoning recovery**
+- `discovery.rs`: **PATH-aware command discovery** with thread-safe `RwLock<CommandCache>` + **poisoning recovery** + **alias loading and expansion**
+  - Loads system aliases from `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`
+  - Loads user aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
+  - User aliases override system aliases (priority ordering)
+  - Alias expansion: O(1) HashMap lookup, single-level expansion like Bash
+  - Security: Validates aliases against dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
 - `typo_detection.rs`: **Levenshtein distance** typo detection with `strsim` crate
 - `parser.rs`: Shell command parsing with `shell-words` crate (handles quotes, escapes)
 
@@ -146,7 +151,15 @@ User Input → InputClassifier → [Command Path | Natural Language Path]
    - **Builder Pattern**: Terminal construction (`main.rs` InfrawareTerminalBuilder)
    - **Single Responsibility Principle**: Orchestrators, buffer components
 
-2. **SCAN Algorithm** (Shell-Command And Natural-language): Production-ready Chain of Responsibility with 7 optimized handlers executing in strict order (<100μs average):
+2. **SCAN Algorithm** (Shell-Command And Natural-language): Production-ready input classification with alias expansion + Chain of Responsibility with 7 optimized handlers executing in strict order (<100μs average):
+
+   **Pre-classification**: Alias expansion
+   - Extract first word from input
+   - Check if it's a user-defined alias (from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`, system files)
+   - If alias found: expand and re-classify expanded input
+   - If not alias: proceed to handler chain
+
+   **Handler chain**:
    1. **EmptyInputHandler**: Fast path for empty/whitespace input (<1μs)
    2. **PathCommandHandler**: Executable paths with platform-specific checks - Unix: executable bit check, Windows: .exe/.bat/.cmd extensions (~10μs)
    3. **KnownCommandHandler**: Whitelist of 60+ DevOps commands + cached PATH verification (<1μs cache hit, 1-5ms cache miss)
@@ -203,6 +216,30 @@ DO NOT implement these yet (deferred to M2/M3):
 - Use `tokio-test` for async test utilities
 
 ## Development Guidelines
+
+### Working with Aliases
+
+**Alias Loading**:
+1. Aliases are loaded at startup via `CommandCache::load_system_aliases()` in `main.rs` using `tokio::spawn_blocking`
+2. System aliases loaded from: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`
+3. User aliases loaded from: `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
+4. User aliases override system aliases (priority ordering in `load_system_aliases()`)
+5. Runtime reload via `reload-aliases` built-in command
+
+**Alias Expansion**:
+- Single-level expansion only (like Bash) - recursive/chained aliases require re-classification
+- O(1) HashMap lookup in `CommandCache::expand_alias()`
+- Expansion happens in `InputClassifier::classify()` before handler chain
+- Preserves arguments after expansion (e.g., `ll` → `ls -la`, with original args appended)
+
+**Built-in Commands**:
+- `reload-aliases`: Reloads all aliases from system and user config files using `spawn_blocking`
+- Accessible via `CommandOrchestrator::handle_reload_aliases()` in `src/orchestrators/command.rs`
+
+**Security**:
+- `is_safe_alias()` validation rejects dangerous patterns: `rm -rf /`, `mkfs`, `dd if=/dev/zero`, fork bombs, etc.
+- Safe parsing with proper quote handling (single quotes, double quotes, escaped spaces)
+- Validation occurs during `parse_aliases()` - dangerous aliases are silently rejected with warning
 
 ### Working with SCAN Algorithm
 
@@ -334,13 +371,19 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 
 ### ✅ Completed (Production-Ready)
 - **SCAN Algorithm**: All 7 handlers implemented with performance optimizations
+- **Alias Support**: System and user alias loading + single-level expansion with security validation
+  - Loads from: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`, `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
+  - User aliases override system aliases (priority ordering)
+  - Built-in `reload-aliases` command for runtime reloading via `spawn_blocking`
+  - Security: Validates and rejects dangerous alias patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
+  - Performance: O(1) HashMap lookup, <1μs expansion overhead
 - **Typo Detection**: Levenshtein distance-based suggestion system
 - **Shell Operator Support**: Pipes, redirects, logical operators, subshells
 - **Command Caching**: Thread-safe PATH verification with RwLock + poisoning recovery
 - **Precompiled Patterns**: Zero runtime regex compilation overhead
 - **Cross-Platform**: Windows/macOS/Linux support with platform-specific handlers
 - **Benchmarking**: Performance benchmarks in `benches/scan_benchmark.rs`
-- **Test Coverage**: 215+ tests passing, 0 clippy warnings
+- **Test Coverage**: 236+ tests passing, 0 clippy warnings, serial tests for shared state
 - **Interactive Command Blocking**: 43 commands blocked with user-friendly suggestions
 - **Known Commands Module**: Single source of truth for 60+ DevOps commands
 
@@ -351,7 +394,8 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 - **Configuration**: No config file support - uses hardcoded defaults
 - **Command History**: Session-only persistence - not saved to disk
 - **Advanced Markdown**: Basic rendering only - tables/images deferred to M2/M3
-- **Command Cache TTL**: No TTL/invalidation - commands installed during session require restart
+- **Command Cache TTL**: No TTL/invalidation - commands installed during session require restart (manual `reload-aliases` required for new aliases discovered)
+- **Alias Cache TTL**: No automatic TTL/invalidation - alias files changed externally require `reload-aliases` command
 - **Typo Detection Performance**: O(n) algorithm - could be optimized to O(log n) with BK-tree
 - **Regex Pattern Precision**: Some edge cases in multilingual pattern detection
 

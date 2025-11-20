@@ -207,12 +207,26 @@ impl InfrawareTerminal {
 
     /// Run the main event loop
     async fn run(&mut self) -> Result<()> {
+        // Load aliases at startup (async, non-blocking)
+        // Use spawn_blocking for file I/O to avoid blocking the executor
+        tokio::task::spawn_blocking(|| {
+            use input::discovery::CommandCache;
+
+            // Load system aliases first
+            if let Err(e) = CommandCache::load_system_aliases() {
+                eprintln!("Warning: Failed to load system aliases: {}", e);
+            }
+
+            // Load user aliases (these override system aliases)
+            CommandCache::load_user_aliases();
+        });
+
         // Display welcome message
         self.state.add_output(MessageFormatter::banner_line(
             "╔══════════════════════════════════════════════════════════════╗",
         ));
         self.state.add_output(MessageFormatter::banner_line(
-            "║   Infraware Terminal - AI-Assisted DevOps Shell/cleasd       ║",
+            "║   Infraware Terminal - AI-Assisted DevOps Shell              ║",
         ));
         self.state.add_output(MessageFormatter::banner_line(
             "╚══════════════════════════════════════════════════════════════╝",

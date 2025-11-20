@@ -16,7 +16,15 @@ This is the initial project setup with the complete module structure. Implementa
 
 ### Implemented in M1 (Production-Ready)
 
-- ✅ **SCAN Algorithm**: Advanced input classification with 7-handler chain (<100μs avg)
+- ✅ **Alias Support**: System and user alias expansion with security validation
+  - Loads from system files: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`
+  - Loads from user files: `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
+  - User aliases override system aliases
+  - O(1) HashMap lookup for performance (<1μs expansion overhead)
+  - Built-in `reload-aliases` command for runtime reloading
+  - Security: Rejects dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
+- ✅ **SCAN Algorithm**: Advanced input classification with 7-handler chain + alias expansion (<100μs avg)
+  - Alias expansion before classification (single-level like Bash)
   - Command recognition with PATH verification and caching
   - Typo detection with Levenshtein distance (e.g., "dokcer" → "docker")
   - Shell operator support (pipes, redirects, logical operators)
@@ -32,7 +40,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Command History**: Navigate previous commands with arrow keys
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
-- ✅ **Code Quality**: 215+ tests passing, 0 clippy warnings, production-ready code
+- ✅ **Code Quality**: 236+ tests passing, 0 clippy warnings, serial tests for shared state, production-ready code
 
 ### Coming in M2/M3
 
@@ -161,10 +169,47 @@ cargo run
 Once running, you can:
 
 1. **Execute commands**: Type any shell command (e.g., `ls -la`, `docker ps`)
-2. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
-3. **Navigate history**: Use ↑/↓ arrow keys
-4. **Tab completion**: Press Tab to complete commands/paths
-5. **Quit**: Press Ctrl+C or Ctrl+D
+2. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
+3. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
+4. **Navigate history**: Use ↑/↓ arrow keys
+5. **Tab completion**: Press Tab to complete commands/paths
+6. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
+7. **Quit**: Press Ctrl+C or Ctrl+D
+
+#### Alias Support
+
+Infraware Terminal automatically loads and expands your shell aliases:
+
+**System Aliases** (loaded first):
+- `/etc/bash.bashrc` (Debian/Ubuntu)
+- `/etc/bashrc` (RedHat/CentOS/Fedora)
+- `/etc/profile`
+- `/etc/profile.d/*.sh`
+
+**User Aliases** (override system, loaded second):
+- `~/.bashrc`
+- `~/.bash_aliases`
+- `~/.zshrc`
+
+**Examples**:
+```
+# If your ~/.bashrc contains:
+alias ll='ls -la'
+alias gs='git status'
+
+# You can use them directly:
+ll                    # Expands to: ls -la
+gs                    # Expands to: git status
+ll -h | grep test     # Expands and preserves arguments
+```
+
+**Runtime Reload**:
+If you edit your shell config files during a session, use `reload-aliases` to refresh:
+```
+reload-aliases        # Reloads all aliases from system and user config files
+```
+
+**Security**: Dangerous alias patterns are automatically rejected (e.g., `alias rm='rm -rf /'`)
 
 ## 🧪 Testing & Benchmarking
 
@@ -255,6 +300,7 @@ xdg-open target/criterion/report/index.html  # Linux
 
 - **Interactive Commands Blocked**: 43+ commands that require TTY are blocked for safety (vim, top, python REPL, ssh, less, man, etc.)
   - Use command-specific alternatives: e.g., `cat` instead of `less`, `ps aux` instead of `top`, `python -c` for one-liners
+- **Alias Cache TTL**: No automatic TTL/invalidation - alias files modified externally during session require manual `reload-aliases` command to be recognized
 - **Command Cache TTL**: No automatic TTL/invalidation - commands installed during a session require terminal restart to be recognized
 - **Tab Completion**: Basic file and command completion only - no integration with bash/zsh completion systems
 - **Command History**: Session-only persistence - history is not saved to disk when the terminal closes

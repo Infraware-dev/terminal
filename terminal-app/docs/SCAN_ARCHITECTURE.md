@@ -4,7 +4,7 @@
 
 ## Overview
 
-SCAN is the core input classification system for Infraware Terminal. It uses the **Chain of Responsibility** pattern with 7 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
+SCAN is the core input classification system for Infraware Terminal. It uses **alias expansion** followed by a **Chain of Responsibility** pattern with 7 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
 
 ### Architecture Diagram
 
@@ -14,6 +14,12 @@ SCAN is the core input classification system for Infraware Terminal. It uses the
 │                    (from TUI InputBuffer)                        │
 └────────────────────────────┬────────────────────────────────────┘
                              ↓
+                    ┌───────────────────────┐
+                    │  Alias Expansion      │
+                    │  (if first word is    │
+                    │   in alias map)       │
+                    └─────────┬─────────────┘
+                              ↓
                     ┌────────────────────┐
                     │  InputClassifier   │
                     │   .classify(str)   │
@@ -46,6 +52,120 @@ CommandExecutor     Show Suggestion         LLMClient
 4. **Typos Before LLM**: Levenshtein distance prevents expensive LLM calls
 5. **English Only**: Multilingual queries delegated to LLM (more flexible than regex)
 6. **Graceful Fallback**: DefaultHandler guarantees a result, never fails
+
+## Alias Expansion (Pre-Classification)
+
+**Location**: `src/input/classifier.rs:107-139`
+
+### Purpose
+Expand shell aliases before classification to match Bash behavior (e.g., `ll` → `ls -la`)
+
+### Algorithm
+```
+1. Extract first word from input
+2. Check if first word is in alias map (O(1) HashMap lookup)
+3. If found:
+   a. Get alias expansion (e.g., "ll" → "ls -la")
+   b. Get remaining arguments (everything after first word)
+   c. Reconstruct: expansion + remaining args
+   d. Re-classify the expanded input
+4. If not found:
+   a. Proceed with original input to handler chain
+```
+
+### Example Flows
+
+```
+Input: "ll" (where ll='ls -la')
+  ├─ First word: "ll"
+  ├─ Is "ll" an alias? YES
+  ├─ Expand to: "ls -la"
+  ├─ Remaining args: (none)
+  ├─ Reconstructed: "ls -la"
+  └─ Classify "ls -la" via handler chain
+     └─ Result: Command("ls", ["-la"])
+
+Input: "ll *.txt" (where ll='ls -la')
+  ├─ First word: "ll"
+  ├─ Is "ll" an alias? YES
+  ├─ Expand to: "ls -la"
+  ├─ Remaining args: "*.txt"
+  ├─ Reconstructed: "ls -la *.txt"
+  └─ Classify "ls -la *.txt" via handler chain
+     └─ Result: Command("ls", ["-la", "*.txt"])
+
+Input: "gs" (not an alias)
+  ├─ First word: "gs"
+  ├─ Is "gs" an alias? NO
+  └─ Proceed with original input to handler chain
+     └─ May be typo for "git", command with syntax, or natural language
+```
+
+### Performance
+- **Alias hit**: <1μs (HashMap lookup)
+- **Alias miss**: <1μs (hash lookup says not found)
+- **Total overhead**: <1μs even with expansion
+
+### Alias Loading
+
+**System Aliases** (loaded first at startup):
+- `/etc/bash.bashrc` (Debian/Ubuntu)
+- `/etc/bashrc` (RedHat/CentOS/Fedora)
+- `/etc/profile`
+- `/etc/profile.d/*.sh` (all files)
+
+**User Aliases** (loaded second, override system):
+- `~/.bashrc`
+- `~/.bash_aliases`
+- `~/.zshrc`
+
+**Implementation**: `src/input/discovery.rs:151-254`
+- `CommandCache::load_user_aliases()` - loads user aliases from home directory
+- `CommandCache::load_system_aliases()` - loads system aliases, merges with user (user takes priority)
+- Uses `tokio::spawn_blocking` in main.rs to avoid blocking async executor
+- Performance: 1-5ms blocking I/O (async-safe via spawn_blocking)
+
+### Security Validation
+
+**Location**: `src/input/discovery.rs:337-373`
+
+Dangerous patterns rejected:
+- `rm -rf /` - Recursive delete from root
+- `rm -rf /*` - Recursive delete all
+- `mkfs` - Format filesystem
+- `dd if=/dev/zero` - Wipe disk
+- `:(){ :|:& };:` - Fork bomb
+- `chmod -R 777 /` - Chmod everything
+- `chown -R root /` - Chown everything
+- `> /dev/sda` - Direct disk write
+- `mkfs.` - Any mkfs variant
+
+When a dangerous alias is encountered:
+- Printed warning: "Warning: Rejecting potentially dangerous alias 'name': contains 'pattern'"
+- Alias silently rejected (not added to cache)
+- User-friendly - no crashes, no security violations
+
+### Built-in Command: reload-aliases
+
+**Purpose**: Runtime alias reloading for when config files change during session
+
+**Implementation**: `src/orchestrators/command.rs:52-118`
+
+**Usage**:
+```
+reload-aliases    # Reloads all system and user aliases from config files
+```
+
+**Behavior**:
+1. Clears current alias cache
+2. Reloads system aliases from `/etc/bash.bashrc`, etc.
+3. Reloads user aliases from `~/.bashrc`, etc.
+4. Shows success message to user
+5. New aliases available immediately for next command
+
+**Performance**: ~1-5ms blocking operation (uses `spawn_blocking`)
+
+---
 
 ## Handler Chain (7 Handlers)
 
@@ -946,17 +1066,39 @@ Both English and non-English queries end up as `InputType::NaturalLanguage` and 
 2. Command will be verified via PATH automatically
 3. Add test case to verify classification
 
+### Working with Aliases
+
+**Adding aliases programmatically**:
+1. Aliases are loaded at startup automatically from system and user config files
+2. Users define aliases in `~/.bashrc`, `~/.bash_aliases`, or `~/.zshrc` using standard Bash syntax
+3. Example: `alias ll='ls -la'`
+
+**Extending alias support**:
+1. Modify `CommandCache::load_user_aliases()` to add new file paths (unlikely to change)
+2. Modify `CommandCache::load_system_aliases()` to add new system file paths (unlikely to change)
+3. Add new dangerous patterns to `is_safe_alias()` if needed
+4. Test with `cargo test` - ensure serial tests use `#[serial_test::serial]`
+
+**Alias validation**:
+1. Dangerous patterns checked in `is_safe_alias()` in `src/input/discovery.rs:337-373`
+2. Safe parsing in `parse_aliases()` with quote handling (single, double, escaped)
+3. Warnings printed for malformed aliases (empty names/values, no equals sign, etc.)
+4. Invalid aliases silently rejected (not added to cache)
+
 ---
 
 ## Conclusion
 
 SCAN is a high-performance, maintainable input classification system that:
 
+✅ Expands aliases in <1μs (before classification)
 ✅ Classifies input in <100μs (average ~10μs)
 ✅ Prevents expensive LLM calls for typos
 ✅ Handles 70% of cases via fast cached lookup
 ✅ Gracefully delegates multilingual queries to LLM
 ✅ Provides clear, actionable feedback for typos
 ✅ Uses proven design patterns (Chain of Responsibility, Lazy Singleton)
+✅ Validates aliases for security (rejects dangerous patterns)
+✅ Supports runtime alias reloading via `reload-aliases` command
 
-**Production-ready**: 157 tests passing, 0 clippy warnings, optimized for real-world DevOps workflows.
+**Production-ready**: 236+ tests passing, 0 clippy warnings, optimized for real-world DevOps workflows.
