@@ -176,3 +176,66 @@ async fn test_simple_command_no_shell_interpretation() {
         _ => panic!("Expected simple Command"),
     }
 }
+
+#[tokio::test]
+async fn test_grep_no_match_exit_code_1() {
+    let classifier = InputClassifier::new();
+
+    // Test grep with no match returns exit 1 (benign, not an error)
+    let input = "ls -la | grep ps";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            // Execute the command
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+
+            // grep returns exit 1 when no match is found
+            // This is NOT an error, it's semantic (no match)
+            assert_eq!(result.exit_code, 1);
+
+            // No output because grep found no match
+            assert!(result.stdout.is_empty());
+
+            // No stderr either
+            assert!(result.stderr.is_empty());
+        }
+        _ => panic!("Expected Command with pipe"),
+    }
+}
+
+#[tokio::test]
+async fn test_grep_with_match_exit_code_0() {
+    let classifier = InputClassifier::new();
+
+    // Test grep with match returns exit 0
+    let input = "ls -la | grep Cargo";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            // Execute the command
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+
+            // grep returns exit 0 when match is found
+            assert_eq!(result.exit_code, 0);
+
+            // Should have output with matched lines
+            assert!(!result.stdout.is_empty());
+            assert!(result.stdout.contains("Cargo"));
+        }
+        _ => panic!("Expected Command with pipe"),
+    }
+}
