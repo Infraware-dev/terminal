@@ -4,7 +4,7 @@
 
 ## Overview
 
-SCAN is the core input classification system for Infraware Terminal. It uses **alias expansion** followed by a **Chain of Responsibility** pattern with 8 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
+SCAN is the core input classification system for Infraware Terminal. It uses **alias expansion** and **history expansion** followed by a **Chain of Responsibility** pattern with 9 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
 
 ### Architecture Diagram
 
@@ -27,7 +27,7 @@ SCAN is the core input classification system for Infraware Terminal. It uses **a
                               ↓
               ╔═══════════════════════════════╗
               ║  Chain of Responsibility      ║
-              ║  (8 Handlers in strict order) ║
+              ║  (9 Handlers in strict order) ║
               ╚═══════════════════════════════╝
                               ↓
     ┌────────────────────────┼────────────────────────┐
@@ -167,7 +167,7 @@ reload-aliases    # Reloads all system and user aliases from config files
 
 ---
 
-## Handler Chain (8 Handlers)
+## Handler Chain (9 Handlers)
 
 ### Order Matters!
 
@@ -176,14 +176,15 @@ Handlers are executed in strict order. Each returns:
 - `None` → pass to next handler
 
 ```rust
-1. EmptyInputHandler        // <1μs   - Fast path for empty input
-2. ShellBuiltinHandler      // <1μs   - Shell builtins (., :, [, [[, source, export, etc.)
-3. PathCommandHandler        // ~10μs  - Executable paths (./script.sh)
-4. KnownCommandHandler       // <1μs   - Whitelist + PATH verification (cached)
-5. CommandSyntaxHandler      // ~10μs  - Flags, pipes, redirects
-6. TypoDetectionHandler      // ~100μs - Levenshtein distance ≤2
-7. NaturalLanguageHandler    // ~5μs   - English patterns (precompiled)
-8. DefaultHandler            // <1μs   - Fallback to NaturalLanguage
+1. EmptyInputHandler        // <1μs    - Fast path for empty input
+2. HistoryExpansionHandler  // ~1-5μs  - Bash-style history expansion (!!,  !$, !^, !*)
+3. ShellBuiltinHandler      // <1μs    - Shell builtins (., :, [, [[, source, export, etc.)
+4. PathCommandHandler        // ~10μs   - Executable paths (./script.sh)
+5. KnownCommandHandler       // <1μs    - Whitelist + PATH verification (cached)
+6. CommandSyntaxHandler      // ~10μs   - Flags, pipes, redirects
+7. TypoDetectionHandler      // ~100μs  - Levenshtein distance ≤2
+8. NaturalLanguageHandler    // ~5μs    - English patterns (precompiled)
+9. DefaultHandler            // <1μs    - Fallback to NaturalLanguage
 ```
 
 ---
@@ -212,7 +213,67 @@ Action: Ignored by main.rs
 
 ---
 
-### 2. ShellBuiltinHandler
+### 2. HistoryExpansionHandler
+
+**Purpose**: Expand bash-style history expansion patterns (!!,  !$, !^, !*)
+
+**Location**: `src/input/history_expansion.rs`
+
+**Recognizes** (4 patterns):
+- `!!` - Entire previous command
+- `!$` - Last argument (or command itself if no args, Bash-compatible)
+- `!^` - First argument (fails if no args)
+- `!*` - All arguments (fails if no args)
+
+**Supports**:
+- Multiple expansions in one input: `printf '%s %s' !^ !$`
+- Preserves shell operators (pipes, redirects): `!! | grep pattern`
+- Thread-safe via Arc<RwLock<Vec<String>>>
+
+**Implementation Details**:
+- Requires history reference via `InputClassifier::with_history(Arc<RwLock>)`
+- Second-to-last semantics: Current input already added to history before classification
+- RwLock poisoning recovery on read errors
+- CommandParser integration for proper shell-words parsing
+
+**Examples**:
+```
+Input: "sudo !!" (history: ["ls -la /tmp", "pwd"])
+├─ First word: "sudo"
+├─ Contains "!!"? YES
+├─ Get second-to-last command: "pwd"
+├─ Expand to: "sudo pwd"
+└─ Output: Command("sudo", ["pwd"])
+
+Input: "vim !$" (history: ["cat file.txt", "vim !$"])
+├─ First word: "vim"
+├─ Contains "!$"? YES
+├─ Get second-to-last command: "cat file.txt"
+├─ Parse: command="cat", args=["file.txt"]
+├─ Last argument: "file.txt"
+├─ Expand to: "vim file.txt"
+└─ Output: Command("vim", ["file.txt"])
+
+Input: "echo !$" (history: ["pwd", "echo !$"])
+├─ First word: "echo"
+├─ Contains "!$"? YES
+├─ Get second-to-last command: "pwd"
+├─ Parse: command="pwd", args=[]
+├─ No arguments, use command itself (Bash behavior)
+├─ Expand to: "echo pwd"
+└─ Output: Command("echo", ["pwd"])
+```
+
+**Performance**: ~1-5μs (Arc<RwLock> read lock + pattern detection)
+
+**Why Position 2?**:
+- Must happen after EmptyInputHandler (need non-empty input)
+- Must happen before other handlers (expansion happens before classification)
+- Before ShellBuiltinHandler because `!!` might expand to a builtin
+
+---
+
+### 3. ShellBuiltinHandler
 
 **Purpose**: Recognize shell builtin commands that don't exist in PATH
 
@@ -295,7 +356,7 @@ Input: "source /etc/profile"
 
 ---
 
-### 3. PathCommandHandler
+### 4. PathCommandHandler
 
 **Purpose**: Detect executable paths (unambiguous command intent)
 
@@ -325,7 +386,7 @@ Output: Command("../build.sh", [])
 
 ---
 
-### 4. KnownCommandHandler
+### 5. KnownCommandHandler
 
 **Purpose**: Fast path for whitelisted DevOps commands with PATH verification
 
@@ -381,7 +442,7 @@ static COMMAND_CACHE: Lazy<RwLock<CommandCache>> = Lazy::new(|| {
 
 ---
 
-### 5. CommandSyntaxHandler
+### 6. CommandSyntaxHandler
 
 **Purpose**: Detect command syntax even if command is unknown
 
@@ -415,7 +476,7 @@ Reason: Contains environment variable
 
 ---
 
-### 6. TypoDetectionHandler
+### 7. TypoDetectionHandler
 
 **Purpose**: Catch typos before expensive LLM calls
 
@@ -466,7 +527,7 @@ Cost: $0 instead of $0.001-$0.01 per call
 
 ---
 
-### 7. NaturalLanguageHandler
+### 8. NaturalLanguageHandler
 
 **Purpose**: Detect English natural language patterns
 
@@ -529,7 +590,7 @@ static PATTERNS: Lazy<CompiledPatterns> = Lazy::new(|| {
 
 ---
 
-### 8. DefaultHandler
+### 9. DefaultHandler
 
 **Purpose**: Catch-all fallback (guarantees a result)
 
@@ -621,6 +682,10 @@ match classifier.classify(&input)? {
    │ EmptyInputHandler │
    └────────┬──────────┘
             ↓ Not empty
+   ┌──────────────────────────┐
+   │HistoryExpansionHandler   │
+   └────────┬─────────────────┘
+            ↓ No !!,  !$, !^, !*
    ┌──────────────────────┐
    │ ShellBuiltinHandler  │
    └────────┬─────────────┘
@@ -657,6 +722,7 @@ match classifier.classify(&input)? {
 └──────────┬───────────────┘
            ↓
    [EmptyInputHandler] ✗ Not empty
+   [HistoryExpansionHandler] ✗ No history patterns
    [ShellBuiltinHandler] ✗ "dokcer" not a builtin
    [PathCommandHandler] ✗ Not a path
    [KnownCommandHandler] ✗ "dokcer" not in whitelist
@@ -704,6 +770,7 @@ Show to user:
 └──────────┬───────────────────┘
            ↓
    [EmptyInputHandler] ✗
+   [HistoryExpansionHandler] ✗ No history patterns
    [ShellBuiltinHandler] ✗ "show" not a builtin
    [PathCommandHandler] ✗
    [KnownCommandHandler] ✗ "show" not in whitelist
@@ -743,6 +810,7 @@ Send to LLM for interpretation
 └──────────┬───────────────────┘
            ↓
    [EmptyInputHandler] ✗
+   [HistoryExpansionHandler] ✗ No history patterns
    [ShellBuiltinHandler] ✗ "what" not a builtin
    [PathCommandHandler] ✗
    [KnownCommandHandler] ✗ "what" not in whitelist
@@ -781,6 +849,14 @@ Send to LLM backend
 │ Input: ". ~/.bashrc"         │
 └──────────┬───────────────────┘
            ↓
+   ┌──────────────────────────────┐
+   │ EmptyInputHandler            │
+   └────────┬─────────────────────┘
+            ↓ Not empty
+   ┌──────────────────────────────┐
+   │ HistoryExpansionHandler      │
+   └────────┬─────────────────────┘
+            ↓ No history patterns
    ┌──────────────────────┐
    │ ShellBuiltinHandler  │
    └────────┬─────────────┘
@@ -823,6 +899,7 @@ Input: "[[ -f ~/.bashrc ]]"
 └──────────┬─────────────────────┘
            ↓
    [EmptyInputHandler] ✗ Not empty
+   [HistoryExpansionHandler] ✗ No history patterns
    [ShellBuiltinHandler] ✗ "ls" not a builtin
    [PathCommandHandler] ✗ Not a path
    [KnownCommandHandler] ✗ "ls" exists BUT input has shell operators
@@ -964,19 +1041,20 @@ pub fn is_available(command: &str) -> bool {
 **Strategy**: Fast paths first, expensive operations later
 
 ```
-Handler                  Avg Time    Hit Rate
-────────────────────────────────────────────
-EmptyInputHandler        <1μs        ~2%
-ShellBuiltinHandler      <1μs        ~2%   ← Shell builtins (., :, [[, source, etc.)
-PathCommandHandler       ~10μs       ~1%
-KnownCommandHandler      <1μs        ~65%  ← MOST COMMON
-CommandSyntaxHandler     ~10μs       ~5%
-TypoDetectionHandler     ~100μs      ~3%
-NaturalLanguageHandler   ~5μs        ~18%
-DefaultHandler           <1μs        ~4%
+Handler                     Avg Time    Hit Rate
+──────────────────────────────────────────────
+EmptyInputHandler           <1μs        ~2%
+HistoryExpansionHandler     ~1-5μs      ~0.5%  ← History expansion (!!,  !$, !^, !*)
+ShellBuiltinHandler         <1μs        ~2%    ← Shell builtins (., :, [[, source, etc.)
+PathCommandHandler          ~10μs       ~1%
+KnownCommandHandler         <1μs        ~65%   ← MOST COMMON
+CommandSyntaxHandler        ~10μs       ~5%
+TypoDetectionHandler        ~100μs      ~3%
+NaturalLanguageHandler      ~5μs        ~19%
+DefaultHandler              <1μs        ~2.5%
 ```
 
-**Result**: Average classification time = ~10μs (dominated by KnownCommandHandler cache hits + ShellBuiltinHandler fast path)
+**Result**: Average classification time = ~10μs (dominated by KnownCommandHandler cache hits + HistoryExpansionHandler/ShellBuiltinHandler fast paths)
 
 ---
 

@@ -16,6 +16,14 @@ This is the initial project setup with the complete module structure. Implementa
 
 ### Implemented in M1 (Production-Ready)
 
+- ✅ **History Expansion**: Bash-style history expansion (!!,  !$, !^, !*)
+  - `!!` - Entire previous command
+  - `!$` - Last argument (or command itself if no args, Bash-compatible)
+  - `!^` - First argument
+  - `!*` - All arguments
+  - Multiple expansions per input: `printf '%s %s' !^ !$`
+  - Preserves shell operators (pipes, redirects) in expanded output
+  - <20μs average overhead, thread-safe
 - ✅ **Alias Support**: System and user alias expansion with security validation
   - Loads from system files: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`
   - Loads from user files: `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
@@ -23,7 +31,7 @@ This is the initial project setup with the complete module structure. Implementa
   - O(1) HashMap lookup for performance (<1μs expansion overhead)
   - Built-in `reload-aliases` command for runtime reloading
   - Security: Rejects dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
-- ✅ **SCAN Algorithm**: Advanced input classification with 8-handler chain + alias expansion (<100μs avg)
+- ✅ **SCAN Algorithm**: Advanced input classification with 9-handler chain + alias + history expansion (<100μs avg)
   - Alias expansion before classification (single-level like Bash)
   - Shell builtin support (45+): `.`, `:`, `[`, `[[`, source, export, eval, exec, and more
   - Command recognition with PATH verification and caching
@@ -67,15 +75,16 @@ User Input → Alias Expansion → InputClassifier (8-Handler Chain)
                           Shell Exec Suggest LLM Backend
 ```
 
-**8-Handler Chain** (executed in strict order):
+**9-Handler Chain** (executed in strict order):
 1. **EmptyInputHandler** - Fast path for empty input (<1μs)
-2. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
-3. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
-4. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
-5. **CommandSyntaxHandler** - Flags, pipes, redirects detection (~10μs)
-6. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
-7. **NaturalLanguageHandler** - English patterns (precompiled regex) (~5μs)
-8. **DefaultHandler** - Fallback to natural language (<1μs)
+2. **HistoryExpansionHandler** - Bash-style history expansion: `!!`,  `!$`, `!^`, `!*` (~1-5μs)
+3. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
+4. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
+5. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
+6. **CommandSyntaxHandler** - Flags, pipes, redirects detection (~10μs)
+7. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
+8. **NaturalLanguageHandler** - English patterns (precompiled regex) (~5μs)
+9. **DefaultHandler** - Fallback to natural language (<1μs)
 
 **Key Features**:
 - Average classification: <100μs
@@ -172,12 +181,17 @@ cargo run
 Once running, you can:
 
 1. **Execute commands**: Type any shell command (e.g., `ls -la`, `docker ps`)
-2. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
-3. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
-4. **Navigate history**: Use ↑/↓ arrow keys
-5. **Tab completion**: Press Tab to complete commands/paths
-6. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-7. **Quit**: Press Ctrl+C or Ctrl+D
+2. **Use history expansion**: Use bash-style history patterns:
+   - `!!` - Re-run previous command: `sudo !!`
+   - `!$` - Use last argument: `vim !$` (if previous was `cat file.txt`)
+   - `!^` - Use first argument: `echo !^` (if previous was `cat file1 file2`)
+   - `!*` - Use all arguments: `find !*` (if previous was `ls -la /tmp`)
+3. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
+4. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
+5. **Navigate history**: Use ↑/↓ arrow keys
+6. **Tab completion**: Press Tab to complete commands/paths
+7. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
+8. **Quit**: Press Ctrl+C or Ctrl+D
 
 #### Alias Support
 
@@ -280,7 +294,8 @@ xdg-open target/criterion/report/index.html  # Linux
 - [x] Auto-install framework (prompt logic implemented)
 
 **Week 4: Testing & Optimization** ✅
-- [x] Comprehensive test suite (229 tests passing)
+- [x] Comprehensive test suite (245 tests passing)
+- [x] History expansion tests (16 unit tests covering all edge cases)
 - [x] Performance benchmarking suite
 - [x] Integration tests for end-to-end workflows
 - [x] Cross-platform testing (Ubuntu, Windows, macOS)

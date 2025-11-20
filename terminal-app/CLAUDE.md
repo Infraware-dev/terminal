@@ -84,8 +84,8 @@ cargo clean
 ### Core Flow
 ```
 User Input → Alias Expansion → InputClassifier → [Command Path | Natural Language Path]
-              (if matches)        ↓                           ↓
-                              CommandExecutor             LLMClient
+              (if matches)    (9-handler chain)      ↓                           ↓
+                           incl. History Expansion  CommandExecutor             LLMClient
                                    ↓                           ↓
                               Shell Output              ResponseRenderer
 ```
@@ -99,16 +99,25 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - `events.rs`: Keyboard event handling
 
 **`input/`** - Input classification and parsing (**SCAN Algorithm** - Shell-Command And Natural-language)
-- `classifier.rs`: Main InputClassifier coordinating the 8-handler chain with **alias expansion** support
-- `handler.rs`: **Chain of Responsibility** implementation with 8 handlers:
+- `classifier.rs`: Main InputClassifier coordinating the 9-handler chain with **alias expansion** and **history expansion** support
+- `handler.rs`: **Chain of Responsibility** implementation with 9 handlers:
   1. EmptyInputHandler - Fast path for empty/whitespace input
-  2. ShellBuiltinHandler - Shell builtins (45+) without PATH verification (., :, [, [[, source, export, etc.)
-  3. PathCommandHandler - Executable paths (./script.sh, /usr/bin/cmd) with platform-specific checks
-  4. KnownCommandHandler - DevOps commands whitelist (60+) with PATH existence verification
-  5. CommandSyntaxHandler - Detects command syntax (flags, pipes, redirects, env vars, subshells)
-  6. TypoDetectionHandler - Levenshtein distance ≤2 for typo detection (prevents LLM false positives)
-  7. NaturalLanguageHandler - English patterns with precompiled regex (multilingual delegated to LLM)
-  8. DefaultHandler - Fallback to natural language (guarantees a result)
+  2. HistoryExpansionHandler - Bash-style history expansions (!!,  !$, !^, !*)
+  3. ShellBuiltinHandler - Shell builtins (45+) without PATH verification (., :, [, [[, source, export, etc.)
+  4. PathCommandHandler - Executable paths (./script.sh, /usr/bin/cmd) with platform-specific checks
+  5. KnownCommandHandler - DevOps commands whitelist (60+) with PATH existence verification
+  6. CommandSyntaxHandler - Detects command syntax (flags, pipes, redirects, env vars, subshells)
+  7. TypoDetectionHandler - Levenshtein distance ≤2 for typo detection (prevents LLM false positives)
+  8. NaturalLanguageHandler - English patterns with precompiled regex (multilingual delegated to LLM)
+  9. DefaultHandler - Fallback to natural language (guarantees a result)
+- `history_expansion.rs`: **Bash-style history expansion** (!!,  !$, !^, !*) with Arc<RwLock> history sharing
+  - `!!` - Expand to entire previous command
+  - `!$` - Expand to last argument (or command itself if no args, Bash-compatible)
+  - `!^` - Expand to first argument (fails if no args)
+  - `!*` - Expand to all arguments (fails if no args)
+  - Supports multiple expansions in one input (e.g., `printf '%s' !^ !$`)
+  - Preserves shell operators (pipes, redirects) in expanded output
+  - Thread-safe history access via Arc<RwLock<Vec<String>>>
 - `shell_builtins.rs`: **Shell builtin recognition** without PATH verification (., :, [, [[, source, export, etc.)
   - Handles 45+ builtins: punctuation (`.`, `:`, `[`, `[[`), evaluation (eval, exec), variables (export, unset, set)
   - Execution via `sh -c` for proper builtin interpretation
@@ -156,7 +165,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
    - **Builder Pattern**: Terminal construction (`main.rs` InfrawareTerminalBuilder)
    - **Single Responsibility Principle**: Orchestrators, buffer components
 
-2. **SCAN Algorithm** (Shell-Command And Natural-language): Production-ready input classification with alias expansion + Chain of Responsibility with 8 optimized handlers executing in strict order (<100μs average):
+2. **SCAN Algorithm** (Shell-Command And Natural-language): Production-ready input classification with alias expansion + Chain of Responsibility with 9 optimized handlers executing in strict order (<100μs average):
 
    **Pre-classification**: Alias expansion
    - Extract first word from input
@@ -166,13 +175,14 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
    **Handler chain**:
    1. **EmptyInputHandler**: Fast path for empty/whitespace input (<1μs)
-   2. **ShellBuiltinHandler**: Shell builtins (45+) without PATH verification - punctuation (`.`, `:`, `[`, `[[`), evaluation (eval, exec), variables (export, unset, set), I/O (echo, printf), job control (jobs, fg, bg) (<1μs)
-   3. **PathCommandHandler**: Executable paths with platform-specific checks - Unix: executable bit check, Windows: .exe/.bat/.cmd extensions (~10μs)
-   4. **KnownCommandHandler**: Whitelist of 60+ DevOps commands + cached PATH verification (<1μs cache hit, 1-5ms cache miss)
-   5. **CommandSyntaxHandler**: Shell syntax detection - flags (--/-), pipes (|), redirects (>/</>>), logical operators (&&/||), env vars ($VAR), subshells ($()/ backticks) (~10μs)
-   6. **TypoDetectionHandler**: Levenshtein distance ≤2 typo detection with `strsim` crate - prevents expensive LLM calls for "dokcer" → "docker" (~100μs)
-   7. **NaturalLanguageHandler**: English-only patterns (question words, articles, polite phrases) using precompiled regex - delegates multilingual to LLM (~5μs)
-   8. **DefaultHandler**: Fallback to natural language - guarantees result, never panics (<1μs)
+   2. **HistoryExpansionHandler**: Bash-style history expansion (!!,  !$, !^, !*) with Arc<RwLock> history sharing (~1-5μs)
+   3. **ShellBuiltinHandler**: Shell builtins (45+) without PATH verification - punctuation (`.`, `:`, `[`, `[[`), evaluation (eval, exec), variables (export, unset, set), I/O (echo, printf), job control (jobs, fg, bg) (<1μs)
+   4. **PathCommandHandler**: Executable paths with platform-specific checks - Unix: executable bit check, Windows: .exe/.bat/.cmd extensions (~10μs)
+   5. **KnownCommandHandler**: Whitelist of 60+ DevOps commands + cached PATH verification (<1μs cache hit, 1-5ms cache miss)
+   6. **CommandSyntaxHandler**: Shell syntax detection - flags (--/-), pipes (|), redirects (>/</>>), logical operators (&&/||), env vars ($VAR), subshells ($()/ backticks) (~10μs)
+   7. **TypoDetectionHandler**: Levenshtein distance ≤2 typo detection with `strsim` crate - prevents expensive LLM calls for "dokcer" → "docker" (~100μs)
+   8. **NaturalLanguageHandler**: English-only patterns (question words, articles, polite phrases) using precompiled regex - delegates multilingual to LLM (~5μs)
+   9. **DefaultHandler**: Fallback to natural language - guarantees result, never panics (<1μs)
 
    **Performance Optimizations** (see `benches/scan_benchmark.rs`):
    - **Precompiled RegexSet**: `once_cell::Lazy<CompiledPatterns>` compiles patterns once at startup (10-100x speedup)
@@ -222,6 +232,40 @@ DO NOT implement these yet (deferred to M2/M3):
 - Use `tokio-test` for async test utilities
 
 ## Development Guidelines
+
+### Working with History Expansion
+
+**History Expansion Support**:
+- Bash-style history expansion patterns: `!!`, `!$`, `!^`, `!*`
+- Implemented in `src/input/history_expansion.rs` (405 lines, 16 unit tests)
+- Requires Arc<RwLock<Vec<String>>> reference to command history
+- Get-second-to-last semantics: Current input already in history when classified
+
+**Supported Patterns**:
+- `!!` - Expand to entire previous command
+- `!$` - Expand to last argument (Bash-compatible: expands to command itself if no args)
+- `!^` - Expand to first argument (fails if command has no args)
+- `!*` - Expand to all arguments (fails if command has no args)
+- Multiple expansions in one input work correctly (e.g., `printf '%s %s' !^ !$`)
+
+**Integration with Classifier**:
+1. HistoryExpansionHandler positioned at #2 in chain (after EmptyInputHandler, before ShellBuiltinHandler)
+2. Set history via `InputClassifier::with_history(Arc<RwLock<Vec<String>>>)`
+3. History synced after `submit_input()` in main.rs
+4. Thread-safe via Arc<RwLock> with poisoning recovery
+
+**Bug Fixes Completed**:
+- **Bug 1 (Commit 787a96f)**: `!!` was being blocked by PATH check in orchestrator - Fixed: Added `is_history_expansion` check to skip PATH verification
+- **Bug 2 (Commit 6d81b05)**: `!!` returned current input instead of previous command - Fixed: Modified get_last_command() to return second-to-last entry (history.len() - 2)
+- **Bug 3 (Commit c6932da)**: `!$` failed when command had no arguments - Fixed: Made expand_bang_dollar() return command itself when args is empty (Bash-compatible)
+
+**Performance**:
+- History lookup: ~1-5μs (Arc<RwLock> read lock overhead)
+- Pattern detection: <1μs (simple string contains checks)
+- Command parsing: 1-10μs (via CommandParser)
+- Total: <20μs for average history expansion
+
+---
 
 ### Working with Aliases
 
@@ -417,10 +461,20 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 ## Implementation Status & Known Limitations
 
 ### ✅ Completed (Production-Ready)
-- **SCAN Algorithm**: All 8 handlers implemented with performance optimizations
+- **SCAN Algorithm**: All 9 handlers implemented with performance optimizations
+  - History expansion support (!!,  !$, !^, !*): Bash-compatible patterns with <20μs average overhead
   - Shell builtin support (45+): Punctuation (`.`, `:`, `[`, `[[`), evaluation (eval, exec), variables (export, unset, set), I/O (echo, printf), job control (jobs, fg, bg)
   - Execution via `sh -c` for proper builtin interpretation
-  - Performance: <1μs handler overhead
+  - Performance: <1μs handler overhead per builtin
+- **History Expansion**: Full bash-style history expansion support
+  - `!!` - Entire previous command
+  - `!$` - Last argument (Bash-compatible: command itself if no args)
+  - `!^` - First argument (fails if no args)
+  - `!*` - All arguments (fails if no args)
+  - Multiple expansions per input supported
+  - Preserves shell operators in expanded output
+  - Thread-safe via Arc<RwLock<Vec<String>>>
+  - 16 comprehensive unit tests, all edge cases covered
 - **Alias Support**: System and user alias loading + single-level expansion with security validation
   - Loads from: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`, `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
   - User aliases override system aliases (priority ordering)
@@ -433,7 +487,7 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 - **Precompiled Patterns**: Zero runtime regex compilation overhead
 - **Cross-Platform**: Windows/macOS/Linux support with platform-specific handlers
 - **Benchmarking**: Performance benchmarks in `benches/scan_benchmark.rs`
-- **Test Coverage**: 229 tests passing, 0 clippy warnings
+- **Test Coverage**: 245 tests passing, 0 clippy warnings
 - **Interactive Command Blocking**: 43 commands blocked with user-friendly suggestions
 - **Known Commands Module**: Single source of truth for 60+ DevOps commands
 - **Shell Builtin Support**: 45+ builtins recognized without PATH verification
