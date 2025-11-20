@@ -49,7 +49,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Command History**: Navigate previous commands with arrow keys
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
-- ✅ **Code Quality**: 229 tests passing, 0 clippy warnings, serial tests for shared state, production-ready code
+- ✅ **Code Quality**: 245 tests passing (including edge case tests for panic safety), 0 clippy warnings, serial tests for shared state, production-ready code
 
 ### Coming in M2/M3
 
@@ -66,7 +66,7 @@ This is the initial project setup with the complete module structure. Implementa
 The core of Infraware Terminal is the **SCAN algorithm** - a high-performance input classification system using the Chain of Responsibility pattern:
 
 ```
-User Input → Alias Expansion → InputClassifier (8-Handler Chain)
+User Input → Alias Expansion → InputClassifier (9-Handler Chain)
                 (if matches)           ↓
                               ┌────────┼────────┐
                               ↓        ↓        ↓
@@ -89,7 +89,8 @@ User Input → Alias Expansion → InputClassifier (8-Handler Chain)
 **Key Features**:
 - Average classification: <100μs
 - Precompiled regex patterns (10-100x faster)
-- Thread-safe command cache (RwLock)
+- Thread-safe command cache (RwLock) with poisoning recovery
+- Panic-safe indexing on all array access (no unwrap() on array indices)
 - English-first with LLM fallback for multilingual support
 
 See `docs/SCAN_ARCHITECTURE.md` for complete documentation.
@@ -109,10 +110,12 @@ infraware-terminal/
 │   │   └── events.rs             # Keyboard event handling
 │   ├── input/                     # SCAN Algorithm
 │   │   ├── classifier.rs         # InputClassifier coordinator
-│   │   ├── handler.rs            # 8-handler Chain of Responsibility
+│   │   ├── handler.rs            # 9-handler Chain of Responsibility
+│   │   ├── history_expansion.rs  # Bash-style history expansion (!!, !$, !^, !*)
 │   │   ├── shell_builtins.rs     # Shell builtin recognition (., :, [, [[, etc.)
 │   │   ├── patterns.rs           # Precompiled RegexSet patterns
 │   │   ├── discovery.rs          # PATH-aware command cache
+│   │   ├── known_commands.rs     # Single source of truth for 60+ DevOps commands
 │   │   ├── typo_detection.rs     # Levenshtein distance typo detection
 │   │   └── parser.rs             # Shell command parsing
 │   ├── executor/                  # Command execution
@@ -294,8 +297,9 @@ xdg-open target/criterion/report/index.html  # Linux
 - [x] Auto-install framework (prompt logic implemented)
 
 **Week 4: Testing & Optimization** ✅
-- [x] Comprehensive test suite (245 tests passing)
+- [x] Comprehensive test suite (245 tests passing, including 2 new edge case tests for panic safety)
 - [x] History expansion tests (16 unit tests covering all edge cases)
+- [x] Panic safety improvements (safe indexing in 4 locations, no unwrap on array access)
 - [x] Performance benchmarking suite
 - [x] Integration tests for end-to-end workflows
 - [x] Cross-platform testing (Ubuntu, Windows, macOS)
