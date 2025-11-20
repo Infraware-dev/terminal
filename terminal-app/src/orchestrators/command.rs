@@ -56,10 +56,14 @@ impl CommandOrchestrator {
             return self.handle_reload_aliases_command(state).await;
         }
 
-        // Check if command exists (skip check if using shell interpretation or if it's a shell builtin)
+        // Check if command exists (skip check if using shell interpretation, shell builtin, or history expansion)
         // Shell builtins don't exist in PATH but are valid commands that must be executed via shell
+        // History expansions (!!, !$, etc.) should have been expanded by HistoryExpansionHandler
+        let is_history_expansion = cmd.starts_with('!');
+
         if original_input.is_none()
             && !ShellBuiltinHandler::requires_shell_execution(cmd)
+            && !is_history_expansion
             && !CommandExecutor::command_exists(cmd)
         {
             self.handle_command_not_found(cmd, state);
