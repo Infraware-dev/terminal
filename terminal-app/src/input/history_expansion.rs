@@ -50,13 +50,23 @@ impl HistoryExpansionHandler {
     }
 
     /// Get the last command from history
+    ///
+    /// Returns the second-to-last command because by the time we classify input,
+    /// the current input has already been added to history by submit_input().
+    /// For example, if history is ["ls", "pwd", "!!"], we want to return "pwd",
+    /// not "!!" itself.
     fn get_last_command(&self) -> Option<String> {
         let history = self.history.as_ref()?;
         let guard = match history.read() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        guard.last().cloned()
+
+        // Get second-to-last command (skip the current input which is last)
+        if guard.len() < 2 {
+            return None;
+        }
+        guard.get(guard.len() - 2).cloned()
     }
 
     /// Parse a command into command and args
@@ -188,7 +198,8 @@ mod tests {
 
     #[test]
     fn test_expand_bang_bang() {
-        let handler = create_handler_with_history(vec!["ls -la"]);
+        // Simulate real flow: history has previous command + current input
+        let handler = create_handler_with_history(vec!["ls -la", "!!"]);
         let result = handler.handle("!!").unwrap();
 
         match result {
@@ -202,7 +213,8 @@ mod tests {
 
     #[test]
     fn test_expand_bang_bang_with_sudo() {
-        let handler = create_handler_with_history(vec!["apt update"]);
+        // Simulate real flow: history has previous command + current input
+        let handler = create_handler_with_history(vec!["apt update", "sudo !!"]);
         let result = handler.handle("sudo !!").unwrap();
 
         match result {
@@ -216,7 +228,8 @@ mod tests {
 
     #[test]
     fn test_expand_bang_dollar() {
-        let handler = create_handler_with_history(vec!["cat file.txt"]);
+        // Simulate real flow: history has previous command + current input
+        let handler = create_handler_with_history(vec!["cat file.txt", "vim !$"]);
         let result = handler.handle("vim !$").unwrap();
 
         match result {
@@ -230,7 +243,8 @@ mod tests {
 
     #[test]
     fn test_expand_bang_caret() {
-        let handler = create_handler_with_history(vec!["cat file1.txt file2.txt"]);
+        // Simulate real flow: history has previous command + current input
+        let handler = create_handler_with_history(vec!["cat file1.txt file2.txt", "vim !^"]);
         let result = handler.handle("vim !^").unwrap();
 
         match result {
@@ -244,7 +258,8 @@ mod tests {
 
     #[test]
     fn test_expand_bang_star() {
-        let handler = create_handler_with_history(vec!["cat file1.txt file2.txt"]);
+        // Simulate real flow: history has previous command + current input
+        let handler = create_handler_with_history(vec!["cat file1.txt file2.txt", "echo !*"]);
         let result = handler.handle("echo !*").unwrap();
 
         match result {
@@ -279,7 +294,8 @@ mod tests {
 
     #[test]
     fn test_command_without_args() {
-        let handler = create_handler_with_history(vec!["pwd"]);
+        // Simulate real flow: history has previous command + current input
+        let handler = create_handler_with_history(vec!["pwd", "!!"]);
         let result = handler.handle("!!").unwrap();
 
         match result {
@@ -307,7 +323,8 @@ mod tests {
 
     #[test]
     fn test_preserve_shell_operators() {
-        let handler = create_handler_with_history(vec!["echo hello"]);
+        // Simulate real flow: history has previous command + current input
+        let handler = create_handler_with_history(vec!["echo hello", "!! | grep hello"]);
         let result = handler.handle("!! | grep hello").unwrap();
 
         match result {
