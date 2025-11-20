@@ -688,19 +688,34 @@ mod tests {
     fn test_known_command_handler() {
         let handler = KnownCommandHandler::with_defaults();
 
-        // Known commands should be handled
-        assert!(matches!(
-            handler.handle("ls -la"),
-            Some(InputType::Command { .. })
-        ));
-        assert!(matches!(
-            handler.handle("docker ps"),
-            Some(InputType::Command { .. })
-        ));
+        // Test behavior based on what's actually installed
+        // The handler correctly returns None if command is in whitelist but not in PATH
 
-        // Unknown commands should pass through
-        assert_eq!(handler.handle("unknown-command"), None);
+        // Test 1: Unknown commands should always pass through
+        assert_eq!(handler.handle("unknown-command-xyz-123"), None);
         assert_eq!(handler.handle("how do I list files"), None);
+
+        // Test 2: Test with a command that should be universally available
+        // If 'ls' exists in PATH (common on Unix), it should be recognized
+        if crate::input::discovery::CommandCache::is_available("ls") {
+            assert!(matches!(
+                handler.handle("ls -la"),
+                Some(InputType::Command { .. })
+            ));
+        }
+
+        // Test 3: Command in whitelist but not installed should return None
+        // This is the CORRECT behavior - handler passes to next handler
+        if !crate::input::discovery::CommandCache::is_available("docker") {
+            // If docker not installed, handler should return None (correct)
+            assert_eq!(handler.handle("docker ps"), None);
+        } else {
+            // If docker IS installed, handler should recognize it
+            assert!(matches!(
+                handler.handle("docker ps"),
+                Some(InputType::Command { .. })
+            ));
+        }
     }
 
     #[test]
