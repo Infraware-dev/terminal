@@ -46,7 +46,8 @@ const REQUIRES_INTERACTIVE: &[&str] = &[
     "less", "more", "most", "man", "info", // File managers
     "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
     "watch", // System monitors (non-root)
-    "top", "htop", "btop", "atop",
+    "top", "htop", "btop", "atop", // Privilege escalation (needs password input)
+    "sudo",
 ];
 
 /// Commands that are interactive but NOT supported (blocked entirely)
@@ -543,6 +544,9 @@ mod tests {
         assert!(!CommandExecutor::requires_interactive("dnf"));
         assert!(!CommandExecutor::requires_interactive("pacman"));
 
+        // Privilege escalation requires interactive (password prompt)
+        assert!(CommandExecutor::requires_interactive("sudo"));
+
         // Test that blocked commands return false
         assert!(!CommandExecutor::requires_interactive("ssh"));
         assert!(!CommandExecutor::requires_interactive("python"));
@@ -557,6 +561,7 @@ mod tests {
         assert!(CommandExecutor::is_interactive_command("nano"));
         assert!(CommandExecutor::is_interactive_command("htop"));
         assert!(CommandExecutor::is_interactive_command("less"));
+        assert!(CommandExecutor::is_interactive_command("sudo"));
 
         // Blocked interactive
         assert!(CommandExecutor::is_interactive_command("ssh"));

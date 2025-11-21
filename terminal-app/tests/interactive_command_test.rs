@@ -8,6 +8,7 @@ fn test_command_existence_check_before_interactive() {
     assert!(CommandExecutor::requires_interactive("top"));
     assert!(CommandExecutor::requires_interactive("vim"));
     assert!(CommandExecutor::requires_interactive("nano"));
+    assert!(CommandExecutor::requires_interactive("sudo"));
 
     // Package managers are NOT interactive (output is captured for scrolling)
     assert!(!CommandExecutor::requires_interactive("apt"));
@@ -19,6 +20,7 @@ fn test_command_existence_check_before_interactive() {
     let _ = CommandExecutor::command_exists("htop");
     let _ = CommandExecutor::command_exists("top");
     let _ = CommandExecutor::command_exists("apt");
+    let _ = CommandExecutor::command_exists("sudo");
 }
 
 #[tokio::test]
