@@ -62,6 +62,39 @@ impl TerminalUI {
         self.terminal.show_cursor()?;
         Ok(())
     }
+
+    /// Suspend TUI mode for interactive command execution
+    ///
+    /// Disables raw mode, leaves alternate screen, shows cursor.
+    /// Terminal returns to normal state for interactive commands like vim, less, etc.
+    pub fn suspend(&mut self) -> Result<()> {
+        // Show cursor before leaving
+        self.terminal.show_cursor()?;
+
+        // Leave alternate screen
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+
+        // Disable raw mode
+        disable_raw_mode()?;
+
+        Ok(())
+    }
+
+    /// Resume TUI mode after interactive command completes
+    ///
+    /// Re-enables raw mode, enters alternate screen, clears screen.
+    pub fn resume(&mut self) -> Result<()> {
+        // Enable raw mode
+        enable_raw_mode()?;
+
+        // Enter alternate screen
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+
+        // Clear screen to prevent artifacts
+        self.terminal.clear()?;
+
+        Ok(())
+    }
 }
 
 impl Drop for TerminalUI {

@@ -56,6 +56,13 @@ impl CommandOrchestrator {
             return self.handle_reload_aliases_command(state).await;
         }
 
+        // Check if command requires interactive execution
+        if CommandExecutor::requires_interactive(cmd) {
+            return self
+                .execute_interactive_and_display(cmd, args, state, ui)
+                .await;
+        }
+
         // Check if command exists (skip check if using shell interpretation, shell builtin, or history expansion)
         // Shell builtins don't exist in PATH but are valid commands that must be executed via shell
         // History expansions (!!, !$, etc.) should have been expanded by HistoryExpansionHandler
@@ -123,6 +130,35 @@ impl CommandOrchestrator {
         state.add_output(MessageFormatter::install_suggestion(
             PackageInstaller::is_available_static(),
         ));
+    }
+
+    /// Execute interactive command with TUI suspension and display result
+    async fn execute_interactive_and_display(
+        &self,
+        cmd: &str,
+        args: &[String],
+        state: &mut TerminalState,
+        ui: &mut TerminalUI,
+    ) -> Result<()> {
+        match CommandExecutor::execute_interactive(cmd, args, ui).await {
+            Ok(output) => {
+                // Interactive commands don't capture stdout/stderr
+                // Just show completion message with exit code
+                if output.is_success() {
+                    state.add_output(format!(
+                        "Interactive command '{}' completed successfully",
+                        cmd
+                    ));
+                } else {
+                    state.add_output(MessageFormatter::command_failed(output.exit_code));
+                }
+            }
+            Err(e) => {
+                state.add_output(MessageFormatter::execution_error(e.to_string()));
+            }
+        }
+
+        Ok(())
     }
 
     /// Execute command and display formatted output

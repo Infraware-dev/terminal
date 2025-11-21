@@ -108,6 +108,23 @@ impl CommandExecutor {
         Self::INTERACTIVE_COMMANDS.contains(&cmd)
     }
 
+    /// Check if a command requires interactive execution with TUI suspension
+    ///
+    /// These commands need a real TTY and will be executed with the TUI suspended.
+    pub fn requires_interactive(cmd: &str) -> bool {
+        matches!(
+            cmd,
+            // Text editors
+            "vim" | "nvim" | "nano" | "emacs" | "pico" | "ed" | "vi" |
+            // Pagers
+            "less" | "more" | "most" | "man" | "info" |
+            // File managers
+            "mc" | "ranger" | "nnn" | "lf" | "vifm" |
+            // Watchers
+            "watch"
+        )
+    }
+
     /// Check if a command is a shell builtin that must be executed through a shell
     fn is_shell_builtin(cmd: &str) -> bool {
         ShellBuiltinHandler::requires_shell_execution(cmd)
@@ -151,17 +168,16 @@ impl CommandExecutor {
         args: &[String],
         original_input: Option<&str>,
     ) -> Result<CommandOutput> {
-        // Block interactive commands
-        if Self::is_interactive_command(cmd) {
+        // Block interactive commands that are NOT supported via TUI suspension
+        // Commands in requires_interactive() will be handled separately
+        if Self::is_interactive_command(cmd) && !Self::requires_interactive(cmd) {
             return Ok(CommandOutput {
                 stdout: String::new(),
                 stderr: format!(
                     "Interactive command '{}' is not supported in this terminal.\n\
                      Suggestions:\n\
                      - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
-                     - For 'vim/nano': use 'cat' to view files, or edit externally\n\
-                     - For 'less': use 'cat' or 'head/tail'\n\
-                     - For shells: commands are already executed in a shell\n\
+                     - For 'ssh/tmux/screen': use in a separate terminal window\n\
                      - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')",
                     cmd
                 ),
@@ -260,6 +276,59 @@ impl CommandExecutor {
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             exit_code: output.status.code().unwrap_or(-1),
         })
+    }
+
+    /// Execute interactive command with TUI suspension
+    ///
+    /// # Arguments
+    /// * `cmd` - Command to execute
+    /// * `args` - Command arguments
+    /// * `ui` - TUI instance (will be suspended/resumed)
+    ///
+    /// # Returns
+    /// CommandOutput with exit code (stdout/stderr not captured)
+    ///
+    /// # Unix-Only
+    /// This method is Unix-only (Linux/macOS). On Windows, it returns an error.
+    pub async fn execute_interactive(
+        cmd: &str,
+        args: &[String],
+        ui: &mut crate::terminal::TerminalUI,
+    ) -> Result<CommandOutput> {
+        #[cfg(target_os = "windows")]
+        {
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Interactive command '{}' is not supported on Windows.\n\
+                     Interactive commands are only available on Linux and macOS.",
+                    cmd
+                ),
+                exit_code: 1,
+            });
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Suspend TUI
+            ui.suspend().context("Failed to suspend TUI")?;
+
+            // Run command in foreground (inherits stdin/stdout/stderr)
+            let result = std::process::Command::new(cmd).args(args).status();
+
+            // Always resume TUI, even if command failed
+            ui.resume().context("Failed to resume TUI")?;
+
+            // Return result
+            match result {
+                Ok(exit_status) => Ok(CommandOutput {
+                    stdout: String::new(), // Not captured
+                    stderr: String::new(),
+                    exit_code: exit_status.code().unwrap_or(-1),
+                }),
+                Err(e) => Err(anyhow::anyhow!("Command failed: {}", e)),
+            }
+        }
     }
 
     /// Check if a command exists in the PATH
@@ -404,9 +473,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_interactive_command_blocked() {
-        // Test that interactive commands are blocked
-        let output = CommandExecutor::execute("vim", &[], None).await.unwrap();
+    async fn test_unsupported_interactive_command_blocked() {
+        // Test that unsupported interactive commands (not in requires_interactive) are blocked
+        // ssh is in INTERACTIVE_COMMANDS but NOT in requires_interactive
+        let output = CommandExecutor::execute("ssh", &[], None).await.unwrap();
         assert!(!output.is_success());
         assert_eq!(output.exit_code, 1);
         assert!(output.stderr.contains("Interactive command"));
@@ -415,17 +485,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_top_command_blocked() {
+        // top is in INTERACTIVE_COMMANDS but NOT in requires_interactive
         let output = CommandExecutor::execute("top", &[], None).await.unwrap();
         assert!(!output.is_success());
         assert!(output.stderr.contains("Interactive command"));
         assert!(output.stderr.contains("top -b -n 1"));
     }
 
-    #[tokio::test]
-    async fn test_nano_command_blocked() {
-        let output = CommandExecutor::execute("nano", &[], None).await.unwrap();
-        assert!(!output.is_success());
-        assert!(output.stderr.contains("Interactive command"));
+    #[test]
+    fn test_requires_interactive() {
+        // Test that supported interactive commands are detected
+        assert!(CommandExecutor::requires_interactive("vim"));
+        assert!(CommandExecutor::requires_interactive("nano"));
+        assert!(CommandExecutor::requires_interactive("less"));
+        assert!(CommandExecutor::requires_interactive("man"));
+        assert!(CommandExecutor::requires_interactive("mc"));
+
+        // Test that unsupported commands return false
+        assert!(!CommandExecutor::requires_interactive("ssh"));
+        assert!(!CommandExecutor::requires_interactive("top"));
+        assert!(!CommandExecutor::requires_interactive("ls"));
     }
 
     #[test]
