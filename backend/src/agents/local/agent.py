@@ -1,3 +1,5 @@
+"""Local agent configuration and initialization."""
+
 from langchain.agents import create_agent
 from langchain_community.tools import ShellTool
 from langchain_core.tools import tool
@@ -12,6 +14,7 @@ base_shell_tool = ShellTool(ask_human_input=False)
 @tool
 def shell_with_approval(commands: str) -> str:
     """Execute shell commands with human approval.
+
     Asks for approval before running the command.
     """
     # Ask for approval using LangGraph's interrupt mechanism
