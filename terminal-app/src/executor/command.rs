@@ -46,8 +46,7 @@ const REQUIRES_INTERACTIVE: &[&str] = &[
     "less", "more", "most", "man", "info", // File managers
     "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
     "watch", // System monitors (non-root)
-    "top", "htop", "btop", "atop", // Package managers (some commands work without sudo)
-    "apt", "apt-get", "yum", "dnf", "pacman",
+    "top", "htop", "btop", "atop",
 ];
 
 /// Commands that are interactive but NOT supported (blocked entirely)
@@ -537,10 +536,12 @@ mod tests {
         assert!(!CommandExecutor::requires_interactive("iftop"));
         assert!(!CommandExecutor::requires_interactive("nethogs"));
 
-        // Package managers
-        assert!(CommandExecutor::requires_interactive("apt"));
-        assert!(CommandExecutor::requires_interactive("apt-get"));
-        assert!(CommandExecutor::requires_interactive("yum"));
+        // Package managers are NOT interactive (output captured for scrolling)
+        assert!(!CommandExecutor::requires_interactive("apt"));
+        assert!(!CommandExecutor::requires_interactive("apt-get"));
+        assert!(!CommandExecutor::requires_interactive("yum"));
+        assert!(!CommandExecutor::requires_interactive("dnf"));
+        assert!(!CommandExecutor::requires_interactive("pacman"));
 
         // Test that blocked commands return false
         assert!(!CommandExecutor::requires_interactive("ssh"));
@@ -556,16 +557,20 @@ mod tests {
         assert!(CommandExecutor::is_interactive_command("nano"));
         assert!(CommandExecutor::is_interactive_command("htop"));
         assert!(CommandExecutor::is_interactive_command("less"));
-        assert!(CommandExecutor::is_interactive_command("apt"));
 
         // Blocked interactive
         assert!(CommandExecutor::is_interactive_command("ssh"));
         assert!(CommandExecutor::is_interactive_command("python"));
+        assert!(CommandExecutor::is_interactive_command("iotop"));
+        assert!(CommandExecutor::is_interactive_command("iftop"));
 
-        // Non-interactive
+        // Non-interactive (including package managers)
         assert!(!CommandExecutor::is_interactive_command("ls"));
         assert!(!CommandExecutor::is_interactive_command("ps"));
         assert!(!CommandExecutor::is_interactive_command("cat"));
+        assert!(!CommandExecutor::is_interactive_command("apt"));
+        assert!(!CommandExecutor::is_interactive_command("yum"));
+        assert!(!CommandExecutor::is_interactive_command("dnf"));
     }
 
     #[test]

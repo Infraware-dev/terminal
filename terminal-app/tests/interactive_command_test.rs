@@ -6,8 +6,13 @@ fn test_command_existence_check_before_interactive() {
     // Verify that requires_interactive returns true for interactive commands
     assert!(CommandExecutor::requires_interactive("htop"));
     assert!(CommandExecutor::requires_interactive("top"));
-    assert!(CommandExecutor::requires_interactive("apt"));
     assert!(CommandExecutor::requires_interactive("vim"));
+    assert!(CommandExecutor::requires_interactive("nano"));
+
+    // Package managers are NOT interactive (output is captured for scrolling)
+    assert!(!CommandExecutor::requires_interactive("apt"));
+    assert!(!CommandExecutor::requires_interactive("yum"));
+    assert!(!CommandExecutor::requires_interactive("dnf"));
 
     // But command_exists should correctly report if they're installed
     // (this varies by system, so we just verify it doesn't panic)
