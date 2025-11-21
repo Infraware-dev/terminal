@@ -1,3 +1,5 @@
+"""GCP agent configuration and initialization."""
+
 from langchain.agents import create_agent
 from langchain_community.tools import ShellTool
 
