@@ -56,14 +56,8 @@ impl CommandOrchestrator {
             return self.handle_reload_aliases_command(state).await;
         }
 
-        // Check if command requires interactive execution
-        if CommandExecutor::requires_interactive(cmd) {
-            return self
-                .execute_interactive_and_display(cmd, args, state, ui)
-                .await;
-        }
-
-        // Check if command exists (skip check if using shell interpretation, shell builtin, or history expansion)
+        // Check if command exists BEFORE trying interactive execution
+        // (skip check if using shell interpretation, shell builtin, or history expansion)
         // Shell builtins don't exist in PATH but are valid commands that must be executed via shell
         // History expansions (!!, !$, etc.) should have been expanded by HistoryExpansionHandler
         let is_history_expansion = cmd.starts_with('!');
@@ -71,10 +65,18 @@ impl CommandOrchestrator {
         if original_input.is_none()
             && !ShellBuiltinHandler::requires_shell_execution(cmd)
             && !is_history_expansion
+            && !CommandExecutor::requires_interactive(cmd)
             && !CommandExecutor::command_exists(cmd)
         {
             self.handle_command_not_found(cmd, state);
             return Ok(());
+        }
+
+        // Check if command requires interactive execution
+        if CommandExecutor::requires_interactive(cmd) {
+            return self
+                .execute_interactive_and_display(cmd, args, state, ui)
+                .await;
         }
 
         // Execute the command

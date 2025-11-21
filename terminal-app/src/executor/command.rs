@@ -45,8 +45,8 @@ const REQUIRES_INTERACTIVE: &[&str] = &[
     "vim", "nvim", "nano", "emacs", "pico", "ed", "vi", // Pagers
     "less", "more", "most", "man", "info", // File managers
     "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
-    "watch", // System monitors
-    "top", "htop", "btop", "atop", "iotop", "iftop", "nethogs", // Package managers
+    "watch", // System monitors (non-root)
+    "top", "htop", "btop", "atop", // Package managers (some commands work without sudo)
     "apt", "apt-get", "yum", "dnf", "pacman",
 ];
 
@@ -81,6 +81,10 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     // Admin tools
     "passwd",
     "visudo",
+    // System monitors that require root
+    "iotop",
+    "iftop",
+    "nethogs",
 ];
 
 /// All interactive commands (for is_interactive_command check)
@@ -526,7 +530,12 @@ mod tests {
         // System monitors
         assert!(CommandExecutor::requires_interactive("top"));
         assert!(CommandExecutor::requires_interactive("htop"));
-        assert!(CommandExecutor::requires_interactive("iotop"));
+        assert!(CommandExecutor::requires_interactive("atop"));
+
+        // System monitors that require root (blocked)
+        assert!(!CommandExecutor::requires_interactive("iotop"));
+        assert!(!CommandExecutor::requires_interactive("iftop"));
+        assert!(!CommandExecutor::requires_interactive("nethogs"));
 
         // Package managers
         assert!(CommandExecutor::requires_interactive("apt"));
