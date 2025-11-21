@@ -193,7 +193,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
 
     let status_text = Line::from(vec![
         Span::styled(
-            format!(" {} ", mode_text),
+            format!(" {mode_text} "),
             Style::default()
                 .fg(Color::Black)
                 .bg(mode_color)

@@ -20,7 +20,7 @@ pub struct CommandOrchestrator;
 impl CommandOrchestrator {
     /// Create a new command orchestrator
     #[allow(dead_code)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -113,12 +113,11 @@ impl CommandOrchestrator {
             }
             Ok(Err(e)) => {
                 state.add_output(MessageFormatter::error(format!(
-                    "Failed to reload aliases: {}",
-                    e
+                    "Failed to reload aliases: {e}"
                 )));
             }
             Err(e) => {
-                state.add_output(MessageFormatter::error(format!("Task panicked: {}", e)));
+                state.add_output(MessageFormatter::error(format!("Task panicked: {e}")));
             }
         }
 
@@ -147,8 +146,7 @@ impl CommandOrchestrator {
                 // Just show completion message with exit code
                 if output.is_success() {
                     state.add_output(format!(
-                        "Interactive command '{}' completed successfully",
-                        cmd
+                        "Interactive command '{cmd}' completed successfully"
                     ));
                 } else {
                     state.add_output(MessageFormatter::command_failed(output.exit_code));
@@ -216,7 +214,7 @@ impl CommandOrchestrator {
     ///
     /// Exit code 1 is commonly used for semantic results rather than errors.
     /// Exit code 2+ usually indicates actual errors (syntax error, file not found, etc.)
-    fn is_benign_failure(&self, output: &CommandOutput) -> bool {
+    const fn is_benign_failure(&self, output: &CommandOutput) -> bool {
         // Exit code 1 is often semantic (grep no match, diff differences, test false)
         // Exit code 2+ usually indicates real errors
         output.exit_code == 1
@@ -337,7 +335,7 @@ mod tests {
     #[test]
     fn test_orchestrator_debug() {
         let orchestrator = CommandOrchestrator::new();
-        let debug_str = format!("{:?}", orchestrator);
+        let debug_str = format!("{orchestrator:?}");
         assert!(debug_str.contains("CommandOrchestrator"));
     }
 

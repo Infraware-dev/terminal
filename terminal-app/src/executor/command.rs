@@ -1,6 +1,5 @@
 /// Command execution module
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
@@ -9,7 +8,7 @@ use tokio::time::{timeout, Duration};
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
@@ -18,12 +17,14 @@ pub struct CommandOutput {
 
 impl CommandOutput {
     /// Check if the command was successful
-    pub fn is_success(&self) -> bool {
+    #[must_use]
+    pub const fn is_success(&self) -> bool {
         self.exit_code == 0
     }
 
     /// Get combined output (stdout + stderr)
     #[allow(dead_code)]
+    #[must_use]
     pub fn combined_output(&self) -> String {
         let mut result = String::new();
         if !self.stdout.is_empty() {
@@ -87,18 +88,19 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     "nethogs",
 ];
 
-/// All interactive commands (for is_interactive_command check)
-static ALL_INTERACTIVE: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    REQUIRES_INTERACTIVE
-        .iter()
-        .chain(INTERACTIVE_BLOCKED.iter())
-        .copied()
-        .collect()
-});
+/// All interactive commands (for `is_interactive_command` check)
+static ALL_INTERACTIVE: std::sync::LazyLock<HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        REQUIRES_INTERACTIVE
+            .iter()
+            .chain(INTERACTIVE_BLOCKED.iter())
+            .copied()
+            .collect()
+    });
 
 /// Set of commands that require interactive execution (O(1) lookup)
-static REQUIRES_INTERACTIVE_SET: Lazy<HashSet<&'static str>> =
-    Lazy::new(|| REQUIRES_INTERACTIVE.iter().copied().collect());
+static REQUIRES_INTERACTIVE_SET: std::sync::LazyLock<HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| REQUIRES_INTERACTIVE.iter().copied().collect());
 
 /// Command executor for running shell commands
 pub struct CommandExecutor;
@@ -127,10 +129,10 @@ impl CommandExecutor {
 
     /// Get the platform-appropriate shell and shell command flag
     ///
-    /// Returns a tuple of (shell_executable, command_flag):
+    /// Returns a tuple of (`shell_executable`, `command_flag`):
     /// - Unix/Linux/macOS: ("sh", "-c")
     /// - Windows: ("cmd", "/C")
-    fn get_platform_shell() -> (&'static str, &'static str) {
+    const fn get_platform_shell() -> (&'static str, &'static str) {
         #[cfg(target_os = "windows")]
         {
             ("cmd", "/C")
@@ -169,12 +171,11 @@ impl CommandExecutor {
             return Ok(CommandOutput {
                 stdout: String::new(),
                 stderr: format!(
-                    "Interactive command '{}' is not supported in this terminal.\n\
+                    "Interactive command '{cmd}' is not supported in this terminal.\n\
                      Suggestions:\n\
                      - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
                      - For 'ssh/tmux/screen': use in a separate terminal window\n\
-                     - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')",
-                    cmd
+                     - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')"
                 ),
                 exit_code: 1,
             });
@@ -251,7 +252,7 @@ impl CommandExecutor {
         // Direct execution (no shell operators)
         // Check if command exists
         if !Self::command_exists(cmd) {
-            anyhow::bail!("Command '{}' not found", cmd);
+            anyhow::bail!("Command '{cmd}' not found");
         }
 
         // Execute the command with timeout
@@ -281,7 +282,7 @@ impl CommandExecutor {
     /// * `ui` - TUI instance (will be suspended/resumed)
     ///
     /// # Returns
-    /// CommandOutput with exit code (stdout/stderr not captured)
+    /// `CommandOutput` with exit code (stdout/stderr not captured)
     ///
     /// # Unix-Only
     /// This method is Unix-only (Linux/macOS). On Windows, it returns an error.
@@ -311,7 +312,7 @@ impl CommandExecutor {
                 suspended: bool,
             }
 
-            impl<'a> Drop for TuiGuard<'a> {
+            impl Drop for TuiGuard<'_> {
                 fn drop(&mut self) {
                     if self.suspended {
                         // Best-effort resume, ignore errors in panic path
@@ -349,18 +350,20 @@ impl CommandExecutor {
                     stderr: String::new(),
                     exit_code: exit_status.code().unwrap_or(-1),
                 }),
-                Err(e) => Err(anyhow::anyhow!("Command failed: {}", e)),
+                Err(e) => Err(anyhow::anyhow!("Command failed: {e}")),
             }
         }
     }
 
     /// Check if a command exists in the PATH
+    #[must_use]
     pub fn command_exists(cmd: &str) -> bool {
         which::which(cmd).is_ok()
     }
 
     /// Get the full path of a command
     #[allow(dead_code)]
+    #[must_use]
     pub fn get_command_path(cmd: &str) -> Option<String> {
         which::which(cmd)
             .ok()
@@ -372,7 +375,7 @@ impl CommandExecutor {
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {
-            anyhow::bail!("Command '{}' not found", cmd);
+            anyhow::bail!("Command '{cmd}' not found");
         }
 
         // Use TokioCommand directly to ensure proper argument separation
@@ -634,7 +637,7 @@ mod tests {
             stderr: "error".to_string(),
             exit_code: 0,
         };
-        let debug_str = format!("{:?}", output);
+        let debug_str = format!("{output:?}");
         assert!(debug_str.contains("stdout"));
         assert!(debug_str.contains("test"));
     }

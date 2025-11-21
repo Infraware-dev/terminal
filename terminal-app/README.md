@@ -41,7 +41,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Command Execution**: Async shell command execution with stdout/stderr capture
 - ✅ **Shell Operator Support**: Full support for pipes (`|`), redirects (`>`/`<`), logical operators (`&&`/`||`), subshells
 - ✅ **Performance Optimizations**: Precompiled regex patterns, thread-safe command caching, RwLock poisoning recovery
-- ✅ **Interactive Commands**: 18 commands with full TUI suspension (vim, nano, less, man, etc.) + 31 blocked commands with helpful alternatives
+- ✅ **Interactive Commands**: 28 commands with full TUI suspension (vim, nano, less, man, top, htop, sudo, etc.) + 31 blocked commands with helpful alternatives
 - ✅ **Auto-Install Framework**: Detect missing commands and prompt for installation (execution deferred to M2)
 - ✅ **LLM Integration**: Mock client ready, route natural language queries to AI backend
 - ✅ **Syntax Highlighting**: Code blocks with syntax highlighting (Rust, Python, Bash, JSON)
@@ -202,42 +202,75 @@ Once running, you can:
 
 #### Interactive Commands
 
-Infraware Terminal supports full interactive command execution with complete terminal control. When you run an interactive command, the TUI temporarily suspends, giving the command full access to your terminal. A total of 18 interactive commands are supported.
+Infraware Terminal supports full interactive command execution with complete terminal control. When you run an interactive command, the TUI temporarily suspends (returns to normal terminal), the command runs with full terminal access, and the TUI automatically resumes when you exit. A total of 28 interactive commands are supported.
 
-**Supported Interactive Commands**:
+**Supported Interactive Commands** (28 total):
 - **Text Editors** (7): vim, nvim, nano, emacs, pico, ed, vi
 - **Pagers** (5): less, more, most, man, info
 - **File Managers** (5): mc, ranger, nnn, lf, vifm
-- **Process Monitoring** (1): watch
+- **System Monitors** (4): top, htop, btop, atop
+- **Other Monitors** (3): iotop, iftop, nethogs
+- **Privilege Escalation** (1): sudo
+- **Process Watcher** (1): watch
 
-**Examples**:
+**Usage Examples**:
 ```bash
-vim file.txt          # Opens vim with full terminal control
+# Text editors - full terminal control
+vim file.txt          # Opens vim for editing
 nano config.yml       # Opens nano editor
-less output.log       # Browse log file with less pager
-man docker            # View docker manual
+emacs script.py       # Opens emacs editor
+
+# Pagers and documentation - scroll through content
+less output.log       # Browse large log files
+man docker            # View docker manual pages
+info grep             # View grep documentation
+
+# File managers - navigate file system
 mc                    # Opens Norton Commander-style file manager
 ranger                # Opens ranger file browser
-watch -n 1 'ps aux'   # Monitor processes with watch
+nnn /tmp              # Opens nnn file manager in /tmp
+
+# System monitoring - real-time process/system info
+top                   # Real-time system monitor
+htop                  # Interactive process viewer
+iotop                 # Monitor I/O statistics
+
+# Privilege escalation - requires password entry
+sudo apt update       # Run command with sudo (prompts for password)
+sudo visudo           # Edit sudoers file safely
+
+# Process monitoring
+watch -n 1 'ps aux'   # Monitor processes continuously
 ```
 
-**Workflow**:
+**Execution Workflow**:
 1. Type the interactive command
-2. The TUI suspends (returns to normal terminal mode)
-3. Command runs with full terminal access
+2. The TUI suspends (temporarily leaves alternate screen, disables raw mode)
+3. Command runs with full terminal access (inherits stdin/stdout/stderr)
 4. When you exit the command, the TUI automatically resumes
+5. Output is not captured (command runs in native terminal, not TUI buffer)
 
-**Platform Notes**:
-- Interactive commands are supported on **Linux, macOS, and Unix systems**
-- Windows is not supported (shows helpful error message)
+**Platform Support**:
+- **Linux, macOS, Unix**: Fully supported with TUI suspension/resumption
+- **Windows**: Not supported - returns helpful error message
 
-**Blocked Interactive Commands**:
-Some interactive commands that require persistent TTY sessions cannot be supported in Infraware Terminal (ssh, tmux, screen, top, htop, python REPL, etc.). These commands show helpful error messages suggesting alternatives:
-- `top` → Use `ps aux` or `top -b -n 1` for batch mode
-- `ssh` → Use in a separate terminal window
-- `python` → Pass code with `-c` flag: `python -c "print(1+1)"`
-- `node` → Use REPL alternatives or run scripts directly
-- `mysql`/`psql` → Use connection flags or scripts
+**Blocked Interactive Commands** (31 total):
+Some commands require persistent network or complex TTY sessions that cannot be supported:
+
+```
+Network Tools (4):     ssh, telnet, ftp, sftp - Use in separate terminal window
+Multiplexers (2):      tmux, screen - Use outside Infraware Terminal
+REPLs (5):             python, python3, node, irb, ipython
+                       → Pass code with -c flag: python -c "print(1+1)"
+Databases (5):         mysql, psql, sqlite3, mongo, redis-cli
+                       → Use connection flags or scripts
+Debuggers (3):         gdb, lldb, pdb
+System Monitors (3):   iotop, iftop, nethogs - Require root, use alt-commands
+Admin Tools (2):       passwd, visudo - Use external terminal for safety
+Terminal Browsers (3): w3m, lynx, links
+```
+
+These commands show helpful error messages with alternatives when you try to run them.
 
 #### Alias Support
 

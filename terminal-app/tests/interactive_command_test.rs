@@ -35,7 +35,7 @@ async fn test_classification_preserves_interactive_commands() {
             assert_eq!(command, "apt");
             assert_eq!(args, vec!["list"]);
         }
-        other => panic!("Expected Command, got {:?}", other),
+        other => panic!("Expected Command, got {other:?}"),
     }
 
     // htop is a known command
@@ -44,7 +44,7 @@ async fn test_classification_preserves_interactive_commands() {
             assert_eq!(command, "htop");
             assert!(args.is_empty());
         }
-        other => panic!("Expected Command, got {:?}", other),
+        other => panic!("Expected Command, got {other:?}"),
     }
 
     // top is a known command
@@ -53,6 +53,6 @@ async fn test_classification_preserves_interactive_commands() {
             assert_eq!(command, "top");
             assert!(args.is_empty());
         }
-        other => panic!("Expected Command, got {:?}", other),
+        other => panic!("Expected Command, got {other:?}"),
     }
 }
