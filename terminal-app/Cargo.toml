@@ -42,3 +42,8 @@ serial_test = "3.0"  # Fix flaky tests with shared global state
 [[bench]]
 name = "scan_benchmark"
 harness = false
+
+[profile.release]
+strip = true          # Strip symbols from binary
+lto = true            # Link-time optimization
+codegen-units = 1     # Better optimization (slower compile)
