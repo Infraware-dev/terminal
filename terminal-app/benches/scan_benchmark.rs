@@ -2,8 +2,9 @@
 ///
 /// This benchmark suite measures classification performance for different input types.
 /// Target: <50μs per classification (10x improvement over baseline)
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use infraware_terminal::input::InputClassifier;
+use std::hint::black_box;
 
 fn benchmark_classification(c: &mut Criterion) {
     let classifier = InputClassifier::new();
