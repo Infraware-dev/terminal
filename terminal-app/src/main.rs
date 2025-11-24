@@ -352,9 +352,6 @@ impl InfrawareTerminal {
             *history_guard = self.state.history.all().to_vec();
         }
 
-        // Echo the input
-        self.state.add_output(MessageFormatter::command(&input));
-
         // Classify the input
         match self.classifier.classify(&input)? {
             InputType::Command {
@@ -362,18 +359,24 @@ impl InfrawareTerminal {
                 args,
                 original_input,
             } => {
+                // Don't echo input for clear command (it clears the output)
+                if command != "clear" {
+                    self.state.add_output(MessageFormatter::command(&input));
+                }
                 self.handle_command(&command, &args, original_input.as_deref())
                     .await?;
             }
             InputType::NaturalLanguage(query) => {
+                self.state.add_output(MessageFormatter::command(&input));
                 self.handle_natural_language(&query).await?;
             }
             InputType::CommandTypo {
-                input,
+                input: typo_input,
                 suggestion,
                 distance,
             } => {
-                self.handle_command_typo(&input, &suggestion, distance)
+                self.state.add_output(MessageFormatter::command(&input));
+                self.handle_command_typo(&typo_input, &suggestion, distance)
                     .await?;
             }
             InputType::Empty => {}
