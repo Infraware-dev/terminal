@@ -110,14 +110,25 @@ impl InputHandler for ApplicationBuiltinHandler {
 
         // Check if it's an application builtin
         if crate::input::application_builtins::is_application_builtin(command) {
-            // Parse the command and args
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+            // Parse args directly without intermediate Vec allocation
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+
+            // Only preserve original_input if shell operators present (consistent with other handlers)
+            let patterns = crate::input::patterns::CompiledPatterns::get();
+            let original_input = if patterns.has_shell_operators(trimmed) {
+                Some(trimmed.to_string())
+            } else {
+                None
+            };
 
             return Some(InputType::Command {
                 command: command.to_string(),
                 args,
-                original_input: Some(trimmed.to_string()),
+                original_input,
             });
         }
 
@@ -364,13 +375,9 @@ impl NaturalLanguageHandler {
         }
 
         // 8. Contractions (e.g., "don't", "can't", "I'm") - universal NL indicator
-        if input.contains("'t ")
-            || input.contains("'re ")
-            || input.contains("'ve ")
-            || input.contains("'ll ")
-            || input.contains("'s ")
-            || input.contains("'m ")
-        {
+        // Check without trailing space to catch end-of-sentence and before-punctuation cases
+        let contractions = ["'t", "'re", "'ve", "'ll", "'s", "'m", "'d"];
+        if contractions.iter().any(|c| input.contains(c)) {
             return true;
         }
 
@@ -590,6 +597,52 @@ mod tests {
     }
 
     #[test]
+    fn test_application_builtin_original_input() {
+        let handler = ApplicationBuiltinHandler::new();
+
+        // Test without shell operators → original_input should be None
+        match handler.handle("clear") {
+            Some(InputType::Command {
+                command,
+                original_input,
+                ..
+            }) => {
+                assert_eq!(command, "clear");
+                assert_eq!(
+                    original_input, None,
+                    "original_input should be None without shell operators"
+                );
+            }
+            _ => panic!("Expected Command type"),
+        }
+
+        // Test with pipe operator → original_input should be Some
+        match handler.handle("clear | grep foo") {
+            Some(InputType::Command {
+                command,
+                original_input,
+                ..
+            }) => {
+                assert_eq!(command, "clear");
+                assert!(
+                    original_input.is_some(),
+                    "original_input should be Some with shell operators"
+                );
+                assert_eq!(original_input.unwrap(), "clear | grep foo");
+            }
+            _ => panic!("Expected Command type"),
+        }
+
+        // Test with redirect → original_input should be Some
+        match handler.handle("reload-aliases > output.txt") {
+            Some(InputType::Command { original_input, .. }) => {
+                assert!(original_input.is_some());
+            }
+            _ => panic!("Expected Command type"),
+        }
+    }
+
+    #[test]
     fn test_known_command_handler() {
         let handler = KnownCommandHandler::with_defaults();
 
@@ -673,6 +726,81 @@ mod tests {
 
         // Commands should pass through
         assert_eq!(handler.handle("ls"), None);
+    }
+
+    #[test]
+    fn test_natural_language_contractions_edge_cases() {
+        let handler = NaturalLanguageHandler::new();
+
+        // Test contractions at end of sentence (no trailing space)
+        assert!(
+            matches!(handler.handle("don't"), Some(InputType::NaturalLanguage(_))),
+            "Should detect contraction 'don't' at end of input"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("I can't"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction 'can't' at end of input"
+        );
+
+        assert!(
+            matches!(handler.handle("I'm"), Some(InputType::NaturalLanguage(_))),
+            "Should detect contraction 'I'm' at end of input"
+        );
+
+        // Test contractions before punctuation
+        assert!(
+            matches!(
+                handler.handle("can't."),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction before period"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("don't!"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction before exclamation"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("won't?"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction before question mark"
+        );
+
+        // Test contractions in middle of sentence (original behavior still works)
+        assert!(
+            matches!(
+                handler.handle("don't know"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction in middle of sentence"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("you're right"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction 'you're' in middle"
+        );
+
+        // Test multiple contractions
+        assert!(
+            matches!(
+                handler.handle("I don't think you're right"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect multiple contractions"
+        );
     }
 
     #[test]
