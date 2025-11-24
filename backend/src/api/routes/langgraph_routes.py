@@ -25,9 +25,7 @@ async def check_auth():
         )
 
 
-async def proxy_request(
-    request: Request, path: str, method: str = "GET"
-) -> Response:
+async def proxy_request(request: Request, path: str, method: str = "GET") -> Response:
     """Proxy a request to the LanGraph server.
 
     Args:
@@ -79,11 +77,11 @@ async def proxy_request(
             detail="LanGraph server is not running. Please start it with 'langgraph dev'",
         )
     except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Request to LanGraph server timed out")
-    except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Proxy error: {str(e)}"
+            status_code=504, detail="Request to LanGraph server timed out"
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
 
 async def proxy_streaming_request(request: Request, path: str) -> StreamingResponse:
@@ -133,9 +131,7 @@ async def proxy_streaming_request(request: Request, path: str) -> StreamingRespo
             detail="LanGraph server is not running. Please start it with 'langgraph dev'",
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Streaming proxy error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Streaming proxy error: {str(e)}")
 
 
 # Proxy endpoints for LanGraph API
@@ -223,9 +219,7 @@ async def get_thread_history(request: Request, thread_id: str):
         Response: Thread history from LanGraph
     """
     await check_auth()
-    return await proxy_request(
-        request, f"/threads/{thread_id}/history", method="GET"
-    )
+    return await proxy_request(request, f"/threads/{thread_id}/history", method="GET")
 
 
 # Catch-all proxy for other LanGraph endpoints
