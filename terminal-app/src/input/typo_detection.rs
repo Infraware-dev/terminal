@@ -58,47 +58,49 @@ impl TypoDetectionHandler {
     fn find_closest_match(&self, input: &str) -> Option<(String, usize)> {
         self.known_commands
             .iter()
-            .map(|cmd| (cmd.clone(), levenshtein(input, cmd)))
+            .map(|cmd| (cmd.as_str(), levenshtein(input, cmd)))
             .filter(|(_, dist)| *dist <= self.max_distance && *dist > 0)
             .min_by_key(|(_, dist)| *dist)
+            .map(|(cmd, dist)| (cmd.to_string(), dist))
     }
 
     /// Check if input looks like a command (not a natural language phrase)
     ///
-    /// Language-agnostic algorithm for multi-word inputs:
-    /// - Has flags (-/--) → might be a typo (e.g., "dokcer --help")
-    /// - Multi-word without flags → likely natural language, not a typo
-    ///
-    /// For single words, we filter out common NL words to avoid false positives
-    /// like "what" → "cat". This is a pragmatic compromise for short inputs.
+    /// Language-agnostic algorithm:
+    /// - Single word → check typo (with NL filter)
+    /// - 2 words → check if first word is a typo (catches "dokcer ps")
+    /// - Has flags (-/--) → might be a typo
+    /// - 3+ words without flags → likely natural language
     fn looks_like_command(&self, input: &str) -> bool {
         let word_count = input.split_whitespace().count();
 
         // Single word → might be a command typo, but filter common NL words
         if word_count == 1 {
-            // Common single-word NL indicators that could match short commands
-            // Keep this list minimal - multi-word is fully language-agnostic
             const NL_SINGLE_WORDS: &[&str] = &[
-                // Question words (universal patterns)
-                "what", "how", "why", "when", "where", "who", "which",
-                // Common greetings/responses
-                "hello", "hi", "hey", "yes", "no", "ok", "thanks", "help",
+                "what", "how", "why", "when", "where", "who", "which", "hello", "hi", "hey", "yes",
+                "no", "ok", "thanks", "help",
             ];
 
             let lower = input.to_lowercase();
-            if NL_SINGLE_WORDS.contains(&lower.as_str()) {
-                return false;
-            }
-            return true;
+            return !NL_SINGLE_WORDS.contains(&lower.as_str());
         }
 
-        // Has flags → might be a command typo (e.g., "dokcer -v")
+        // Has flags/operators → might be a command typo (e.g., "dokcer -v")
         let patterns = crate::input::patterns::CompiledPatterns::get();
         if patterns.has_command_syntax(input) || patterns.has_shell_operators(input) {
             return true;
         }
 
-        // Multi-word without flags → likely natural language (language-agnostic)
+        // 2 words without flags → check if first word is a typo
+        // Catches: "dokcer ps", "kubeclt get" but not "pippo ciao"
+        if word_count == 2 {
+            if let Some(first) = input.split_whitespace().next() {
+                // Only check if first word could be a typo of a known command
+                return self.find_closest_match(first).is_some();
+            }
+        }
+
+        // 3+ words without flags → likely natural language (language-agnostic)
         false
     }
 
@@ -264,9 +266,14 @@ mod tests {
         assert!(handler.looks_like_command("dokcer -v"));
         assert!(handler.looks_like_command("kubeclt --help"));
 
-        // Multi-word without flags → NOT command-like (language-agnostic)
-        assert!(!handler.looks_like_command("dokcer ps")); // No flags
-        assert!(!handler.looks_like_command("git status")); // No flags
+        // 2 words: typo + subcommand → detected as typo
+        assert!(handler.looks_like_command("dokcer ps")); // dokcer → docker
+        assert!(handler.looks_like_command("kubeclt get")); // kubeclt → kubectl
+
+        // 2 words: no typo match → NOT command-like
+        assert!(!handler.looks_like_command("bonjour monde")); // no close command match
+
+        // 3+ words without flags → NOT command-like (language-agnostic)
         assert!(!handler.looks_like_command("pippo ciao come stai"));
         assert!(!handler.looks_like_command("how do I list files"));
     }
