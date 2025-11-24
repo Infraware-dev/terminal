@@ -49,7 +49,7 @@ impl CommandCache {
                 Ok(cache) => cache,
                 Err(poisoned) => {
                     // Lock was poisoned, but we can still access the data
-                    eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                    log::warn!("Command cache read lock was poisoned, recovering...");
                     poisoned.into_inner()
                 }
             };
@@ -70,7 +70,7 @@ impl CommandCache {
             let mut cache = match COMMAND_CACHE.write() {
                 Ok(cache) => cache,
                 Err(poisoned) => {
-                    eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                    log::warn!("Command cache write lock was poisoned, recovering...");
                     poisoned.into_inner()
                 }
             };
@@ -101,7 +101,7 @@ impl CommandCache {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                log::warn!("Command cache read lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -116,7 +116,7 @@ impl CommandCache {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                log::warn!("Command cache read lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -172,7 +172,7 @@ impl CommandCache {
         let mut cache = match COMMAND_CACHE.write() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                log::warn!("Command cache write lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -231,7 +231,7 @@ impl CommandCache {
         let mut cache = match COMMAND_CACHE.write() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                log::warn!("Command cache write lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -268,7 +268,7 @@ impl CommandCache {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                log::warn!("Command cache read lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -289,7 +289,7 @@ impl CommandCache {
         let mut cache = match COMMAND_CACHE.write() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                log::warn!("Command cache write lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -315,7 +315,7 @@ impl CommandCache {
         let mut cache = match COMMAND_CACHE.write() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                log::warn!("Command cache write lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -330,7 +330,7 @@ impl CommandCache {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
             Err(poisoned) => {
-                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                log::warn!("Command cache read lock was poisoned, recovering...");
                 poisoned.into_inner()
             }
         };
@@ -378,8 +378,10 @@ fn is_safe_alias(name: &str, value: &str) -> bool {
 
     for pattern in DANGEROUS_PATTERNS {
         if value.contains(pattern) {
-            eprintln!(
-                "Warning: Rejecting potentially dangerous alias '{name}': contains '{pattern}'"
+            log::warn!(
+                "Rejecting potentially dangerous alias '{}': contains '{}'",
+                name,
+                pattern
             );
             return false;
         }
@@ -422,17 +424,14 @@ fn parse_aliases(content: &str) -> HashMap<String, String> {
 
                 // Validate alias name is not empty
                 if name.is_empty() {
-                    eprintln!(
-                        "Warning: Malformed alias on line {}: empty name",
-                        line_num + 1
-                    );
+                    log::warn!("Malformed alias on line {}: empty name", line_num + 1);
                     continue;
                 }
 
                 // Validate alias value is not empty
                 if value.is_empty() {
-                    eprintln!(
-                        "Warning: Malformed alias '{}' on line {}: empty value",
+                    log::warn!(
+                        "Malformed alias '{}' on line {}: empty value",
                         name,
                         line_num + 1
                     );
@@ -453,10 +452,7 @@ fn parse_aliases(content: &str) -> HashMap<String, String> {
 
                 aliases.insert(name.to_string(), value.to_string());
             } else {
-                eprintln!(
-                    "Warning: Malformed alias on line {}: no '=' found",
-                    line_num + 1
-                );
+                log::warn!("Malformed alias on line {}: no '=' found", line_num + 1);
             }
         }
     }

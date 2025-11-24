@@ -233,7 +233,7 @@ impl InfrawareTerminal {
 
             // Load system aliases first
             if let Err(e) = CommandCache::load_system_aliases() {
-                eprintln!("Warning: Failed to load system aliases: {e}");
+                log::warn!("Failed to load system aliases: {}", e);
             }
 
             // Load user aliases (these override system aliases)

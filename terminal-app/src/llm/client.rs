@@ -95,6 +95,8 @@ impl LLMClientTrait for HttpLLMClient {
     }
 
     async fn query_with_context(&self, text: &str, context: Option<String>) -> Result<String> {
+        log::debug!("LLM query: {} (context: {})", text, context.is_some());
+
         let request = LLMRequest {
             query: text.to_string(),
             context,
@@ -109,10 +111,12 @@ impl LLMClientTrait for HttpLLMClient {
 
         // Check for errors
         if !response.status().is_success() {
+            log::error!("LLM request failed with status: {}", response.status());
             anyhow::bail!("LLM request failed with status: {}", response.status());
         }
 
         let llm_response: LLMResponse = response.json().await?;
+        log::debug!("LLM response received ({} chars)", llm_response.text.len());
 
         Ok(llm_response.text)
     }

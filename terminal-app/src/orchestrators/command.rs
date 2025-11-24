@@ -149,6 +149,7 @@ impl CommandOrchestrator {
 
     /// Handle command not found scenario
     fn handle_command_not_found(&self, cmd: &str, state: &mut TerminalState) {
+        log::warn!("Command not found: {}", cmd);
         state.add_output(MessageFormatter::command_not_found(cmd));
         state.add_output(MessageFormatter::install_suggestion(
             PackageInstaller::is_available_static(),

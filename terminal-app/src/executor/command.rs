@@ -165,9 +165,12 @@ impl CommandExecutor {
         args: &[String],
         original_input: Option<&str>,
     ) -> Result<CommandOutput> {
+        log::debug!("Executing command: {} {:?}", cmd, args);
+
         // Block interactive commands that are NOT supported via TUI suspension
         // Commands in requires_interactive() will be handled separately
         if Self::is_interactive_command(cmd) && !Self::requires_interactive(cmd) {
+            log::warn!("Blocked interactive command: {}", cmd);
             return Ok(CommandOutput {
                 stdout: String::new(),
                 stderr: format!(
@@ -252,6 +255,7 @@ impl CommandExecutor {
         // Direct execution (no shell operators)
         // Check if command exists
         if !Self::command_exists(cmd) {
+            log::error!("Command not found: {}", cmd);
             anyhow::bail!("Command '{cmd}' not found");
         }
 
