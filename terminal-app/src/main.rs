@@ -226,9 +226,9 @@ impl InfrawareTerminal {
 
     /// Run the main event loop
     async fn run(&mut self) -> Result<()> {
-        // Load aliases at startup (async, non-blocking)
+        // Load aliases at startup (blocking to ensure they're available before first command)
         // Use spawn_blocking for file I/O to avoid blocking the executor
-        tokio::task::spawn_blocking(|| {
+        let alias_load_result = tokio::task::spawn_blocking(|| {
             use input::discovery::CommandCache;
 
             // Load system aliases first
@@ -238,7 +238,13 @@ impl InfrawareTerminal {
 
             // Load user aliases (these override system aliases)
             CommandCache::load_user_aliases();
-        });
+        })
+        .await;
+
+        // Log if alias loading task panicked
+        if let Err(e) = alias_load_result {
+            log::error!("Alias loading task panicked: {}", e);
+        }
 
         // Display welcome message
         self.state.add_output(MessageFormatter::banner_line(

@@ -4,14 +4,11 @@
 use anyhow::{Context, Result};
 use log::LevelFilter;
 use log4rs::{
-    append::{
-        console::ConsoleAppender,
-        rolling_file::{
-            policy::compound::{
-                roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger, CompoundPolicy,
-            },
-            RollingFileAppender,
+    append::rolling_file::{
+        policy::compound::{
+            roll::fixed_window::FixedWindowRoller, trigger::size::SizeTrigger, CompoundPolicy,
         },
+        RollingFileAppender,
     },
     config::{Appender, Config, Root},
     encode::pattern::PatternEncoder,
@@ -36,13 +33,6 @@ pub fn init() -> Result<()> {
     // Log file path
     let log_file = log_dir.join("infraware.log");
 
-    // Console appender (for development)
-    let console = ConsoleAppender::builder()
-        .encoder(Box::new(PatternEncoder::new(
-            "[{d(%H:%M:%S%.3f)}] {h({l})} {m}\n",
-        )))
-        .build();
-
     // File appender with size-based rotation
     let size_trigger = SizeTrigger::new(config.max_size_bytes());
 
@@ -62,15 +52,11 @@ pub fn init() -> Result<()> {
         .context("Failed to create rolling file appender")?;
 
     // Build log4rs config
+    // Note: We only log to file, NOT console, since this is a TUI application
+    // Logging to console would interfere with the TUI rendering
     let log_config = Config::builder()
-        .appender(Appender::builder().build("console", Box::new(console)))
         .appender(Appender::builder().build("file", Box::new(file)))
-        .build(
-            Root::builder()
-                .appender("file")
-                .appender("console")
-                .build(config.log_level),
-        )
+        .build(Root::builder().appender("file").build(config.log_level))
         .context("Failed to build log4rs config")?;
 
     log4rs::init_config(log_config).context("Failed to initialize log4rs")?;
