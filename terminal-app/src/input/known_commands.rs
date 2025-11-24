@@ -51,6 +51,7 @@ pub fn default_devops_commands() -> Vec<String> {
         "gunzip",
         "zip",
         "unzip",
+        "clear",
         // Text processing
         "sed",
         "awk",
