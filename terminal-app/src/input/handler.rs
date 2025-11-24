@@ -233,238 +233,98 @@ impl NaturalLanguageHandler {
         Self
     }
 
-    /// Check if input is likely natural language (multilingual support)
-    /// Supports: English, Italian, Spanish, French, German
+    /// Check if input is likely natural language using language-agnostic heuristics
     ///
-    /// Uses precompiled regex patterns for 10-100x faster matching
+    /// Uses universal patterns instead of hardcoded words to support any language:
+    /// - Punctuation (?, !, commas, periods)
+    /// - Non-ASCII characters (accents, unicode, non-Latin scripts)
+    /// - Structural patterns (word count, spacing, capitalization)
+    /// - Statistical analysis (word/symbol ratios)
     fn is_likely_natural_language(&self, input: &str) -> bool {
         // Get precompiled patterns
         let patterns = crate::input::patterns::CompiledPatterns::get();
 
-        // Fast regex-based detection
+        // 1. Universal punctuation patterns (question/exclamation marks, sentence boundaries)
         if patterns.has_natural_language_indicators(input) {
             return true;
         }
 
-        // Check for question words (any language)
-        if patterns.starts_with_question_word(input) {
+        // 2. Language-agnostic regex patterns (English-only fallback, maintained for compatibility)
+        if patterns.starts_with_question_word(input) || patterns.has_articles(input) {
             return true;
         }
 
-        // Check for articles (indicates natural language structure)
-        if patterns.has_articles(input) {
-            return true;
-        }
-
-        // Long input without command syntax (universal heuristic)
+        // 3. Word count heuristic (universal across languages)
         let word_count = input.split_whitespace().count();
         if word_count > 5 && !patterns.has_shell_operators(input) {
             return true;
         }
 
-        // Legacy fallback checks (kept for edge cases not covered by regex)
-        let lowercase = input.to_lowercase();
+        // ===== LANGUAGE-AGNOSTIC HEURISTICS =====
 
-        // ===== MULTILINGUAL PATTERNS =====
+        // 4. Non-ASCII character detection (accents, unicode, non-Latin scripts)
+        // Most natural language contains non-ASCII, shell commands are ASCII
+        if !input.is_ascii() {
+            // Exclude common command patterns with unicode (e.g., docker --help with smart quotes)
+            let looks_like_command = patterns.has_command_syntax(input)
+                || patterns.has_shell_operators(input)
+                || input.starts_with('/')
+                || input.starts_with("./");
 
-        // 4. Question words at the start (EN, IT, ES, FR, DE)
-        let question_words = [
-            // English
-            "how",
-            "what",
-            "why",
-            "when",
-            "where",
-            "who",
-            "which",
-            "can you",
-            "could you",
-            "would you",
-            "will you",
-            // Italian
-            "come",
-            "cosa",
-            "perché",
-            "perche",
-            "quando",
-            "dove",
-            "chi",
-            "quale",
-            "puoi",
-            "potresti",
-            "vorresti",
-            // Spanish
-            "cómo",
-            "como",
-            "qué",
-            "que",
-            "por qué",
-            "porque",
-            "cuando",
-            "dónde",
-            "donde",
-            "quién",
-            "quien",
-            "cuál",
-            "cual",
-            "puedes",
-            "podrías",
-            "podrías",
-            // French
-            "comment",
-            "quoi",
-            "pourquoi",
-            "quand",
-            "où",
-            "ou",
-            "qui",
-            "quel",
-            "quelle",
-            "peux-tu",
-            "pourrais-tu",
-            "peux tu",
-            "pourrais tu",
-            // German
-            "wie",
-            "was",
-            "warum",
-            "wann",
-            "wo",
-            "wer",
-            "welche",
-            "welcher",
-            "kannst du",
-            "könntest du",
-            "kannst",
-            "könntest",
-        ];
-
-        for word in &question_words {
-            if lowercase.starts_with(word) {
+            if !looks_like_command {
                 return true;
             }
         }
 
-        // 5. Common articles (indicates natural language structure)
-        let articles = [
-            // English
-            " a ", " an ", " the ", // Italian
-            " un ", " uno ", " una ", " il ", " lo ", " la ", " i ", " gli ", " le ", " dell",
-            " dell'", " della ", " dello ", // Spanish
-            " un ", " una ", " el ", " la ", " los ", " las ", " del ", " de la ", " de los ",
-            // French
-            " un ", " une ", " le ", " la ", " les ", " des ", " du ", " de la ", " de l'",
-            // German
-            " der ", " die ", " das ", " den ", " dem ", " des ", " ein ", " eine ", " einen ",
-            " einem ",
-        ];
+        // 5. Repeated punctuation (e.g., "??", "!!", "...") indicates natural language
+        if input.contains("??") || input.contains("!!") || input.contains("...") {
+            return true;
+        }
 
-        for article in &articles {
-            if lowercase.contains(article) {
+        // 6. Multiple short words (2-3 chars) with spaces - likely articles/prepositions
+        // Example: "a la", "de la", "in the", "per il"
+        let words: Vec<&str> = input.split_whitespace().collect();
+        if words.len() >= 3 {
+            let short_word_count = words
+                .iter()
+                .filter(|w| w.len() >= 2 && w.len() <= 3)
+                .count();
+            let short_word_ratio = short_word_count as f64 / words.len() as f64;
+
+            // If >30% of words are 2-3 chars and no command syntax, likely NL
+            if short_word_ratio > 0.3 && !patterns.has_command_syntax(input) {
                 return true;
             }
         }
 
-        // 6. Common request verbs/phrases (EN, IT, ES, FR, DE)
-        let nl_verbs = [
-            // English
-            "show me",
-            "explain",
-            "help",
-            "tell me",
-            "describe",
-            "find",
-            "list",
-            "get me",
-            "i need",
-            "i want",
-            "please",
-            // Italian
-            "mostrami",
-            "spiega",
-            "spiegami",
-            "aiuto",
-            "aiutami",
-            "dimmi",
-            "descrivi",
-            "trova",
-            "elenca",
-            "ho bisogno",
-            "voglio",
-            "per favore",
-            // Spanish
-            "muéstrame",
-            "muestrame",
-            "explica",
-            "ayuda",
-            "ayúdame",
-            "ayudame",
-            "dime",
-            "describe",
-            "encuentra",
-            "lista",
-            "necesito",
-            "quiero",
-            "por favor",
-            // French
-            "montre-moi",
-            "montre moi",
-            "explique",
-            "aide",
-            "aide-moi",
-            "dis-moi",
-            "dis moi",
-            "décris",
-            "decris",
-            "trouve",
-            "liste",
-            "j'ai besoin",
-            "je veux",
-            "s'il te plaît",
-            "s'il vous plaît",
-            // German
-            "zeig mir",
-            "zeige mir",
-            "erkläre",
-            "erklare",
-            "hilfe",
-            "hilf mir",
-            "sag mir",
-            "sage mir",
-            "beschreibe",
-            "finde",
-            "liste",
-            "ich brauche",
-            "ich will",
-            "bitte",
-        ];
-
-        for verb in &nl_verbs {
-            if lowercase.contains(verb) {
+        // 7. Medium-length phrases (3-5 words) without command indicators
+        // Commands are typically 1-2 words or have flags/operators
+        if (3..=5).contains(&word_count)
+            && !patterns.has_command_syntax(input)
+            && !patterns.has_shell_operators(input)
+            && !input.starts_with('/')
+            && !input.starts_with("./")
+        {
+            // Additional check: no known command at start
+            let first_word = words.first().map(|w| w.to_lowercase()).unwrap_or_default();
+            let known_commands = [
+                "ls", "cd", "pwd", "echo", "cat", "grep", "find", "docker", "kubectl", "git",
+                "npm", "cargo", "python", "node", "java", "go", "rustc",
+            ];
+            if !known_commands.contains(&first_word.as_str()) {
                 return true;
             }
         }
 
-        // 7. Polite expressions (strong indicator of natural language)
-        let polite_expressions = [
-            "please",
-            "per favore",
-            "per piacere",
-            "por favor",
-            "s'il te plaît",
-            "s'il vous plaît",
-            "bitte",
-            "grazie",
-            "thank",
-            "merci",
-            "danke",
-            "gracias",
-        ];
-
-        for expr in &polite_expressions {
-            if lowercase.contains(expr) {
-                return true;
-            }
+        // 8. Contractions (e.g., "don't", "can't", "I'm") - universal NL indicator
+        if input.contains("'t ")
+            || input.contains("'re ")
+            || input.contains("'ve ")
+            || input.contains("'ll ")
+            || input.contains("'s ")
+            || input.contains("'m ")
+        {
+            return true;
         }
 
         false

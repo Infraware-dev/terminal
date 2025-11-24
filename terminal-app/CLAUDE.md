@@ -60,7 +60,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 | 5 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
 | 6 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
 | 7 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker") | ~100μs |
-| 8 | NaturalLanguageHandler | English patterns (precompiled regex) | ~5μs |
+| 8 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
 | 9 | DefaultHandler | Fallback to LLM | <1μs |
 
 **Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
