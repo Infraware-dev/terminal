@@ -1,6 +1,5 @@
 """Integration tests for main FastAPI application."""
 
-import pytest
 import respx
 
 
@@ -97,7 +96,11 @@ class TestCORSMiddleware:
     def test_cors_allows_credentials(self, test_client):
         """Test that CORS allows credentials."""
         response = test_client.options(
-            "/api/auth", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST"}
+            "/api/auth",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+            },
         )
 
         assert "access-control-allow-credentials" in response.headers

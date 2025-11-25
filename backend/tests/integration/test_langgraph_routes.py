@@ -3,7 +3,6 @@
 from unittest.mock import patch
 
 import httpx
-import pytest
 import respx
 
 
@@ -111,7 +110,9 @@ class TestLangGraphProxySuccess:
             assert response.status_code == 200
 
     @respx.mock
-    def test_proxy_returns_langgraph_status_codes(self, test_client, authenticated_config):
+    def test_proxy_returns_langgraph_status_codes(
+        self, test_client, authenticated_config
+    ):
         """Test that proxy returns LangGraph server status codes."""
         # Test 404 from LangGraph server
         respx.get("http://localhost:2024/threads/nonexistent").mock(

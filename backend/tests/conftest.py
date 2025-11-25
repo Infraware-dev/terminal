@@ -1,7 +1,5 @@
-import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,7 +38,6 @@ def mock_config(temp_env_file, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     # Patch the Config initialization to use temp file
-    original_init = Config.__init__
 
     def mock_init(self):
         self.backend_dir = temp_env_file.parent

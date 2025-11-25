@@ -58,7 +58,9 @@ class TestValidateAnthropicApiKey:
     async def test_invalid_api_key_401(self):
         """Test validation with invalid API key (401 response)."""
         respx.post("https://api.anthropic.com/v1/messages").mock(
-            return_value=httpx.Response(401, json={"error": {"message": "Invalid API key"}})
+            return_value=httpx.Response(
+                401, json={"error": {"message": "Invalid API key"}}
+            )
         )
 
         is_valid, message = await validate_anthropic_api_key("sk-ant-invalid-key")
@@ -70,7 +72,9 @@ class TestValidateAnthropicApiKey:
     async def test_rate_limited_but_valid_429(self):
         """Test validation with rate-limited but valid key (429 response)."""
         respx.post("https://api.anthropic.com/v1/messages").mock(
-            return_value=httpx.Response(429, json={"error": {"message": "Rate limit exceeded"}})
+            return_value=httpx.Response(
+                429, json={"error": {"message": "Rate limit exceeded"}}
+            )
         )
 
         is_valid, message = await validate_anthropic_api_key("sk-ant-ratelimited-key")
@@ -126,7 +130,9 @@ class TestValidateAnthropicApiKey:
     async def test_other_error_status_codes(self):
         """Test validation with various error status codes."""
         respx.post("https://api.anthropic.com/v1/messages").mock(
-            return_value=httpx.Response(500, json={"error": {"message": "Server error"}})
+            return_value=httpx.Response(
+                500, json={"error": {"message": "Server error"}}
+            )
         )
 
         is_valid, message = await validate_anthropic_api_key("sk-ant-test-key")
@@ -137,7 +143,9 @@ class TestValidateAnthropicApiKey:
     @respx.mock
     async def test_timeout_exception(self):
         """Test validation with timeout error."""
-        respx.post("https://api.anthropic.com/v1/messages").mock(side_effect=httpx.TimeoutException("Timeout"))
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=httpx.TimeoutException("Timeout")
+        )
 
         is_valid, message = await validate_anthropic_api_key("sk-ant-test-key")
         assert is_valid is False
@@ -159,7 +167,9 @@ class TestValidateAnthropicApiKey:
     @respx.mock
     async def test_unexpected_exception(self):
         """Test validation with unexpected exception."""
-        respx.post("https://api.anthropic.com/v1/messages").mock(side_effect=Exception("Unexpected error"))
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=Exception("Unexpected error")
+        )
 
         is_valid, message = await validate_anthropic_api_key("sk-ant-test-key")
         assert is_valid is False

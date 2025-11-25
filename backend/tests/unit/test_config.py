@@ -3,9 +3,6 @@
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
-
-import pytest
 
 from src.api.config import Config
 

@@ -1,9 +1,8 @@
 """Integration tests for authentication routes."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
-import pytest
 import respx
 
 
@@ -20,7 +19,9 @@ class TestAuthEndpoint:
 
         # Mock the config to use our test config
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-valid-test-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-valid-test-key"}
+            )
 
             assert response.status_code == 200
             data = response.json()
@@ -33,11 +34,15 @@ class TestAuthEndpoint:
         """Test authentication failure with invalid API key."""
         # Mock the Anthropic API to return 401
         respx.post("https://api.anthropic.com/v1/messages").mock(
-            return_value=httpx.Response(401, json={"error": {"message": "Invalid API key"}})
+            return_value=httpx.Response(
+                401, json={"error": {"message": "Invalid API key"}}
+            )
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-invalid-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-invalid-key"}
+            )
 
             assert response.status_code == 400
             data = response.json()
@@ -75,7 +80,11 @@ class TestAuthEndpoint:
 
     def test_auth_failure_with_invalid_json(self, test_client):
         """Test authentication failure with invalid JSON."""
-        response = test_client.post("/api/auth", data="invalid json", headers={"content-type": "application/json"})
+        response = test_client.post(
+            "/api/auth",
+            data="invalid json",
+            headers={"content-type": "application/json"},
+        )
 
         assert response.status_code == 422
 
@@ -104,7 +113,9 @@ class TestAuthEndpoint:
         # Mock set_api_key to fail
         with patch("src.api.routes.auth_routes.config", mock_config):
             with patch.object(mock_config, "set_api_key", return_value=False):
-                response = test_client.post("/api/auth", json={"api_key": "sk-ant-test-key"})
+                response = test_client.post(
+                    "/api/auth", json={"api_key": "sk-ant-test-key"}
+                )
 
                 assert response.status_code == 500
                 data = response.json()
@@ -119,7 +130,9 @@ class TestAuthEndpoint:
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-ratelimited-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-ratelimited-key"}
+            )
 
             assert response.status_code == 200
             data = response.json()
@@ -133,7 +146,9 @@ class TestAuthEndpoint:
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-test-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-test-key"}
+            )
 
             assert response.status_code == 200
             data = response.json()
@@ -256,7 +271,9 @@ class TestAuthWorkflow:
             assert response.json()["authenticated"] is False
 
             # 2. Authenticate with valid key
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-workflow-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-workflow-key"}
+            )
             assert response.status_code == 200
             assert response.json()["success"] is True
 
@@ -278,7 +295,9 @@ class TestAuthValidationErrors:
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-timeout-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-timeout-key"}
+            )
 
             assert response.status_code == 400
             data = response.json()
@@ -293,7 +312,9 @@ class TestAuthValidationErrors:
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-network-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-network-key"}
+            )
 
             assert response.status_code == 400
             data = response.json()
@@ -308,7 +329,9 @@ class TestAuthValidationErrors:
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-error-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-error-key"}
+            )
 
             assert response.status_code == 400
             data = response.json()
@@ -319,7 +342,9 @@ class TestAuthValidationErrors:
         """Test authentication when model returns 404."""
         # Mock 404 response (model not found)
         respx.post("https://api.anthropic.com/v1/messages").mock(
-            return_value=httpx.Response(404, json={"error": {"message": "Model not found"}})
+            return_value=httpx.Response(
+                404, json={"error": {"message": "Model not found"}}
+            )
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
@@ -341,13 +366,19 @@ class TestAuthValidationErrors:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return httpx.Response(404, json={"error": {"message": "Model not found"}})
+                return httpx.Response(
+                    404, json={"error": {"message": "Model not found"}}
+                )
             return httpx.Response(200, json={"id": "msg_test"})
 
-        respx.post("https://api.anthropic.com/v1/messages").mock(side_effect=side_effect_fn)
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=side_effect_fn
+        )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-retry-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-retry-key"}
+            )
 
             # Should succeed on retry
             assert response.status_code == 200
@@ -364,13 +395,19 @@ class TestAuthValidationErrors:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return httpx.Response(404, json={"error": {"message": "Model not found"}})
+                return httpx.Response(
+                    404, json={"error": {"message": "Model not found"}}
+                )
             return httpx.Response(401, json={"error": {"message": "Invalid API key"}})
 
-        respx.post("https://api.anthropic.com/v1/messages").mock(side_effect=side_effect_fn)
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=side_effect_fn
+        )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
-            response = test_client.post("/api/auth", json={"api_key": "sk-ant-invalid-retry-key"})
+            response = test_client.post(
+                "/api/auth", json={"api_key": "sk-ant-invalid-retry-key"}
+            )
 
             # Should fail with invalid key message
             assert response.status_code == 400
@@ -381,7 +418,9 @@ class TestAuthValidationErrors:
     def test_auth_with_500_status_code(self, test_client, mock_config):
         """Test authentication with 500 status from API."""
         respx.post("https://api.anthropic.com/v1/messages").mock(
-            return_value=httpx.Response(500, json={"error": {"message": "Internal server error"}})
+            return_value=httpx.Response(
+                500, json={"error": {"message": "Internal server error"}}
+            )
         )
 
         with patch("src.api.routes.auth_routes.config", mock_config):
