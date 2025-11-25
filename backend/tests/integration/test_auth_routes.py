@@ -264,3 +264,130 @@ class TestAuthWorkflow:
             response = test_client.get("/api/get-auth")
             assert response.json()["authenticated"] is True
             assert response.json()["has_api_key"] is True
+
+
+class TestAuthValidationErrors:
+    """Test authentication validation error handling."""
+
+    @respx.mock
+    def test_auth_with_timeout_error(self, test_client, mock_config):
+        """Test authentication when API request times out."""
+        # Mock timeout error
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=httpx.TimeoutException("Request timed out")
+        )
+
+        with patch("src.api.routes.auth_routes.config", mock_config):
+            response = test_client.post("/api/auth", json={"api_key": "sk-ant-timeout-key"})
+
+            assert response.status_code == 400
+            data = response.json()
+            assert "timed out" in data["detail"].lower()
+
+    @respx.mock
+    def test_auth_with_network_error(self, test_client, mock_config):
+        """Test authentication with network/request error."""
+        # Mock request error
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=httpx.RequestError("Network error")
+        )
+
+        with patch("src.api.routes.auth_routes.config", mock_config):
+            response = test_client.post("/api/auth", json={"api_key": "sk-ant-network-key"})
+
+            assert response.status_code == 400
+            data = response.json()
+            assert "network error" in data["detail"].lower()
+
+    @respx.mock
+    def test_auth_with_unexpected_exception(self, test_client, mock_config):
+        """Test authentication with unexpected exception."""
+        # Mock unexpected exception
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            side_effect=Exception("Unexpected error")
+        )
+
+        with patch("src.api.routes.auth_routes.config", mock_config):
+            response = test_client.post("/api/auth", json={"api_key": "sk-ant-error-key"})
+
+            assert response.status_code == 400
+            data = response.json()
+            assert "unexpected error" in data["detail"].lower()
+
+    @respx.mock
+    def test_auth_with_404_model_not_found(self, test_client, mock_config):
+        """Test authentication when model returns 404."""
+        # Mock 404 response (model not found)
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(404, json={"error": {"message": "Model not found"}})
+        )
+
+        with patch("src.api.routes.auth_routes.config", mock_config):
+            response = test_client.post("/api/auth", json={"api_key": "sk-ant-404-key"})
+
+            # When we get 404, we retry with same model and then fail
+            assert response.status_code == 400
+            data = response.json()
+            # Should have validation failure message
+            assert "detail" in data
+
+    @respx.mock
+    def test_auth_with_404_then_200_retry(self, test_client, mock_config):
+        """Test authentication retries successfully after 404."""
+        # First request returns 404, second returns 200
+        call_count = 0
+
+        def side_effect_fn(request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(404, json={"error": {"message": "Model not found"}})
+            return httpx.Response(200, json={"id": "msg_test"})
+
+        respx.post("https://api.anthropic.com/v1/messages").mock(side_effect=side_effect_fn)
+
+        with patch("src.api.routes.auth_routes.config", mock_config):
+            response = test_client.post("/api/auth", json={"api_key": "sk-ant-retry-key"})
+
+            # Should succeed on retry
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+
+    @respx.mock
+    def test_auth_with_404_then_401_retry(self, test_client, mock_config):
+        """Test authentication retry detects invalid key after 404."""
+        # First request returns 404, second returns 401
+        call_count = 0
+
+        def side_effect_fn(request):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(404, json={"error": {"message": "Model not found"}})
+            return httpx.Response(401, json={"error": {"message": "Invalid API key"}})
+
+        respx.post("https://api.anthropic.com/v1/messages").mock(side_effect=side_effect_fn)
+
+        with patch("src.api.routes.auth_routes.config", mock_config):
+            response = test_client.post("/api/auth", json={"api_key": "sk-ant-invalid-retry-key"})
+
+            # Should fail with invalid key message
+            assert response.status_code == 400
+            data = response.json()
+            assert "invalid api key" in data["detail"].lower()
+
+    @respx.mock
+    def test_auth_with_500_status_code(self, test_client, mock_config):
+        """Test authentication with 500 status from API."""
+        respx.post("https://api.anthropic.com/v1/messages").mock(
+            return_value=httpx.Response(500, json={"error": {"message": "Internal server error"}})
+        )
+
+        with patch("src.api.routes.auth_routes.config", mock_config):
+            response = test_client.post("/api/auth", json={"api_key": "sk-ant-500-key"})
+
+            assert response.status_code == 400
+            data = response.json()
+            assert "validation failed" in data["detail"].lower()
+            assert "500" in data["detail"]

@@ -157,7 +157,7 @@ class TestRouterInclusion:
         assert response.status_code != 404
 
     @respx.mock
-    def test_langgraph_routes_included(self, test_client):
+    def test_langgraph_routes_included(self, test_client, mock_config):
         """Test that langgraph routes are included."""
         # Test that a langgraph thread endpoint exists (will fail auth)
         response = test_client.post("/threads", json={})
