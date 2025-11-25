@@ -34,6 +34,11 @@ def mock_config(temp_env_file, monkeypatch):
     """Mock the Config class with a temporary .env file."""
     from src.api.config import Config
 
+    # Clear ANTHROPIC_API_KEY from environment before test to ensure test isolation.
+    # Without this, API keys set by previous tests via config.set_api_key() persist
+    # in os.environ and leak into subsequent tests, causing unexpected authentication state.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
     # Patch the Config initialization to use temp file
     original_init = Config.__init__
 

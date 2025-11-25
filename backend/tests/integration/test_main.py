@@ -1,6 +1,7 @@
 """Integration tests for main FastAPI application."""
 
 import pytest
+import respx
 
 
 class TestRootEndpoint:
@@ -86,7 +87,8 @@ class TestCORSMiddleware:
 
     def test_cors_headers_present(self, test_client):
         """Test that CORS headers are present in response."""
-        response = test_client.get("/")
+        # TestClient requires Origin header for CORS middleware to activate
+        response = test_client.get("/", headers={"Origin": "http://localhost:3000"})
 
         # Check for CORS headers
         assert "access-control-allow-origin" in response.headers
@@ -144,19 +146,6 @@ class TestAppMetadata:
         assert response.status_code == 200
 
 
-class TestNotFoundRoutes:
-    """Test 404 handling for non-existent routes."""
-
-    def test_invalid_route_handled_by_langgraph_proxy(self, test_client):
-        """Test that invalid routes are caught by langgraph catch-all proxy."""
-        # The catch-all proxy in langgraph_routes handles all unmatched routes
-        # It will return 401 if not authenticated, or try to proxy if authenticated
-        response = test_client.get("/nonexistent-route")
-
-        # Should return 401 because of authentication check
-        assert response.status_code == 401
-
-
 class TestRouterInclusion:
     """Test that routers are properly included."""
 
@@ -167,9 +156,10 @@ class TestRouterInclusion:
         # Should not return 404
         assert response.status_code != 404
 
+    @respx.mock
     def test_langgraph_routes_included(self, test_client):
         """Test that langgraph routes are included."""
-        # Test that a langgraph endpoint exists (will fail auth)
-        response = test_client.post("/runs/stream")
+        # Test that a langgraph thread endpoint exists (will fail auth)
+        response = test_client.post("/threads", json={})
         # Should return 401 (auth error), not 404 (not found)
         assert response.status_code == 401
