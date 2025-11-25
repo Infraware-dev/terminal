@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It intelligently routes user input to either shell command execution or an LLM backend for natural language queries.
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
-**Status**: M1 Complete, Production-Ready (496 tests, 0 clippy warnings)
+**Status**: M1 Complete, Production-Ready (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
 **Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
@@ -21,10 +21,12 @@ cargo build --release                # Release build
 cargo run                            # Run application
 
 # Testing
-cargo test                           # All tests (486 tests)
+cargo test                           # All tests
 cargo test --test classifier_tests   # SCAN algorithm tests
 cargo test --test executor_tests     # Executor tests
+cargo test test_name                 # Run single test by name
 cargo test -- --nocapture            # Tests with output
+cargo test -- --show-output          # Show println! even for passing tests
 
 # Benchmarking
 cargo bench                          # All benchmarks
@@ -41,7 +43,7 @@ cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info  # Cove
 ### Core Flow
 ```
 User Input → Alias Expansion → InputClassifier → [Command Path | Natural Language Path]
-              (if matches)    (9-handler chain)      ↓                    ↓
+              (if matches)    (10-handler chain)     ↓                    ↓
                            incl. History Expansion  CommandExecutor      LLMClient
                                                          ↓                    ↓
                                                     Shell Output      ResponseRenderer
@@ -49,19 +51,20 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-9-handler Chain of Responsibility executing in strict order (<100μs average):
+10-handler Chain of Responsibility executing in strict order (<100μs average):
 
 | # | Handler | Purpose | Performance |
 |---|---------|---------|-------------|
 | 1 | EmptyInputHandler | Fast path for empty/whitespace | <1μs |
 | 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion | ~1-5μs |
-| 3 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
-| 4 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
-| 5 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
-| 6 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
-| 7 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker") | ~100μs |
-| 8 | NaturalLanguageHandler | English patterns (precompiled regex) | ~5μs |
-| 9 | DefaultHandler | Fallback to LLM | <1μs |
+| 3 | ApplicationBuiltinHandler | App builtins (clear, reload-aliases, reload-commands) | <1μs |
+| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
+| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
+| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
+| 7 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
+| 8 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker") | ~100μs |
+| 9 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
+| 10 | DefaultHandler | Fallback to LLM | <1μs |
 
 **Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
 
@@ -76,8 +79,9 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 **`input/`** - SCAN Algorithm
 - `classifier.rs`: InputClassifier coordinating handler chain + alias expansion
-- `handler.rs`: 9-handler Chain of Responsibility implementation
+- `handler.rs`: 10-handler Chain of Responsibility implementation
 - `history_expansion.rs`: Bash-style `!!`, `!$`, `!^`, `!*` with Arc<RwLock>
+- `application_builtins.rs`: App builtin commands (clear, reload-aliases, reload-commands)
 - `shell_builtins.rs`: 45+ builtins with `ShellBuiltinInfo` metadata
 - `known_commands.rs`: Single source of truth for 60+ DevOps commands
 - `patterns.rs`: Precompiled RegexSet patterns
@@ -132,9 +136,13 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - Runtime reload: `reload-aliases` built-in command
 
 ### Built-in Commands
+
+Application-specific commands recognized by `ApplicationBuiltinHandler` (position 3 in SCAN chain):
 - `clear` - Clear terminal output buffer
 - `reload-aliases` - Reload aliases from system/user config files
 - `reload-commands` - Clear command cache (use after installing new commands)
+
+These commands are recognized early in the classification chain to prevent misclassification as natural language.
 
 ### Interactive Commands
 - **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.
@@ -171,6 +179,15 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - No dead code
 - Safe indexing (`.first()`, `.get()`) - no `parts[0]` or `.unwrap()` on arrays
 
+### Code Quality Standards
+
+**Microsoft Pragmatic Rust Guidelines Compliance** (https://microsoft.github.io/rust-guidelines/):
+
+- All public types implement `Debug` (custom impl for complex types to protect sensitive data)
+- Use `#[expect]` instead of `#[allow]` for lint overrides
+- Zero clippy warnings, all tests passing
+- See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines
+
 ### M1 Scope Limitations (Deferred to M2/M3)
 - LLM backend: HttpLLMClient exists but needs real endpoint/auth
 - Auto-install: Framework prompts but doesn't execute
@@ -179,6 +196,11 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - Config: Hardcoded defaults, no config file
 - Markdown: Basic rendering only, no tables/images
 - Cache TTL: No automatic invalidation (use `reload-commands` after installing new commands)
+- **Hardcoded English Fallback Words**:
+  - `typo_detection.rs:100-103` contains `NL_SINGLE_WORDS` list with 15 hardcoded English words
+  - `patterns.rs:60-68` contains regex patterns for English question words/articles
+  - These patterns should be replaced with language-agnostic heuristics like `NaturalLanguageHandler` (commit cc6b784)
+  - Issue: Single-word multilingual inputs (e.g., "cosa", "como") may be incorrectly classified as command typos
 
 ## Common Patterns
 

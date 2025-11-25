@@ -19,7 +19,10 @@ pub struct CommandOrchestrator;
 
 impl CommandOrchestrator {
     /// Create a new command orchestrator
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Constructor used in tests, Default trait is preferred"
+    )]
     pub const fn new() -> Self {
         Self
     }
@@ -149,6 +152,7 @@ impl CommandOrchestrator {
 
     /// Handle command not found scenario
     fn handle_command_not_found(&self, cmd: &str, state: &mut TerminalState) {
+        log::warn!("Command not found: {}", cmd);
         state.add_output(MessageFormatter::command_not_found(cmd));
         state.add_output(MessageFormatter::install_suggestion(
             PackageInstaller::is_available_static(),
@@ -247,7 +251,6 @@ impl CommandOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::TerminalState;
 
     #[tokio::test]
     async fn test_command_not_found() {

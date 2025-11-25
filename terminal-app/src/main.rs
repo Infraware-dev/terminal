@@ -1,6 +1,7 @@
 mod executor;
 mod input;
 mod llm;
+mod logging;
 mod orchestrators;
 /// Infraware Terminal - Hybrid Command Interpreter with AI Assistance
 ///
@@ -47,6 +48,21 @@ pub struct InfrawareTerminal {
     tab_completion_handler: TabCompletionHandler,
     /// Shared history for history expansion (synchronized with state.history)
     history_arc: Arc<std::sync::RwLock<Vec<String>>>,
+}
+
+impl std::fmt::Debug for InfrawareTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InfrawareTerminal")
+            .field("ui", &self.ui)
+            .field("state", &self.state)
+            .field("classifier", &self.classifier)
+            .field("event_handler", &self.event_handler)
+            .field("command_orchestrator", &self.command_orchestrator)
+            .field("nl_orchestrator", &self.nl_orchestrator)
+            .field("tab_completion_handler", &self.tab_completion_handler)
+            .field("history_arc", &"<Arc<RwLock<Vec<String>>>>")
+            .finish()
+    }
 }
 
 /// Builder for InfrawareTerminal
@@ -210,7 +226,10 @@ impl InfrawareTerminal {
     /// Create a new terminal instance with provided LLM client
     ///
     /// This is a convenience method. For more control, use `builder()`.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Convenience method for tests, builder pattern is preferred"
+    )]
     fn new_with_client(llm_client: Arc<dyn LLMClientTrait>) -> Result<Self> {
         Self::builder().with_llm_client(llm_client).build()
     }
@@ -218,26 +237,35 @@ impl InfrawareTerminal {
     /// Create a new Infraware Terminal instance with mock LLM (for development/testing)
     ///
     /// This is a convenience method. For more control, use `builder()`.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Convenience method for tests, builder pattern is preferred"
+    )]
     fn new() -> Result<Self> {
         Self::builder().build()
     }
 
     /// Run the main event loop
     async fn run(&mut self) -> Result<()> {
-        // Load aliases at startup (async, non-blocking)
+        // Load aliases at startup (blocking to ensure they're available before first command)
         // Use spawn_blocking for file I/O to avoid blocking the executor
-        tokio::task::spawn_blocking(|| {
+        let alias_load_result = tokio::task::spawn_blocking(|| {
             use input::discovery::CommandCache;
 
             // Load system aliases first
             if let Err(e) = CommandCache::load_system_aliases() {
-                eprintln!("Warning: Failed to load system aliases: {e}");
+                log::warn!("Failed to load system aliases: {}", e);
             }
 
             // Load user aliases (these override system aliases)
             CommandCache::load_user_aliases();
-        });
+        })
+        .await;
+
+        // Log if alias loading task panicked
+        if let Err(e) = alias_load_result {
+            log::error!("Alias loading task panicked: {}", e);
+        }
 
         // Display welcome message
         self.state.add_output(MessageFormatter::banner_line(
@@ -351,9 +379,6 @@ impl InfrawareTerminal {
             *history_guard = self.state.history.all().to_vec();
         }
 
-        // Echo the input
-        self.state.add_output(MessageFormatter::command(&input));
-
         // Classify the input
         match self.classifier.classify(&input)? {
             InputType::Command {
@@ -361,18 +386,24 @@ impl InfrawareTerminal {
                 args,
                 original_input,
             } => {
+                // Don't echo input for clear command (it clears the output)
+                if command != "clear" {
+                    self.state.add_output(MessageFormatter::command(&input));
+                }
                 self.handle_command(&command, &args, original_input.as_deref())
                     .await?;
             }
             InputType::NaturalLanguage(query) => {
+                self.state.add_output(MessageFormatter::command(&input));
                 self.handle_natural_language(&query).await?;
             }
             InputType::CommandTypo {
-                input,
+                input: typo_input,
                 suggestion,
                 distance,
             } => {
-                self.handle_command_typo(&input, &suggestion, distance)
+                self.state.add_output(MessageFormatter::command(&input));
+                self.handle_command_typo(&typo_input, &suggestion, distance)
                     .await?;
             }
             InputType::Empty => {}
@@ -402,21 +433,45 @@ impl InfrawareTerminal {
 
     /// Handle command typo
     ///
-    /// Informs the user about a potential typo and suggests the correct command
+    /// Auto-corrects the typo and executes the suggested command
     async fn handle_command_typo(
         &mut self,
         input: &str,
         suggestion: &str,
         distance: usize,
     ) -> Result<()> {
-        let message = format!(
-            "Command not found: '{}'\nDid you mean '{}'? (Levenshtein distance: {})",
-            input.split_whitespace().next().unwrap_or(input),
-            suggestion,
-            distance
-        );
-        self.state.add_output(MessageFormatter::error(&message));
-        Ok(())
+        // Extract the mistyped first word and get the rest of the input
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        let mistyped = parts.first().copied().unwrap_or(input);
+
+        // Show correction message
+        self.state.add_output(MessageFormatter::suggestion(format!(
+            "Correcting '{}' → '{}' (Levenshtein distance: {})",
+            mistyped, suggestion, distance
+        )));
+
+        // Reconstruct command with corrected first word
+        let corrected_input = if parts.len() > 1 {
+            format!("{} {}", suggestion, parts[1..].join(" "))
+        } else {
+            suggestion.to_string()
+        };
+
+        // Parse and execute the corrected command
+        use crate::input::parser::CommandParser;
+        match CommandParser::parse(&corrected_input) {
+            Ok((command, args)) => {
+                self.command_orchestrator
+                    .handle_command(&command, &args, None, &mut self.state, &mut self.ui)
+                    .await
+            }
+            Err(e) => {
+                self.state.add_output(MessageFormatter::error(format!(
+                    "Failed to parse command: {e}"
+                )));
+                Ok(())
+            }
+        }
     }
 
     /// Handle natural language query
@@ -442,28 +497,41 @@ impl InfrawareTerminal {
 /// Main entry point
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment variables from .env file (if present)
+    dotenvy::dotenv().ok();
+
+    // Initialize logging system
+    logging::init()?;
+
+    log::info!("Infraware Terminal starting...");
+
     // Configure LLM client based on environment variable
     let llm_client: Arc<dyn LLMClientTrait> = if let Ok(url) = std::env::var("INFRAWARE_LLM_URL") {
-        eprintln!("Using HTTP LLM client: {url}");
+        log::info!("Using HTTP LLM client: {}", url);
         Arc::new(HttpLLMClient::new(url))
     } else {
-        eprintln!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
+        log::info!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
         Arc::new(MockLLMClient::new())
     };
 
     // Create terminal using builder pattern
+    log::debug!("Building terminal UI...");
     let mut terminal = InfrawareTerminal::builder()
         .with_llm_client(llm_client)
         .build()?;
 
     // Show animated splash screen
+    log::debug!("Showing splash screen");
     SplashScreen::run(terminal.ui.inner_terminal())?;
 
     // Run the main loop
+    log::debug!("Starting main event loop");
     if let Err(e) = terminal.run().await {
+        log::error!("Fatal error: {}", e);
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
 
+    log::info!("Infraware Terminal shutting down");
     Ok(())
 }

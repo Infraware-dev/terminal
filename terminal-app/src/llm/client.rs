@@ -1,7 +1,6 @@
 /// LLM client for natural language queries
 use anyhow::Result;
 use async_trait::async_trait;
-use reqwest;
 use serde::{Deserialize, Serialize};
 
 /// Request to the LLM backend
@@ -14,7 +13,7 @@ pub struct LLMRequest {
 
 /// Response from the LLM backend
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Struct fields used in HTTP deserialization, metadata for M2/M3
 pub struct LLMResponse {
     pub text: String,
     #[serde(default)]
@@ -37,7 +36,7 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     }
 
     /// Query with command history context (M2/M3)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Context-aware LLM API for M2/M3
     async fn query_with_history(&self, text: &str, command_history: &[String]) -> Result<String> {
         let context = if command_history.is_empty() {
             None
@@ -77,7 +76,7 @@ impl HttpLLMClient {
     }
 
     /// Create a new HTTP LLM client with custom timeout (M2/M3)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Constructor for custom timeout configuration, used in M2/M3
     pub fn with_timeout(base_url: String, timeout_secs: u64) -> Result<Self> {
         Ok(Self {
             base_url,
@@ -95,6 +94,8 @@ impl LLMClientTrait for HttpLLMClient {
     }
 
     async fn query_with_context(&self, text: &str, context: Option<String>) -> Result<String> {
+        log::debug!("LLM query: {} (context: {})", text, context.is_some());
+
         let request = LLMRequest {
             query: text.to_string(),
             context,
@@ -109,10 +110,12 @@ impl LLMClientTrait for HttpLLMClient {
 
         // Check for errors
         if !response.status().is_success() {
+            log::error!("LLM request failed with status: {}", response.status());
             anyhow::bail!("LLM request failed with status: {}", response.status());
         }
 
         let llm_response: LLMResponse = response.json().await?;
+        log::debug!("LLM response received ({} chars)", llm_response.text.len());
 
         Ok(llm_response.text)
     }

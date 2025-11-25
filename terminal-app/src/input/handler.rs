@@ -25,6 +25,14 @@ pub struct ClassifierChain {
     handlers: Vec<Box<dyn InputHandler>>,
 }
 
+impl std::fmt::Debug for ClassifierChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClassifierChain")
+            .field("handlers_count", &self.handlers.len())
+            .finish()
+    }
+}
+
 impl ClassifierChain {
     /// Create a new empty chain
     pub fn new() -> Self {
@@ -59,6 +67,7 @@ impl Default for ClassifierChain {
 }
 
 /// Handler for empty input
+#[derive(Debug)]
 pub struct EmptyInputHandler;
 
 impl EmptyInputHandler {
@@ -84,9 +93,76 @@ impl Default for EmptyInputHandler {
     }
 }
 
+/// Handler for application-specific builtin commands
+///
+/// Recognizes commands that are built into the terminal application:
+/// - `clear`: Clear terminal output buffer
+/// - `reload-aliases`: Reload alias definitions
+/// - `reload-commands`: Clear command cache
+///
+/// This handler has high priority (position 3 in chain) to prevent these
+/// commands from being misclassified as natural language by later handlers.
+#[derive(Debug)]
+pub struct ApplicationBuiltinHandler;
+
+impl ApplicationBuiltinHandler {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl InputHandler for ApplicationBuiltinHandler {
+    fn handle(&self, input: &str) -> Option<InputType> {
+        let trimmed = input.trim();
+
+        // Extract the command (first word)
+        let command = trimmed.split_whitespace().next()?;
+
+        // Check if it's an application builtin
+        if crate::input::application_builtins::is_application_builtin(command) {
+            // Parse args directly without intermediate Vec allocation
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+
+            // Only preserve original_input if shell operators present (consistent with other handlers)
+            let patterns = crate::input::patterns::CompiledPatterns::get();
+            let original_input = if patterns.has_shell_operators(trimmed) {
+                Some(trimmed.to_string())
+            } else {
+                None
+            };
+
+            return Some(InputType::Command {
+                command: command.to_string(),
+                args,
+                original_input,
+            });
+        }
+
+        None
+    }
+}
+
+impl Default for ApplicationBuiltinHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Handler for known commands (whitelist-based)
 pub struct KnownCommandHandler {
     known_commands: Vec<String>,
+}
+
+impl std::fmt::Debug for KnownCommandHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KnownCommandHandler")
+            .field("known_commands_count", &self.known_commands.len())
+            .finish()
+    }
 }
 
 impl KnownCommandHandler {
@@ -151,6 +227,7 @@ impl InputHandler for KnownCommandHandler {
 }
 
 /// Handler for command syntax detection (flags, pipes, paths, etc.)
+#[derive(Debug)]
 pub struct CommandSyntaxHandler;
 
 impl CommandSyntaxHandler {
@@ -226,6 +303,7 @@ impl Default for CommandSyntaxHandler {
 }
 
 /// Handler for natural language detection (multilingual support)
+#[derive(Debug)]
 pub struct NaturalLanguageHandler;
 
 impl NaturalLanguageHandler {
@@ -233,238 +311,91 @@ impl NaturalLanguageHandler {
         Self
     }
 
-    /// Check if input is likely natural language (multilingual support)
-    /// Supports: English, Italian, Spanish, French, German
+    /// Check if input is likely natural language using language-agnostic heuristics
     ///
-    /// Uses precompiled regex patterns for 10-100x faster matching
+    /// Uses universal patterns instead of hardcoded words to support any language:
+    /// - Punctuation (?, !, commas, periods)
+    /// - Non-ASCII characters (accents, unicode, non-Latin scripts)
+    /// - Structural patterns (word count, spacing, capitalization)
+    /// - Statistical analysis (word/symbol ratios)
     fn is_likely_natural_language(&self, input: &str) -> bool {
         // Get precompiled patterns
         let patterns = crate::input::patterns::CompiledPatterns::get();
 
-        // Fast regex-based detection
+        // 1. Universal punctuation patterns (question/exclamation marks, sentence boundaries)
         if patterns.has_natural_language_indicators(input) {
             return true;
         }
 
-        // Check for question words (any language)
-        if patterns.starts_with_question_word(input) {
+        // 2. Language-agnostic regex patterns (English-only fallback, maintained for compatibility)
+        if patterns.starts_with_question_word(input) || patterns.has_articles(input) {
             return true;
         }
 
-        // Check for articles (indicates natural language structure)
-        if patterns.has_articles(input) {
-            return true;
-        }
-
-        // Long input without command syntax (universal heuristic)
+        // 3. Word count heuristic (universal across languages)
         let word_count = input.split_whitespace().count();
         if word_count > 5 && !patterns.has_shell_operators(input) {
             return true;
         }
 
-        // Legacy fallback checks (kept for edge cases not covered by regex)
-        let lowercase = input.to_lowercase();
+        // ===== LANGUAGE-AGNOSTIC HEURISTICS =====
 
-        // ===== MULTILINGUAL PATTERNS =====
+        // 4. Non-ASCII character detection (accents, unicode, non-Latin scripts)
+        // Most natural language contains non-ASCII, shell commands are ASCII
+        if !input.is_ascii() {
+            // Exclude common command patterns with unicode (e.g., docker --help with smart quotes)
+            let looks_like_command = patterns.has_command_syntax(input)
+                || patterns.has_shell_operators(input)
+                || input.starts_with('/')
+                || input.starts_with("./");
 
-        // 4. Question words at the start (EN, IT, ES, FR, DE)
-        let question_words = [
-            // English
-            "how",
-            "what",
-            "why",
-            "when",
-            "where",
-            "who",
-            "which",
-            "can you",
-            "could you",
-            "would you",
-            "will you",
-            // Italian
-            "come",
-            "cosa",
-            "perché",
-            "perche",
-            "quando",
-            "dove",
-            "chi",
-            "quale",
-            "puoi",
-            "potresti",
-            "vorresti",
-            // Spanish
-            "cómo",
-            "como",
-            "qué",
-            "que",
-            "por qué",
-            "porque",
-            "cuando",
-            "dónde",
-            "donde",
-            "quién",
-            "quien",
-            "cuál",
-            "cual",
-            "puedes",
-            "podrías",
-            "podrías",
-            // French
-            "comment",
-            "quoi",
-            "pourquoi",
-            "quand",
-            "où",
-            "ou",
-            "qui",
-            "quel",
-            "quelle",
-            "peux-tu",
-            "pourrais-tu",
-            "peux tu",
-            "pourrais tu",
-            // German
-            "wie",
-            "was",
-            "warum",
-            "wann",
-            "wo",
-            "wer",
-            "welche",
-            "welcher",
-            "kannst du",
-            "könntest du",
-            "kannst",
-            "könntest",
-        ];
-
-        for word in &question_words {
-            if lowercase.starts_with(word) {
+            if !looks_like_command {
                 return true;
             }
         }
 
-        // 5. Common articles (indicates natural language structure)
-        let articles = [
-            // English
-            " a ", " an ", " the ", // Italian
-            " un ", " uno ", " una ", " il ", " lo ", " la ", " i ", " gli ", " le ", " dell",
-            " dell'", " della ", " dello ", // Spanish
-            " un ", " una ", " el ", " la ", " los ", " las ", " del ", " de la ", " de los ",
-            // French
-            " un ", " une ", " le ", " la ", " les ", " des ", " du ", " de la ", " de l'",
-            // German
-            " der ", " die ", " das ", " den ", " dem ", " des ", " ein ", " eine ", " einen ",
-            " einem ",
-        ];
+        // 5. Repeated punctuation (e.g., "??", "!!", "...") indicates natural language
+        if input.contains("??") || input.contains("!!") || input.contains("...") {
+            return true;
+        }
 
-        for article in &articles {
-            if lowercase.contains(article) {
+        // 6. Multiple short words (2-3 chars) with spaces - likely articles/prepositions
+        // Example: "a la", "de la", "in the", "per il"
+        let words: Vec<&str> = input.split_whitespace().collect();
+        if words.len() >= 3 {
+            let short_word_count = words
+                .iter()
+                .filter(|w| w.len() >= 2 && w.len() <= 3)
+                .count();
+            let short_word_ratio = short_word_count as f64 / words.len() as f64;
+
+            // If >30% of words are 2-3 chars and no command syntax, likely NL
+            if short_word_ratio > 0.3 && !patterns.has_command_syntax(input) {
                 return true;
             }
         }
 
-        // 6. Common request verbs/phrases (EN, IT, ES, FR, DE)
-        let nl_verbs = [
-            // English
-            "show me",
-            "explain",
-            "help",
-            "tell me",
-            "describe",
-            "find",
-            "list",
-            "get me",
-            "i need",
-            "i want",
-            "please",
-            // Italian
-            "mostrami",
-            "spiega",
-            "spiegami",
-            "aiuto",
-            "aiutami",
-            "dimmi",
-            "descrivi",
-            "trova",
-            "elenca",
-            "ho bisogno",
-            "voglio",
-            "per favore",
-            // Spanish
-            "muéstrame",
-            "muestrame",
-            "explica",
-            "ayuda",
-            "ayúdame",
-            "ayudame",
-            "dime",
-            "describe",
-            "encuentra",
-            "lista",
-            "necesito",
-            "quiero",
-            "por favor",
-            // French
-            "montre-moi",
-            "montre moi",
-            "explique",
-            "aide",
-            "aide-moi",
-            "dis-moi",
-            "dis moi",
-            "décris",
-            "decris",
-            "trouve",
-            "liste",
-            "j'ai besoin",
-            "je veux",
-            "s'il te plaît",
-            "s'il vous plaît",
-            // German
-            "zeig mir",
-            "zeige mir",
-            "erkläre",
-            "erklare",
-            "hilfe",
-            "hilf mir",
-            "sag mir",
-            "sage mir",
-            "beschreibe",
-            "finde",
-            "liste",
-            "ich brauche",
-            "ich will",
-            "bitte",
-        ];
-
-        for verb in &nl_verbs {
-            if lowercase.contains(verb) {
+        // 7. Medium-length phrases (3-5 words) without command indicators
+        // Commands are typically 1-2 words or have flags/operators
+        if (3..=5).contains(&word_count)
+            && !patterns.has_command_syntax(input)
+            && !patterns.has_shell_operators(input)
+            && !input.starts_with('/')
+            && !input.starts_with("./")
+        {
+            // Additional check: no known command at start
+            // Use CommandCache for consistency with KnownCommandHandler (DRY principle)
+            let first_word = words.first().map(|w| w.to_lowercase()).unwrap_or_default();
+            if !crate::input::discovery::CommandCache::is_available(&first_word) {
                 return true;
             }
         }
 
-        // 7. Polite expressions (strong indicator of natural language)
-        let polite_expressions = [
-            "please",
-            "per favore",
-            "per piacere",
-            "por favor",
-            "s'il te plaît",
-            "s'il vous plaît",
-            "bitte",
-            "grazie",
-            "thank",
-            "merci",
-            "danke",
-            "gracias",
-        ];
-
-        for expr in &polite_expressions {
-            if lowercase.contains(expr) {
-                return true;
-            }
+        // 8. Contractions (e.g., "don't", "can't", "I'm") - universal NL indicator
+        // Check without trailing space to catch end-of-sentence and before-punctuation cases
+        let contractions = ["'t", "'re", "'ve", "'ll", "'s", "'m", "'d"];
+        if contractions.iter().any(|c| input.contains(c)) {
+            return true;
         }
 
         false
@@ -492,6 +423,7 @@ impl Default for NaturalLanguageHandler {
 ///
 /// Detects inputs that start with path-like prefixes and verifies
 /// that the file exists and is executable.
+#[derive(Debug)]
 pub struct PathCommandHandler;
 
 impl PathCommandHandler {
@@ -594,6 +526,7 @@ impl Default for PathCommandHandler {
 ///
 /// This is the final handler in the chain that catches any input
 /// that wasn't classified by previous handlers.
+#[derive(Debug)]
 pub struct DefaultHandler;
 
 impl DefaultHandler {
@@ -630,6 +563,102 @@ mod tests {
         assert_eq!(handler.handle(""), Some(InputType::Empty));
         assert_eq!(handler.handle("   "), Some(InputType::Empty));
         assert_eq!(handler.handle("test"), None);
+    }
+
+    #[test]
+    fn test_application_builtin_handler() {
+        let handler = ApplicationBuiltinHandler::new();
+
+        // Test clear command
+        assert!(matches!(
+            handler.handle("clear"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "clear" && args.is_empty()
+        ));
+
+        // Test reload-aliases command
+        assert!(matches!(
+            handler.handle("reload-aliases"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "reload-aliases" && args.is_empty()
+        ));
+
+        // Test reload-commands command
+        assert!(matches!(
+            handler.handle("reload-commands"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "reload-commands" && args.is_empty()
+        ));
+
+        // Test application builtin with arguments (should still work)
+        assert!(matches!(
+            handler.handle("clear --extra-arg"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "clear" && args == vec!["--extra-arg"]
+        ));
+
+        // Test non-builtin commands should pass through
+        assert_eq!(handler.handle("docker ps"), None);
+        assert_eq!(handler.handle("ls -la"), None);
+        assert_eq!(handler.handle("how do I clear the screen"), None);
+    }
+
+    #[test]
+    fn test_application_builtin_original_input() {
+        let handler = ApplicationBuiltinHandler::new();
+
+        // Test without shell operators → original_input should be None
+        match handler.handle("clear") {
+            Some(InputType::Command {
+                command,
+                original_input,
+                ..
+            }) => {
+                assert_eq!(command, "clear");
+                assert_eq!(
+                    original_input, None,
+                    "original_input should be None without shell operators"
+                );
+            }
+            _ => panic!("Expected Command type"),
+        }
+
+        // Test with pipe operator → original_input should be Some
+        match handler.handle("clear | grep foo") {
+            Some(InputType::Command {
+                command,
+                original_input,
+                ..
+            }) => {
+                assert_eq!(command, "clear");
+                assert!(
+                    original_input.is_some(),
+                    "original_input should be Some with shell operators"
+                );
+                assert_eq!(original_input.unwrap(), "clear | grep foo");
+            }
+            _ => panic!("Expected Command type"),
+        }
+
+        // Test with redirect → original_input should be Some
+        match handler.handle("reload-aliases > output.txt") {
+            Some(InputType::Command { original_input, .. }) => {
+                assert!(original_input.is_some());
+            }
+            _ => panic!("Expected Command type"),
+        }
     }
 
     #[test]
@@ -716,6 +745,128 @@ mod tests {
 
         // Commands should pass through
         assert_eq!(handler.handle("ls"), None);
+    }
+
+    #[test]
+    fn test_natural_language_contractions_edge_cases() {
+        let handler = NaturalLanguageHandler::new();
+
+        // Test contractions at end of sentence (no trailing space)
+        assert!(
+            matches!(handler.handle("don't"), Some(InputType::NaturalLanguage(_))),
+            "Should detect contraction 'don't' at end of input"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("I can't"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction 'can't' at end of input"
+        );
+
+        assert!(
+            matches!(handler.handle("I'm"), Some(InputType::NaturalLanguage(_))),
+            "Should detect contraction 'I'm' at end of input"
+        );
+
+        // Test contractions before punctuation
+        assert!(
+            matches!(
+                handler.handle("can't."),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction before period"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("don't!"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction before exclamation"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("won't?"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction before question mark"
+        );
+
+        // Test contractions in middle of sentence (original behavior still works)
+        assert!(
+            matches!(
+                handler.handle("don't know"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction in middle of sentence"
+        );
+
+        assert!(
+            matches!(
+                handler.handle("you're right"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect contraction 'you're' in middle"
+        );
+
+        // Test multiple contractions
+        assert!(
+            matches!(
+                handler.handle("I don't think you're right"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect multiple contractions"
+        );
+    }
+
+    #[test]
+    fn test_natural_language_medium_phrases() {
+        let handler = NaturalLanguageHandler::new();
+
+        // Test 3-5 word phrase with no known command at start → should be NL
+        // "show" is not a known system command
+        assert!(
+            matches!(
+                handler.handle("show container status now"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect 4-word phrase with unknown command as NL"
+        );
+
+        // Test 3-word phrase with unknown verb
+        assert!(
+            matches!(
+                handler.handle("explain this thing"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect 3-word phrase with unknown command as NL"
+        );
+
+        // Note: NaturalLanguageHandler runs late in chain (after KnownCommandHandler)
+        // So commands like "docker ps" are already classified before reaching this handler
+        // This handler focuses on phrases that look like NL, not command filtering
+
+        // Test edge case: less than 3 words should not trigger medium-phrase heuristic
+        // (though it might be caught by other NL indicators)
+        // Use a phrase that's clearly 2 words and not in regex patterns
+        let result = handler.handle("check now");
+        // "check now" is 2 words, no clear NL indicators, should pass through
+        assert_eq!(
+            result, None,
+            "2-word phrase without NL indicators should not trigger medium-phrase heuristic"
+        );
+
+        // Test edge case: more than 5 words falls back to word count > 5 heuristic
+        assert!(
+            matches!(
+                handler.handle("please show me all the logs now"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "6+ word phrase should be caught by word count heuristic"
+        );
     }
 
     #[test]

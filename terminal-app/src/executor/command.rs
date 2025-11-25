@@ -23,7 +23,7 @@ impl CommandOutput {
     }
 
     /// Get combined output (stdout + stderr)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Utility method for combined output formatting, used in tests
     #[must_use]
     pub fn combined_output(&self) -> String {
         let mut result = String::new();
@@ -103,6 +103,7 @@ static REQUIRES_INTERACTIVE_SET: std::sync::LazyLock<HashSet<&'static str>> =
     std::sync::LazyLock::new(|| REQUIRES_INTERACTIVE.iter().copied().collect());
 
 /// Command executor for running shell commands
+#[derive(Debug)]
 pub struct CommandExecutor;
 
 impl CommandExecutor {
@@ -165,9 +166,12 @@ impl CommandExecutor {
         args: &[String],
         original_input: Option<&str>,
     ) -> Result<CommandOutput> {
+        log::debug!("Executing command: {} {:?}", cmd, args);
+
         // Block interactive commands that are NOT supported via TUI suspension
         // Commands in requires_interactive() will be handled separately
         if Self::is_interactive_command(cmd) && !Self::requires_interactive(cmd) {
+            log::warn!("Blocked interactive command: {}", cmd);
             return Ok(CommandOutput {
                 stdout: String::new(),
                 stderr: format!(
@@ -252,6 +256,7 @@ impl CommandExecutor {
         // Direct execution (no shell operators)
         // Check if command exists
         if !Self::command_exists(cmd) {
+            log::error!("Command not found: {}", cmd);
             anyhow::bail!("Command '{cmd}' not found");
         }
 
@@ -362,7 +367,10 @@ impl CommandExecutor {
     }
 
     /// Get the full path of a command
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Public API for command path resolution, used in M2/M3"
+    )]
     #[must_use]
     pub fn get_command_path(cmd: &str) -> Option<String> {
         which::which(cmd)
@@ -371,7 +379,10 @@ impl CommandExecutor {
     }
 
     /// Execute a command with sudo privileges (M2/M3)
-    #[allow(dead_code)] // Used by package_manager.rs
+    #[allow(
+        dead_code,
+        reason = "Used by package manager implementations for privileged operations"
+    )]
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {

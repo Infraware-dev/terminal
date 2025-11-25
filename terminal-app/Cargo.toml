@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[lints.rust]
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "allow"  # Animation math requires casts
+unsafe_op_in_unsafe_fn = "forbid"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "allow"  # Too strict for M1 scope
+
 [dependencies]
 # TUI
 ratatui = "0.29"
@@ -33,6 +45,11 @@ anyhow = "1.0"
 regex = "1.10"
 dirs = "6.0.0"  # For home directory, config paths
 strsim = "0.11"  # Levenshtein distance for typo detection
+
+# Logging
+log = "0.4"  # Logging facade
+log4rs = { version = "1.3", features = ["gzip"] }  # Size-based log rotation with gzip compression
+dotenvy = "0.15"  # .env file loading
 
 [dev-dependencies]
 tokio-test = "0.4"

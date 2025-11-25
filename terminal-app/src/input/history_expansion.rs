@@ -169,6 +169,35 @@ impl InputHandler for HistoryExpansionHandler {
         // Try to expand history
         let expanded = self.expand_history(input)?;
 
+        // Check if the first word is an alias and expand it
+        // This handles cases like: ll -> !! where ll is an alias
+        let expanded = {
+            use crate::input::discovery::CommandCache;
+
+            if let Some(first_word) = expanded.split_whitespace().next() {
+                if let Some(alias_expansion) = CommandCache::expand_alias(first_word) {
+                    // Get the rest of the arguments (everything after first word)
+                    let first_word_len = first_word.len();
+                    let rest = if first_word_len < expanded.len() {
+                        expanded[first_word_len..].trim_start()
+                    } else {
+                        ""
+                    };
+
+                    // Construct expanded input: alias_expansion + rest
+                    if rest.is_empty() {
+                        alias_expansion
+                    } else {
+                        format!("{alias_expansion} {rest}")
+                    }
+                } else {
+                    expanded
+                }
+            } else {
+                expanded
+            }
+        };
+
         // Parse the expanded command
         match CommandParser::parse(&expanded) {
             Ok((command, args)) => {
