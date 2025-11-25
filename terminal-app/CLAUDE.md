@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It intelligently routes user input to either shell command execution or an LLM backend for natural language queries.
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
-**Status**: M1 Complete, Production-Ready (224 tests, 0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
+**Status**: M1 Complete, Production-Ready (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
 **Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
@@ -21,10 +21,12 @@ cargo build --release                # Release build
 cargo run                            # Run application
 
 # Testing
-cargo test                           # All tests (224 tests)
+cargo test                           # All tests
 cargo test --test classifier_tests   # SCAN algorithm tests
 cargo test --test executor_tests     # Executor tests
+cargo test test_name                 # Run single test by name
 cargo test -- --nocapture            # Tests with output
+cargo test -- --show-output          # Show println! even for passing tests
 
 # Benchmarking
 cargo bench                          # All benchmarks
@@ -179,35 +181,12 @@ These commands are recognized early in the classification chain to prevent miscl
 
 ### Code Quality Standards
 
-**Microsoft Pragmatic Rust Guidelines Compliance**:
+**Microsoft Pragmatic Rust Guidelines Compliance** (https://microsoft.github.io/rust-guidelines/):
 
-This project adheres to Microsoft's enterprise-scale Rust best practices from https://microsoft.github.io/rust-guidelines/. Key highlights:
-
-1. **Debug Trait on Public Types**:
-   - All public types implement `Debug` trait
-   - Complex types have custom implementations: `InfrawareTerminal`, `CommandCache`, `CompiledPatterns`, `ClassifierChain`, `KnownCommandHandler`
-   - 9 marker structs derive Debug
-   - Sensitive data is protected from exposure in Debug output
-
-2. **Lint Configuration**:
-   - Enabled compiler lints: `missing_debug_implementations`, `redundant_imports`, `redundant_lifetimes`, `unsafe_op_in_unsafe_fn`, `unused_lifetimes`, `ambiguous_negative_literals`, `trivial_numeric_casts`
-   - Enabled Clippy lints: `all` set to warn, selected restriction lints, `pedantic` (too strict for M1)
-   - **Zero clippy warnings** - all 224 tests pass cleanly
-
-3. **Lint Overrides**:
-   - Replaced all `#[allow]` attributes with `#[expect]` (31 instances total)
-   - `#[expect]` generates compiler error if the underlying issue is fixed, preventing lint accumulation
-   - Exception: Generated code/macros use `#[allow]` where appropriate
-
-4. **Static Verification**:
-   - `cargo fmt --all --check` enforced in CI/CD
-   - `cargo clippy --all-targets --all-features -- -D warnings` enforced in CI/CD
-   - `rustfmt` for consistent code formatting
-   - All 224 tests passing, 0 compiler warnings
-
-**Rationale**: These guidelines ensure code is readable, maintainable, and safe for production use. They catch bugs early (missing Debug), prevent outdated lint suppression, and establish consistent patterns across the codebase.
-
-See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines and best practices.
+- All public types implement `Debug` (custom impl for complex types to protect sensitive data)
+- Use `#[expect]` instead of `#[allow]` for lint overrides
+- Zero clippy warnings, all tests passing
+- See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines
 
 ### M1 Scope Limitations (Deferred to M2/M3)
 - LLM backend: HttpLLMClient exists but needs real endpoint/auth
