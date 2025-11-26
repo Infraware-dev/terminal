@@ -52,6 +52,8 @@ pub struct InfrawareTerminal {
     history_arc: Arc<std::sync::RwLock<Vec<String>>>,
     /// Optional authenticator for backend auth status checks
     authenticator: Option<Arc<dyn Authenticator>>,
+    /// Whether using mock LLM client (for display purposes)
+    using_mock_llm: bool,
 }
 
 impl std::fmt::Debug for InfrawareTerminal {
@@ -66,6 +68,7 @@ impl std::fmt::Debug for InfrawareTerminal {
             .field("tab_completion_handler", &self.tab_completion_handler)
             .field("history_arc", &"<Arc<RwLock<Vec<String>>>>")
             .field("authenticator", &self.authenticator.is_some())
+            .field("using_mock_llm", &self.using_mock_llm)
             .finish()
     }
 }
@@ -98,6 +101,7 @@ pub struct InfrawareTerminalBuilder {
     command_orchestrator: Option<CommandOrchestrator>,
     tab_completion_handler: Option<TabCompletionHandler>,
     authenticator: Option<Arc<dyn Authenticator>>,
+    using_mock_llm: bool,
 }
 
 impl std::fmt::Debug for InfrawareTerminalBuilder {
@@ -115,6 +119,7 @@ impl std::fmt::Debug for InfrawareTerminalBuilder {
                 &self.tab_completion_handler.is_some(),
             )
             .field("authenticator", &self.authenticator.is_some())
+            .field("using_mock_llm", &self.using_mock_llm)
             .finish()
     }
 }
@@ -132,6 +137,7 @@ impl InfrawareTerminalBuilder {
             command_orchestrator: None,
             tab_completion_handler: None,
             authenticator: None,
+            using_mock_llm: true, // Default to mock until explicitly set
         }
     }
 
@@ -174,6 +180,12 @@ impl InfrawareTerminalBuilder {
     /// Set an authenticator for backend auth status checks
     pub fn with_authenticator(mut self, authenticator: Arc<dyn Authenticator>) -> Self {
         self.authenticator = Some(authenticator);
+        self
+    }
+
+    /// Set whether using mock LLM client (for display purposes)
+    pub const fn with_using_mock_llm(mut self, using_mock: bool) -> Self {
+        self.using_mock_llm = using_mock;
         self
     }
 
@@ -225,6 +237,7 @@ impl InfrawareTerminalBuilder {
             tab_completion_handler: self.tab_completion_handler.unwrap_or_default(),
             history_arc: history_vec,
             authenticator: self.authenticator,
+            using_mock_llm: self.using_mock_llm,
         })
     }
 }
@@ -298,6 +311,16 @@ impl InfrawareTerminal {
         );
         self.state
             .add_output(MessageFormatter::banner_hint("Press Ctrl+C to quit"));
+
+        // Show LLM client status
+        if self.using_mock_llm {
+            self.state.add_output(MessageFormatter::info(
+                "LLM: Mock mode (backend not available)",
+            ));
+        } else {
+            self.state
+                .add_output(MessageFormatter::success("LLM: Connected to backend"));
+        }
         self.state.add_output(String::new());
 
         // Initial render
@@ -566,9 +589,13 @@ async fn main() -> Result<()> {
 
     log::info!("Infraware Terminal starting...");
 
-    // Authenticate with backend (if configured)
+    // Authenticate with backend and determine LLM client (with silent fallback)
     let auth_config = AuthConfig::from_env();
-    let authenticator: Option<Arc<dyn Authenticator>> = if let (Some(backend_url), Some(api_key)) =
+    let (llm_client, authenticator, using_mock_llm): (
+        Arc<dyn LLMClientTrait>,
+        Option<Arc<dyn Authenticator>>,
+        bool,
+    ) = if let (Some(backend_url), Some(api_key)) =
         (&auth_config.backend_url, &auth_config.api_key)
     {
         log::info!("Backend URL configured: {}", backend_url);
@@ -576,35 +603,37 @@ async fn main() -> Result<()> {
         let auth = Arc::new(HttpAuthenticator::new(backend_url.clone()));
         match auth.authenticate(api_key).await {
             Ok(_) => {
-                log::info!("Backend authentication completed successfully");
-                Some(auth)
+                log::info!("Backend authentication successful - using HttpLLMClient");
+                let llm_url = std::env::var("INFRAWARE_LLM_URL")
+                    .unwrap_or_else(|_| format!("{}/api/llm", backend_url));
+                (
+                    Arc::new(HttpLLMClient::new(llm_url)) as Arc<dyn LLMClientTrait>,
+                    Some(auth as Arc<dyn Authenticator>),
+                    false,
+                )
             }
             Err(e) => {
-                log::error!("Authentication failed: {}", e);
-                log::error!("Please check your API key in .env.secrets");
-                return Err(e);
+                // Silent fallback to MockLLMClient
+                log::warn!(
+                    "Authentication failed: {} - falling back to MockLLMClient",
+                    e
+                );
+                (Arc::new(MockLLMClient::new()), None, true)
             }
         }
     } else {
         if auth_config.backend_url.is_some() {
             log::warn!("ANTHROPIC_API_KEY not found in .env.secrets");
         }
-        log::warn!("Backend not fully configured - LLM features will use mock responses");
-        None
-    };
-
-    // Configure LLM client based on environment variable
-    let llm_client: Arc<dyn LLMClientTrait> = if let Ok(url) = std::env::var("INFRAWARE_LLM_URL") {
-        log::info!("Using HTTP LLM client: {}", url);
-        Arc::new(HttpLLMClient::new(url))
-    } else {
-        log::info!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
-        Arc::new(MockLLMClient::new())
+        log::warn!("Backend not configured - using MockLLMClient");
+        (Arc::new(MockLLMClient::new()), None, true)
     };
 
     // Create terminal using builder pattern
     log::debug!("Building terminal UI...");
-    let mut builder = InfrawareTerminal::builder().with_llm_client(llm_client);
+    let mut builder = InfrawareTerminal::builder()
+        .with_llm_client(llm_client)
+        .with_using_mock_llm(using_mock_llm);
 
     // Add authenticator if available (for auth-status command)
     if let Some(auth) = authenticator {
