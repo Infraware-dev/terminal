@@ -1,3 +1,4 @@
+mod auth;
 mod executor;
 mod input;
 mod llm;
@@ -17,6 +18,7 @@ mod utils;
 use anyhow::Result;
 use std::time::Duration;
 
+use auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use input::{InputClassifier, InputType};
 use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
 use orchestrators::{CommandOrchestrator, NaturalLanguageOrchestrator, TabCompletionHandler};
@@ -500,10 +502,35 @@ async fn main() -> Result<()> {
     // Load environment variables from .env file (if present)
     dotenvy::dotenv().ok();
 
+    // Load secrets from .env.secrets file (if present)
+    dotenvy::from_filename(".env.secrets").ok();
+
     // Initialize logging system
     logging::init()?;
 
     log::info!("Infraware Terminal starting...");
+
+    // Authenticate with backend (if configured)
+    let auth_config = AuthConfig::from_env();
+
+    if let (Some(backend_url), Some(api_key)) = (&auth_config.backend_url, &auth_config.api_key) {
+        log::info!("Backend URL configured: {}", backend_url);
+
+        let authenticator = HttpAuthenticator::new(backend_url.clone());
+        match authenticator.authenticate(api_key).await {
+            Ok(_) => log::info!("Backend authentication completed successfully"),
+            Err(e) => {
+                log::error!("Authentication failed: {}", e);
+                log::error!("Please check your API key in .env.secrets");
+                return Err(e);
+            }
+        }
+    } else {
+        if auth_config.backend_url.is_some() {
+            log::warn!("ANTHROPIC_API_KEY not found in .env.secrets");
+        }
+        log::warn!("Backend not fully configured - LLM features will use mock responses");
+    }
 
     // Configure LLM client based on environment variable
     let llm_client: Arc<dyn LLMClientTrait> = if let Ok(url) = std::env::var("INFRAWARE_LLM_URL") {

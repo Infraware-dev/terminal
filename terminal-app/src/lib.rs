@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod executor;
 pub mod input;
 pub mod llm;
