@@ -50,6 +50,8 @@ pub struct InfrawareTerminal {
     tab_completion_handler: TabCompletionHandler,
     /// Shared history for history expansion (synchronized with state.history)
     history_arc: Arc<std::sync::RwLock<Vec<String>>>,
+    /// Optional authenticator for backend auth status checks
+    authenticator: Option<Arc<dyn Authenticator>>,
 }
 
 impl std::fmt::Debug for InfrawareTerminal {
@@ -63,6 +65,7 @@ impl std::fmt::Debug for InfrawareTerminal {
             .field("nl_orchestrator", &self.nl_orchestrator)
             .field("tab_completion_handler", &self.tab_completion_handler)
             .field("history_arc", &"<Arc<RwLock<Vec<String>>>>")
+            .field("authenticator", &self.authenticator.is_some())
             .finish()
     }
 }
@@ -94,6 +97,7 @@ pub struct InfrawareTerminalBuilder {
     renderer: Option<ResponseRenderer>,
     command_orchestrator: Option<CommandOrchestrator>,
     tab_completion_handler: Option<TabCompletionHandler>,
+    authenticator: Option<Arc<dyn Authenticator>>,
 }
 
 impl std::fmt::Debug for InfrawareTerminalBuilder {
@@ -110,6 +114,7 @@ impl std::fmt::Debug for InfrawareTerminalBuilder {
                 "tab_completion_handler",
                 &self.tab_completion_handler.is_some(),
             )
+            .field("authenticator", &self.authenticator.is_some())
             .finish()
     }
 }
@@ -126,6 +131,7 @@ impl InfrawareTerminalBuilder {
             renderer: None,
             command_orchestrator: None,
             tab_completion_handler: None,
+            authenticator: None,
         }
     }
 
@@ -162,6 +168,12 @@ impl InfrawareTerminalBuilder {
     /// Set a custom ResponseRenderer
     pub fn with_renderer(mut self, renderer: ResponseRenderer) -> Self {
         self.renderer = Some(renderer);
+        self
+    }
+
+    /// Set an authenticator for backend auth status checks
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn Authenticator>) -> Self {
+        self.authenticator = Some(authenticator);
         self
     }
 
@@ -212,6 +224,7 @@ impl InfrawareTerminalBuilder {
             nl_orchestrator: NaturalLanguageOrchestrator::new(llm_client, renderer),
             tab_completion_handler: self.tab_completion_handler.unwrap_or_default(),
             history_arc: history_vec,
+            authenticator: self.authenticator,
         })
     }
 }
@@ -428,9 +441,52 @@ impl InfrawareTerminal {
     ) -> Result<()> {
         self.state.mode = TerminalMode::ExecutingCommand;
 
+        // Handle auth-status builtin command
+        if cmd == "auth-status" {
+            return self.handle_auth_status_command().await;
+        }
+
         self.command_orchestrator
             .handle_command(cmd, args, original_input, &mut self.state, &mut self.ui)
             .await
+    }
+
+    /// Handle the built-in "auth-status" command
+    ///
+    /// Checks backend authentication status via GET /api/get-auth
+    async fn handle_auth_status_command(&mut self) -> Result<()> {
+        match &self.authenticator {
+            Some(auth) => {
+                self.state
+                    .add_output(MessageFormatter::info("Checking authentication status..."));
+
+                match auth.check_status().await {
+                    Ok(authenticated) => {
+                        if authenticated {
+                            self.state.add_output(MessageFormatter::success(
+                                "Backend authentication: Active",
+                            ));
+                        } else {
+                            self.state.add_output(MessageFormatter::error(
+                                "Backend authentication: Not authenticated",
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        self.state.add_output(MessageFormatter::error(format!(
+                            "Failed to check auth status: {e}"
+                        )));
+                    }
+                }
+            }
+            None => {
+                self.state.add_output(MessageFormatter::error(
+                    "No authenticator configured. Backend authentication not available.",
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// Handle command typo
@@ -512,13 +568,17 @@ async fn main() -> Result<()> {
 
     // Authenticate with backend (if configured)
     let auth_config = AuthConfig::from_env();
-
-    if let (Some(backend_url), Some(api_key)) = (&auth_config.backend_url, &auth_config.api_key) {
+    let authenticator: Option<Arc<dyn Authenticator>> = if let (Some(backend_url), Some(api_key)) =
+        (&auth_config.backend_url, &auth_config.api_key)
+    {
         log::info!("Backend URL configured: {}", backend_url);
 
-        let authenticator = HttpAuthenticator::new(backend_url.clone());
-        match authenticator.authenticate(api_key).await {
-            Ok(_) => log::info!("Backend authentication completed successfully"),
+        let auth = Arc::new(HttpAuthenticator::new(backend_url.clone()));
+        match auth.authenticate(api_key).await {
+            Ok(_) => {
+                log::info!("Backend authentication completed successfully");
+                Some(auth)
+            }
             Err(e) => {
                 log::error!("Authentication failed: {}", e);
                 log::error!("Please check your API key in .env.secrets");
@@ -530,7 +590,8 @@ async fn main() -> Result<()> {
             log::warn!("ANTHROPIC_API_KEY not found in .env.secrets");
         }
         log::warn!("Backend not fully configured - LLM features will use mock responses");
-    }
+        None
+    };
 
     // Configure LLM client based on environment variable
     let llm_client: Arc<dyn LLMClientTrait> = if let Ok(url) = std::env::var("INFRAWARE_LLM_URL") {
@@ -543,9 +604,14 @@ async fn main() -> Result<()> {
 
     // Create terminal using builder pattern
     log::debug!("Building terminal UI...");
-    let mut terminal = InfrawareTerminal::builder()
-        .with_llm_client(llm_client)
-        .build()?;
+    let mut builder = InfrawareTerminal::builder().with_llm_client(llm_client);
+
+    // Add authenticator if available (for auth-status command)
+    if let Some(auth) = authenticator {
+        builder = builder.with_authenticator(auth);
+    }
+
+    let mut terminal = builder.build()?;
 
     // Show animated splash screen
     log::debug!("Showing splash screen");
