@@ -155,7 +155,10 @@ async fn test_execute_command_with_redirect() {
 async fn test_execute_multiline_output() {
     let result = CommandExecutor::execute(
         "sh",
-        &["-c".to_string(), "echo line1; echo line2; echo line3".to_string()],
+        &[
+            "-c".to_string(),
+            "echo line1; echo line2; echo line3".to_string(),
+        ],
         None,
     )
     .await

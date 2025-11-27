@@ -471,10 +471,7 @@ fn test_path_discovery_handler_skips_path_commands() {
         InputType::Command { command, .. } => {
             assert!(command.contains('/'));
         }
-        other => panic!(
-            "Expected Command for '/usr/bin/python3', got: {:?}",
-            other
-        ),
+        other => panic!("Expected Command for '/usr/bin/python3', got: {:?}", other),
     }
 }
 
@@ -575,9 +572,9 @@ fn test_11_handler_chain_order() {
     }
 
     // 8. CommandSyntaxHandler - recognizes flag patterns
-    match classifier.classify("unknowncmd --flag").unwrap() {
-        InputType::Command { command, .. } => assert_eq!(command, "unknowncmd"),
-        _ => {} // May be caught by typo handler
+    if let InputType::Command { command, .. } = classifier.classify("unknowncmd --flag").unwrap() {
+        assert_eq!(command, "unknowncmd");
+        // May also be caught by typo handler depending on PATH
     }
 
     // 9. TypoDetectionHandler
@@ -827,7 +824,10 @@ fn test_input_type_equality() {
     assert_ne!(cmd1, cmd3);
 
     assert_eq!(InputType::Empty, InputType::Empty);
-    assert_ne!(InputType::Empty, InputType::NaturalLanguage("test".to_string()));
+    assert_ne!(
+        InputType::Empty,
+        InputType::NaturalLanguage("test".to_string())
+    );
 }
 
 // =============================================================================
@@ -838,10 +838,7 @@ fn test_input_type_equality() {
 fn test_classify_whitespace_only() {
     let classifier = InputClassifier::new();
 
-    assert!(matches!(
-        classifier.classify("").unwrap(),
-        InputType::Empty
-    ));
+    assert!(matches!(classifier.classify("").unwrap(), InputType::Empty));
     assert!(matches!(
         classifier.classify("   ").unwrap(),
         InputType::Empty
