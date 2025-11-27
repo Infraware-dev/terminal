@@ -65,6 +65,81 @@ struct StreamCommand {
     resume: String,
 }
 
+/// Result of an LLM query - complete, command approval, or question
+#[derive(Debug, Clone)]
+pub enum LLMQueryResult {
+    /// Query completed with a final response
+    Complete(String),
+    /// Query interrupted - LLM wants to execute a command and needs approval (y/n)
+    CommandApproval {
+        /// The command the LLM wants to execute
+        command: String,
+        /// Description/reason from the LLM
+        message: String,
+    },
+    /// Query interrupted - LLM is asking a question (free-form text answer)
+    Question {
+        /// The question being asked
+        question: String,
+        /// Optional predefined choices
+        options: Option<Vec<String>>,
+    },
+}
+
+impl LLMQueryResult {
+    /// Returns the response text if Complete, or None otherwise
+    #[cfg(test)]
+    pub fn as_complete(&self) -> Option<&str> {
+        match self {
+            LLMQueryResult::Complete(s) => Some(s),
+            LLMQueryResult::CommandApproval { .. } | LLMQueryResult::Question { .. } => None,
+        }
+    }
+
+    /// Unwraps a Complete result, panics if not Complete
+    #[cfg(test)]
+    pub fn unwrap_complete(self) -> String {
+        match self {
+            LLMQueryResult::Complete(s) => s,
+            LLMQueryResult::CommandApproval { command, .. } => {
+                panic!(
+                    "Expected Complete, got CommandApproval for command: {}",
+                    command
+                )
+            }
+            LLMQueryResult::Question { question, .. } => {
+                panic!("Expected Complete, got Question: {}", question)
+            }
+        }
+    }
+}
+
+/// Internal result from SSE stream parsing
+#[derive(Debug)]
+enum StreamResult {
+    /// Stream completed with response text
+    Complete(String),
+    /// Stream interrupted with command approval request (y/n)
+    CommandApproval { command: String, message: String },
+    /// Stream interrupted with question (free-form text answer)
+    Question {
+        question: String,
+        options: Option<Vec<String>>,
+    },
+}
+
+/// Internal interrupt data parsed from SSE events
+#[derive(Debug)]
+enum InterruptData {
+    /// Command approval interrupt (y/n response)
+    CommandApproval { command: String, message: String },
+    /// Question interrupt (free-form text response)
+    Question {
+        question: String,
+        options: Option<Vec<String>>,
+    },
+}
+
 /// Trait for LLM client implementations
 ///
 /// This trait allows different LLM backends (mock, HTTP, OpenAI, etc.)
@@ -72,17 +147,32 @@ struct StreamCommand {
 #[async_trait]
 pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     /// Query the LLM with natural language input
-    async fn query(&self, text: &str) -> Result<String>;
+    /// Returns LLMQueryResult which can be Complete or Interrupted (for HITL)
+    async fn query(&self, text: &str) -> Result<LLMQueryResult>;
 
     /// Query with additional context
-    async fn query_with_context(&self, text: &str, _context: Option<String>) -> Result<String> {
+    async fn query_with_context(
+        &self,
+        text: &str,
+        _context: Option<String>,
+    ) -> Result<LLMQueryResult> {
         // Default implementation ignores context
         self.query(text).await
     }
 
+    /// Resume an interrupted run after user approval (for command approval)
+    async fn resume_run(&self) -> Result<LLMQueryResult>;
+
+    /// Resume an interrupted run with a text answer (for questions)
+    async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult>;
+
     /// Query with command history context (M2/M3)
     #[allow(dead_code)] // Context-aware LLM API for M2/M3
-    async fn query_with_history(&self, text: &str, command_history: &[String]) -> Result<String> {
+    async fn query_with_history(
+        &self,
+        text: &str,
+        command_history: &[String],
+    ) -> Result<LLMQueryResult> {
         let context = if command_history.is_empty() {
             None
         } else {
@@ -120,7 +210,10 @@ impl HttpLLMClient {
         Self {
             base_url,
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120)) // SSE streams need longer timeout
+                .connect_timeout(std::time::Duration::from_secs(10)) // Connection timeout
+                .timeout(std::time::Duration::from_secs(60)) // Overall request timeout (reduced from 120s)
+                .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))) // Force IPv4
+                .pool_max_idle_per_host(0) // Disable connection pooling for SSE
                 .build()
                 .unwrap_or_default(),
             api_key,
@@ -190,14 +283,23 @@ impl HttpLLMClient {
     /// * `thread_id` - The thread ID to run on
     /// * `input` - Optional user input text (None for resume)
     /// * `resume` - Whether this is resuming an interrupted run
+    ///
+    /// # Returns
+    /// `StreamResult::Complete` with response text, or
+    /// `StreamResult::Interrupted` with command approval details
     async fn stream_run(
         &self,
         thread_id: &str,
         input: Option<&str>,
         resume: bool,
-    ) -> Result<String> {
+    ) -> Result<StreamResult> {
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::debug!("Starting stream run at {}", url);
+        log::info!("Starting stream run at {}", url);
+        log::info!(
+            "Stream request: input={:?}, resume={}",
+            input.map(|s| s.chars().take(50).collect::<String>()),
+            resume
+        );
 
         let mut request = StreamRunRequest {
             assistant_id: "supervisor".to_string(),
@@ -221,6 +323,9 @@ impl HttpLLMClient {
             });
         }
 
+        log::info!("Sending POST request to {} ...", url);
+        let send_start = std::time::Instant::now();
+
         let response = self
             .client
             .post(&url)
@@ -229,6 +334,12 @@ impl HttpLLMClient {
             .send()
             .await?;
 
+        log::info!(
+            "POST response received in {:?}: status={}",
+            send_start.elapsed(),
+            response.status()
+        );
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
@@ -236,38 +347,74 @@ impl HttpLLMClient {
             anyhow::bail!("Stream run failed ({}): {}", status, error_text);
         }
 
+        log::info!("Starting SSE stream parsing...");
         self.parse_sse_stream(response).await
     }
 
     /// Parse SSE stream and accumulate AI messages
-    async fn parse_sse_stream(&self, response: reqwest::Response) -> Result<String> {
+    /// Returns StreamResult::Complete, CommandApproval, or Question
+    async fn parse_sse_stream(&self, response: reqwest::Response) -> Result<StreamResult> {
         let mut result = String::new();
+        let mut interrupt_data: Option<InterruptData> = None;
         let mut stream = response.bytes_stream();
         let mut current_event: Option<String> = None;
         let mut buffer = String::new();
+        let mut chunk_count: u32 = 0;
+        let start_time = std::time::Instant::now();
+
+        log::info!("SSE stream started, waiting for chunks...");
 
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
+            match chunk_result {
+                Ok(chunk) => {
+                    chunk_count += 1;
+                    let text = String::from_utf8_lossy(&chunk);
+                    log::info!(
+                        "SSE chunk #{} received ({} bytes) after {:?}",
+                        chunk_count,
+                        chunk.len(),
+                        start_time.elapsed()
+                    );
+                    buffer.push_str(&text);
 
-            // Process complete lines from buffer
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim_end().to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
+                    // Process complete lines from buffer
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].trim_end().to_string();
+                        buffer = buffer[newline_pos + 1..].to_string();
 
-                if line.is_empty() {
-                    continue;
-                }
+                        if line.is_empty() {
+                            continue;
+                        }
 
-                // Parse SSE line
-                if let Some(event_type) = line.strip_prefix("event: ") {
-                    current_event = Some(event_type.trim().to_string());
-                    log::trace!("SSE event type: {}", event_type);
-                } else if let Some(data) = line.strip_prefix("data: ") {
-                    if let Some(ref event) = current_event {
-                        self.handle_sse_event(event, data, &mut result)?;
+                        // Parse SSE line
+                        if let Some(event_type) = line.strip_prefix("event: ") {
+                            current_event = Some(event_type.trim().to_string());
+                            log::trace!("SSE event type: {}", event_type);
+                        } else if let Some(data) = line.strip_prefix("data: ") {
+                            if let Some(ref event) = current_event {
+                                match self.handle_sse_event_v2(event, data, &mut result) {
+                                    Ok(Some(interrupt)) => {
+                                        interrupt_data = Some(interrupt);
+                                        // Don't break - continue processing to get any remaining messages
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        log::error!("Error handling SSE event '{}': {}", event, e);
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                        }
                     }
+                }
+                Err(e) => {
+                    log::error!(
+                        "SSE stream error after {} chunks ({:?}): {}",
+                        chunk_count,
+                        start_time.elapsed(),
+                        e
+                    );
+                    return Err(e.into());
                 }
             }
         }
@@ -280,16 +427,36 @@ impl HttpLLMClient {
             }
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Some(ref event) = current_event {
-                    self.handle_sse_event(event, data, &mut result)?;
+                    if let Some(interrupt) = self.handle_sse_event_v2(event, data, &mut result)? {
+                        interrupt_data = Some(interrupt);
+                    }
                 }
             }
         }
 
-        log::debug!("Stream completed, result length: {} chars", result.len());
-        Ok(result)
+        log::debug!(
+            "SSE stream completed: {} chunks, {} chars, {:?} elapsed",
+            chunk_count,
+            result.len(),
+            start_time.elapsed()
+        );
+
+        // Return interrupt if detected, otherwise complete
+        match interrupt_data {
+            Some(InterruptData::CommandApproval { command, message }) => {
+                log::info!("Stream interrupted for command approval: {}", command);
+                Ok(StreamResult::CommandApproval { command, message })
+            }
+            Some(InterruptData::Question { question, options }) => {
+                log::info!("Stream interrupted with question: {}", question);
+                Ok(StreamResult::Question { question, options })
+            }
+            None => Ok(StreamResult::Complete(result)),
+        }
     }
 
-    /// Handle a single SSE event
+    /// Handle a single SSE event (legacy - used by tests)
+    #[cfg(test)]
     fn handle_sse_event(&self, event: &str, data: &str, result: &mut String) -> Result<()> {
         match event {
             "metadata" => {
@@ -442,16 +609,215 @@ impl HttpLLMClient {
         }
         Ok(())
     }
+
+    /// Handle a single SSE event (v2 - returns interrupt data instead of marker)
+    /// Returns Some(InterruptData) if an interrupt is detected, None otherwise
+    fn handle_sse_event_v2(
+        &self,
+        event: &str,
+        data: &str,
+        result: &mut String,
+    ) -> Result<Option<InterruptData>> {
+        match event {
+            "metadata" => {
+                // Log run_id for debugging
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str()) {
+                        log::info!("Run started: {}", run_id);
+                    }
+                }
+            }
+            "messages" => {
+                // Extract AI message content
+                if let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(msgs) = messages.as_array() {
+                        for msg in msgs {
+                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
+                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
+                            if is_ai {
+                                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                                    if !result.is_empty() {
+                                        result.push('\n');
+                                    }
+                                    result.push_str(content);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "updates" => {
+                // Check for interrupt (human-in-the-loop)
+                if let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(interrupts) =
+                        updates.get("__interrupt__").and_then(|v| v.as_array())
+                    {
+                        for interrupt in interrupts {
+                            if let Some(value) = interrupt.get("value") {
+                                let interrupt_type =
+                                    value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                                match interrupt_type {
+                                    "command_approval" => {
+                                        let command = value
+                                            .get("command")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown")
+                                            .to_string();
+                                        let message = value
+                                            .get("message")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Command requires approval")
+                                            .to_string();
+                                        log::info!(
+                                            "Command approval requested for: {} - awaiting user decision",
+                                            command
+                                        );
+                                        return Ok(Some(InterruptData::CommandApproval {
+                                            command,
+                                            message,
+                                        }));
+                                    }
+                                    // Treat "question" or any other type as a question
+                                    _ => {
+                                        let question = value
+                                            .get("question")
+                                            .or_else(|| value.get("message"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Agent is asking for input")
+                                            .to_string();
+                                        let options = value
+                                            .get("options")
+                                            .and_then(|v| v.as_array())
+                                            .map(|arr| {
+                                                arr.iter()
+                                                    .filter_map(|v| v.as_str().map(String::from))
+                                                    .collect()
+                                            });
+                                        log::info!(
+                                            "Question received: {} - awaiting user answer",
+                                            question
+                                        );
+                                        return Ok(Some(InterruptData::Question {
+                                            question,
+                                            options,
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "values" => {
+                // State updates contain the full message history including AI responses
+                if let Ok(values) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) {
+                        // Get the last AI message with actual content from the values
+                        // Skip messages with empty content or just handoff messages
+                        for msg in msgs.iter().rev() {
+                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
+                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
+
+                            // Skip handoff messages (they just transfer control)
+                            let is_handoff = msg
+                                .get("response_metadata")
+                                .and_then(|m| m.get("__is_handoff_back"))
+                                .is_some();
+
+                            if is_ai && !is_handoff {
+                                // Handle content as string or array of content blocks
+                                let content_text = if let Some(content) =
+                                    msg.get("content").and_then(|v| v.as_str())
+                                {
+                                    // Content is a simple string
+                                    if !content.is_empty() {
+                                        Some(content.to_string())
+                                    } else {
+                                        None
+                                    }
+                                } else if let Some(content_array) =
+                                    msg.get("content").and_then(|v| v.as_array())
+                                {
+                                    // Content is an array of blocks (text, tool_use, etc.)
+                                    // Skip if array is empty
+                                    if content_array.is_empty() {
+                                        None
+                                    } else {
+                                        let text_parts: Vec<String> = content_array
+                                            .iter()
+                                            .filter_map(|block| {
+                                                if block.get("type").and_then(|v| v.as_str())
+                                                    == Some("text")
+                                                {
+                                                    block
+                                                        .get("text")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        if !text_parts.is_empty() {
+                                            Some(text_parts.join("\n"))
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                if let Some(content) = content_text {
+                                    // Only update if we have new meaningful content
+                                    if !content.is_empty()
+                                        && !content.starts_with("Transferring")
+                                        && !content.starts_with("Successfully transferred")
+                                    {
+                                        result.clear(); // Replace with latest AI message
+                                        result.push_str(&content);
+                                        break; // Found a good message, stop searching
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "error" => {
+                if let Ok(error) = serde_json::from_str::<serde_json::Value>(data) {
+                    let msg = error
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown error");
+                    log::error!("Stream error: {}", msg);
+                    anyhow::bail!("Stream error: {}", msg);
+                }
+            }
+            "end" => {
+                log::debug!("Stream ended");
+            }
+            _ => {
+                log::trace!("Unknown SSE event type: {}", event);
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[async_trait]
 impl LLMClientTrait for HttpLLMClient {
-    async fn query(&self, text: &str) -> Result<String> {
+    async fn query(&self, text: &str) -> Result<LLMQueryResult> {
         self.query_with_context(text, None).await
     }
 
-    async fn query_with_context(&self, text: &str, context: Option<String>) -> Result<String> {
-        log::debug!("LLM query: {} (context: {:?})", text, context.is_some());
+    async fn query_with_context(
+        &self,
+        text: &str,
+        context: Option<String>,
+    ) -> Result<LLMQueryResult> {
+        log::info!("LLM query: {} (context: {:?})", text, context.is_some());
 
         // Use streaming endpoint via threads
         let thread_id = self.ensure_thread().await?;
@@ -462,35 +828,90 @@ impl LLMClientTrait for HttpLLMClient {
             None => text.to_string(),
         };
 
-        let mut result = self
+        let stream_result = self
             .stream_run(&thread_id, Some(&full_query), false)
             .await?;
 
-        // Auto-resume if interrupted (command approval required)
-        // Loop to handle multiple interrupts (e.g., multiple commands)
-        const MAX_RESUMES: usize = 10; // Safety limit
-        let mut resume_count = 0;
+        // Convert internal StreamResult to public LLMQueryResult
+        Self::convert_stream_result(stream_result)
+    }
 
-        while result.contains("__INTERRUPT_RESUME__") && resume_count < MAX_RESUMES {
-            resume_count += 1;
-            log::info!("Auto-resuming run (attempt {})", resume_count);
+    async fn resume_run(&self) -> Result<LLMQueryResult> {
+        log::debug!("Resuming LLM run after user approval");
 
-            // Remove the interrupt marker
-            result = result.replace("__INTERRUPT_RESUME__", "");
+        let thread_id = self
+            .thread_id
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
 
-            // Resume with approval
-            let resume_result = self.stream_run(&thread_id, None, true).await?;
+        let stream_result = self.stream_run(&thread_id, None, true).await?;
 
-            // Replace result if we got something back
-            if !resume_result.is_empty() {
-                result = resume_result;
-            }
+        // Convert internal StreamResult to public LLMQueryResult
+        Self::convert_stream_result(stream_result)
+    }
+
+    async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult> {
+        log::debug!("Resuming LLM run with user answer: {}", answer);
+
+        let thread_id = self
+            .thread_id
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
+
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        log::debug!("Resuming stream run with answer at {}", url);
+
+        // Send user's answer as a new message along with resume command
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: Some(StreamInput {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: answer.into(),
+                }],
+            }),
+            command: Some(StreamCommand {
+                resume: "approved".into(),
+            }),
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Api-Key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!("Resume with answer failed ({}): {}", status, error_text);
+            anyhow::bail!("Resume with answer failed ({}): {}", status, error_text);
         }
 
-        // Clean up any remaining markers
-        result = result.replace("__INTERRUPT_RESUME__", "");
+        let stream_result = self.parse_sse_stream(response).await?;
+        Self::convert_stream_result(stream_result)
+    }
+}
 
-        Ok(result)
+impl HttpLLMClient {
+    /// Convert internal StreamResult to public LLMQueryResult
+    fn convert_stream_result(stream_result: StreamResult) -> Result<LLMQueryResult> {
+        match stream_result {
+            StreamResult::Complete(response) => Ok(LLMQueryResult::Complete(response)),
+            StreamResult::CommandApproval { command, message } => {
+                Ok(LLMQueryResult::CommandApproval { command, message })
+            }
+            StreamResult::Question { question, options } => {
+                Ok(LLMQueryResult::Question { question, options })
+            }
+        }
     }
 }
 
@@ -506,7 +927,7 @@ impl MockLLMClient {
 
 #[async_trait]
 impl LLMClientTrait for MockLLMClient {
-    async fn query(&self, text: &str) -> Result<String> {
+    async fn query(&self, text: &str) -> Result<LLMQueryResult> {
         // Simple mock responses for testing
         let response = match text.to_lowercase().as_str() {
             s if s.contains("list files") => {
@@ -537,7 +958,22 @@ impl LLMClientTrait for MockLLMClient {
             }
         };
 
-        Ok(response.to_string())
+        Ok(LLMQueryResult::Complete(response.to_string()))
+    }
+
+    async fn resume_run(&self) -> Result<LLMQueryResult> {
+        // Mock always returns complete (no real interrupt handling)
+        Ok(LLMQueryResult::Complete(
+            "Mock resume completed.".to_string(),
+        ))
+    }
+
+    async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult> {
+        // Mock acknowledges the answer and returns complete
+        Ok(LLMQueryResult::Complete(format!(
+            "Mock received answer: '{}' - Processing complete.",
+            answer
+        )))
     }
 }
 
@@ -608,21 +1044,33 @@ mod tests {
     #[tokio::test]
     async fn test_mock_llm() {
         let mock = MockLLMClient;
-        let response = mock.query("how to list files").await.unwrap();
+        let response = mock
+            .query("how to list files")
+            .await
+            .unwrap()
+            .unwrap_complete();
         assert!(response.contains("ls"));
     }
 
     #[tokio::test]
     async fn test_mock_llm_docker() {
         let mock = MockLLMClient;
-        let response = mock.query("what is docker").await.unwrap();
+        let response = mock
+            .query("what is docker")
+            .await
+            .unwrap()
+            .unwrap_complete();
         assert!(response.contains("Docker"));
     }
 
     #[tokio::test]
     async fn test_mock_llm_kubernetes() {
         let mock = MockLLMClient;
-        let response = mock.query("what is kubernetes").await.unwrap();
+        let response = mock
+            .query("what is kubernetes")
+            .await
+            .unwrap()
+            .unwrap_complete();
         assert!(response.contains("Kubernetes"));
         assert!(response.contains("kubectl"));
     }
@@ -630,21 +1078,29 @@ mod tests {
     #[tokio::test]
     async fn test_mock_llm_k8s() {
         let mock = MockLLMClient;
-        let response = mock.query("help with k8s").await.unwrap();
+        let response = mock.query("help with k8s").await.unwrap().unwrap_complete();
         assert!(response.contains("Kubernetes"));
     }
 
     #[tokio::test]
     async fn test_mock_llm_fallback() {
         let mock = MockLLMClient;
-        let response = mock.query("something random").await.unwrap();
+        let response = mock
+            .query("something random")
+            .await
+            .unwrap()
+            .unwrap_complete();
         assert!(response.contains("mock LLM"));
     }
 
     #[tokio::test]
     async fn test_mock_llm_case_insensitive() {
         let mock = MockLLMClient;
-        let response = mock.query("DOCKER containers").await.unwrap();
+        let response = mock
+            .query("DOCKER containers")
+            .await
+            .unwrap()
+            .unwrap_complete();
         assert!(response.contains("Docker"));
     }
 
@@ -772,7 +1228,10 @@ mod tests {
 
         let outcome = client.handle_sse_event("error", data, &mut result);
         assert!(outcome.is_err());
-        assert!(outcome.unwrap_err().to_string().contains("Something went wrong"));
+        assert!(outcome
+            .unwrap_err()
+            .to_string()
+            .contains("Something went wrong"));
     }
 
     #[test]
@@ -827,7 +1286,8 @@ mod tests {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
-        let data = r#"[{"type":"human","content":"User message"},{"type":"ai","content":"AI response"}]"#;
+        let data =
+            r#"[{"type":"human","content":"User message"},{"type":"ai","content":"AI response"}]"#;
 
         let outcome = client.handle_sse_event("messages", data, &mut result);
         assert!(outcome.is_ok());
@@ -898,8 +1358,10 @@ mod tests {
 
     #[test]
     fn test_http_client_debug_redacts_api_key() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "secret-key".to_string());
+        let client = HttpLLMClient::new(
+            "http://localhost:8080".to_string(),
+            "secret-key".to_string(),
+        );
         let debug_str = format!("{:?}", client);
         assert!(debug_str.contains("<redacted>"));
         assert!(!debug_str.contains("secret-key"));
@@ -908,7 +1370,11 @@ mod tests {
     #[tokio::test]
     async fn test_query_with_history_empty() {
         let mock = MockLLMClient;
-        let response = mock.query_with_history("list files", &[]).await.unwrap();
+        let response = mock
+            .query_with_history("list files", &[])
+            .await
+            .unwrap()
+            .unwrap_complete();
         assert!(response.contains("ls"));
     }
 
@@ -916,7 +1382,11 @@ mod tests {
     async fn test_query_with_history_has_commands() {
         let mock = MockLLMClient;
         let history = vec!["cd /home".to_string(), "ls -la".to_string()];
-        let response = mock.query_with_history("list files", &history).await.unwrap();
+        let response = mock
+            .query_with_history("list files", &history)
+            .await
+            .unwrap()
+            .unwrap_complete();
         assert!(response.contains("ls"));
     }
 }

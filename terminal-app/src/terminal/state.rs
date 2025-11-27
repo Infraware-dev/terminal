@@ -5,10 +5,31 @@ use super::buffers::{CommandHistory, InputBuffer, OutputBuffer};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // PromptingInstall variant reserved for M2/M3 auto-install feature
 pub enum TerminalMode {
-    Normal,           // Waiting for input
-    ExecutingCommand, // Running shell command
-    WaitingLLM,       // Querying LLM
-    PromptingInstall, // Asking to install missing command (M2/M3)
+    Normal,                  // Waiting for input
+    ExecutingCommand,        // Running shell command
+    WaitingLLM,              // Querying LLM
+    PromptingInstall,        // Asking to install missing command (M2/M3)
+    AwaitingCommandApproval, // Human-in-the-loop: waiting for user to approve LLM command (y/n)
+    AwaitingAnswer, // Human-in-the-loop: waiting for user to answer LLM question (free text)
+}
+
+/// Pending interaction with the LLM for human-in-the-loop flow
+#[derive(Debug, Clone)]
+pub enum PendingInteraction {
+    /// Command waiting for approval (y/n response)
+    CommandApproval {
+        /// The command that the LLM wants to execute
+        command: String,
+        /// Description/reason from the LLM
+        message: String,
+    },
+    /// Question waiting for text answer (free-form response)
+    Question {
+        /// The question being asked
+        question: String,
+        /// Optional predefined choices
+        options: Option<Vec<String>>,
+    },
 }
 
 /// Main terminal state structure
@@ -23,6 +44,8 @@ pub struct TerminalState {
     pub history: CommandHistory,
     /// Current terminal mode
     pub mode: TerminalMode,
+    /// Pending interaction for human-in-the-loop (HITL) flow
+    pub pending_interaction: Option<PendingInteraction>,
 }
 
 impl TerminalState {
@@ -33,6 +56,7 @@ impl TerminalState {
             input: InputBuffer::new(),
             history: CommandHistory::new(),
             mode: TerminalMode::Normal,
+            pending_interaction: None,
         }
     }
 

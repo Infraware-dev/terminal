@@ -412,6 +412,32 @@ impl InfrawareTerminal {
     async fn handle_submit(&mut self) -> Result<bool> {
         let input = self.state.submit_input();
 
+        // Handle human-in-the-loop command approval mode (y/n)
+        if self.state.mode == TerminalMode::AwaitingCommandApproval {
+            let trimmed = input.trim().to_lowercase();
+            let approved = trimmed == "y" || trimmed == "yes";
+            self.state.add_output(MessageFormatter::command(&input));
+
+            // Delegate to orchestrator for approval handling
+            self.nl_orchestrator
+                .handle_approval(approved, &mut self.state, &mut self.ui)
+                .await?;
+
+            return Ok(true);
+        }
+
+        // Handle human-in-the-loop answer mode (free-form text)
+        if self.state.mode == TerminalMode::AwaitingAnswer {
+            self.state.add_output(MessageFormatter::command(&input));
+
+            // Delegate to orchestrator for answer handling
+            self.nl_orchestrator
+                .handle_answer(input, &mut self.state, &mut self.ui)
+                .await?;
+
+            return Ok(true);
+        }
+
         if input.trim().is_empty() {
             return Ok(true);
         }
@@ -425,10 +451,10 @@ impl InfrawareTerminal {
 
         // Sync history with Arc for history expansion
         {
-            let mut history_guard = match self.history_arc.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let mut history_guard = self
+                .history_arc
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             *history_guard = self.state.history.all().to_vec();
         }
 
@@ -574,6 +600,7 @@ impl InfrawareTerminal {
     ///
     /// Delegates to NaturalLanguageOrchestrator (SRP compliance)
     async fn handle_natural_language(&mut self, query: &str) -> Result<()> {
+        log::info!("Natural language query: {}", query);
         self.state.mode = TerminalMode::WaitingLLM;
 
         self.nl_orchestrator
@@ -638,6 +665,25 @@ async fn main() -> Result<()> {
 
     // Initialize logging system
     logging::init()?;
+
+    // Set up panic hook to log panics before they crash the app
+    std::panic::set_hook(Box::new(|panic_info| {
+        let location = panic_info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+
+        let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic payload".to_string()
+        };
+
+        log::error!("PANIC at {}: {}", location, message);
+        eprintln!("\n!!! PANIC at {}: {}", location, message);
+    }));
 
     log::info!("Infraware Terminal starting...");
 

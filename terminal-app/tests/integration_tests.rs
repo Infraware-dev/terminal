@@ -30,6 +30,8 @@ async fn test_end_to_end_command_execution() {
 
 #[tokio::test]
 async fn test_end_to_end_natural_language() {
+    use infraware_terminal::llm::LLMQueryResult;
+
     let classifier = InputClassifier::new();
     let llm = MockLLMClient;
 
@@ -40,7 +42,12 @@ async fn test_end_to_end_natural_language() {
     // Query LLM if it's natural language
     match classified {
         InputType::NaturalLanguage(query) => {
-            let response = llm.query(&query).await.unwrap();
+            let result = llm.query(&query).await.unwrap();
+            let response = match result {
+                LLMQueryResult::Complete(text) => text,
+                LLMQueryResult::CommandApproval { .. } => panic!("Expected Complete"),
+                LLMQueryResult::Question { .. } => panic!("Expected Complete"),
+            };
             assert!(response.contains("ls"));
         }
         _ => panic!("Expected natural language"),
@@ -49,11 +56,20 @@ async fn test_end_to_end_natural_language() {
 
 #[tokio::test]
 async fn test_llm_response_rendering() {
+    use infraware_terminal::llm::LLMQueryResult;
+
     let llm = MockLLMClient;
     let renderer = ResponseRenderer::new();
 
     // Get LLM response
-    let response = llm.query("what is docker").await.unwrap();
+    let result = llm.query("what is docker").await.unwrap();
+
+    // Extract the response text
+    let response = match result {
+        LLMQueryResult::Complete(text) => text,
+        LLMQueryResult::CommandApproval { .. } => panic!("Expected Complete, got CommandApproval"),
+        LLMQueryResult::Question { .. } => panic!("Expected Complete, got Question"),
+    };
 
     // Render the response
     let rendered = renderer.render(&response);
