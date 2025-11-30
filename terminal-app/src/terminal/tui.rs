@@ -187,6 +187,8 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
         TerminalMode::ExecutingCommand => "EXECUTING...",
         TerminalMode::WaitingLLM => "WAITING FOR LLM...",
         TerminalMode::PromptingInstall => "INSTALL PROMPT",
+        TerminalMode::AwaitingCommandApproval => "APPROVE? [y/n]",
+        TerminalMode::AwaitingAnswer => "ANSWER?",
     };
 
     let mode_color = match state.mode {
@@ -194,6 +196,8 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
         TerminalMode::ExecutingCommand => Color::Yellow,
         TerminalMode::WaitingLLM => Color::Blue,
         TerminalMode::PromptingInstall => Color::Magenta,
+        TerminalMode::AwaitingCommandApproval => Color::Cyan,
+        TerminalMode::AwaitingAnswer => Color::Yellow,
     };
 
     let status_text = Line::from(vec![

@@ -4,11 +4,13 @@
 /// - Querying the LLM backend
 /// - Rendering the LLM response
 /// - Displaying formatted results
+/// - Human-in-the-loop interactions (command approval and questions)
 use anyhow::Result;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-use crate::llm::{LLMClientTrait, ResponseRenderer};
-use crate::terminal::{TerminalState, TerminalUI};
+use crate::llm::{LLMClientTrait, LLMQueryResult, ResponseRenderer};
+use crate::terminal::{PendingInteraction, TerminalMode, TerminalState, TerminalUI};
 use crate::utils::MessageFormatter;
 
 /// Orchestrates natural language query workflow
@@ -35,39 +37,221 @@ impl NaturalLanguageOrchestrator {
         }
     }
 
+    /// Update the LLM client (used for deferred initialization)
+    pub fn set_llm_client(&mut self, client: Arc<dyn LLMClientTrait>) {
+        self.llm_client = client;
+    }
+
     /// Handle natural language query with all the necessary logic
     ///
     /// This method encapsulates:
     /// - Showing "waiting" state
     /// - Querying the LLM
     /// - Rendering the response
+    /// - Human-in-the-loop command approval flow
     /// - Error handling
+    /// - Cancellation support (via CancellationToken)
     pub async fn handle_query(
         &self,
         query: &str,
         state: &mut TerminalState,
         ui: &mut TerminalUI,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
+        log::info!("Orchestrator handling query: {}", query);
+
         // Show waiting message
         state.add_output(MessageFormatter::info("Querying AI assistant..."));
 
         // Render to show "waiting" state
         ui.render(state)?;
 
-        // Query the LLM
-        match self.llm_client.query(query).await {
-            Ok(response) => {
-                self.handle_success(response, state);
+        log::info!("Calling LLM client...");
+
+        // Query the LLM with cancellation support using tokio::select!
+        tokio::select! {
+            result = self.llm_client.query_cancellable(query, cancel_token.clone()) => {
+                match result {
+                    Ok(llm_result) => {
+                        log::debug!("LLM query completed successfully");
+                        self.handle_query_result(llm_result, state);
+                    }
+                    Err(e) if e.to_string().contains("cancelled") => {
+                        log::info!("LLM query cancelled by user");
+                        // Remove waiting message
+                        state.output.pop();
+                        state.add_output(MessageFormatter::info("Query cancelled by user"));
+                        state.mode = TerminalMode::Normal;
+                    }
+                    Err(e) => {
+                        log::error!("LLM query failed: {}", e);
+                        self.handle_error(e, state);
+                    }
+                }
             }
-            Err(e) => {
-                self.handle_error(e, state);
+            _ = cancel_token.cancelled() => {
+                log::info!("LLM query cancelled via token");
+                // Remove waiting message
+                state.output.pop();
+                state.add_output(MessageFormatter::info("Query cancelled by user"));
+                state.mode = TerminalMode::Normal;
             }
         }
 
         Ok(())
     }
 
-    /// Handle successful LLM response
+    /// Handle the result of an LLM query (complete, command approval, or question)
+    fn handle_query_result(&self, result: LLMQueryResult, state: &mut TerminalState) {
+        // Remove the "Querying..." message
+        state.output.pop();
+
+        match result {
+            LLMQueryResult::Complete(response) => {
+                // Render the response with formatting
+                let formatted_lines = self.renderer.render(&response);
+                state.add_output_lines(formatted_lines);
+            }
+            LLMQueryResult::CommandApproval { command, message } => {
+                // Human-in-the-loop: show command approval request
+                state.add_output(String::new());
+                state.add_output(MessageFormatter::info("Command approval required:"));
+                state.add_output(format!("  Command: {}", command));
+                if !message.is_empty() {
+                    state.add_output(format!("  Reason: {}", message));
+                }
+                state.add_output(String::new());
+                state.add_output("Type 'y' to approve, 'n' to reject:".to_string());
+
+                // Save pending interaction and change mode
+                state.pending_interaction = Some(PendingInteraction::CommandApproval {
+                    command: command.clone(),
+                    message,
+                });
+                state.mode = TerminalMode::AwaitingCommandApproval;
+
+                log::info!("Awaiting user approval for command: {}", command);
+            }
+            LLMQueryResult::Question { question, options } => {
+                // Human-in-the-loop: show question from agent
+                state.add_output(String::new());
+                state.add_output(MessageFormatter::info("Agent question:"));
+                state.add_output(format!("  {}", question));
+
+                if let Some(ref opts) = options {
+                    state.add_output("  Options:".to_string());
+                    for (i, opt) in opts.iter().enumerate() {
+                        state.add_output(format!("    {}. {}", i + 1, opt));
+                    }
+                }
+                state.add_output(String::new());
+                state.add_output("Type your answer:".to_string());
+
+                // Save pending interaction and change mode
+                state.pending_interaction = Some(PendingInteraction::Question {
+                    question: question.clone(),
+                    options,
+                });
+                state.mode = TerminalMode::AwaitingAnswer;
+
+                log::info!("Awaiting user answer for question: {}", question);
+            }
+        }
+    }
+
+    /// Handle user approval/rejection of a pending command
+    ///
+    /// Called when user submits 'y' or 'n' while in AwaitingCommandApproval mode
+    pub async fn handle_approval(
+        &self,
+        approved: bool,
+        state: &mut TerminalState,
+        ui: &mut TerminalUI,
+    ) -> Result<()> {
+        // Clear pending interaction
+        let pending = state.pending_interaction.take();
+
+        if approved {
+            if let Some(PendingInteraction::CommandApproval { ref command, .. }) = pending {
+                log::info!("User approved command: {}", command);
+            }
+
+            state.add_output(MessageFormatter::info("Approved! Resuming execution..."));
+            ui.render(state)?;
+
+            // Resume the LLM run
+            match self.llm_client.resume_run().await {
+                Ok(result) => {
+                    self.handle_query_result(result, state);
+                }
+                Err(e) => {
+                    state.add_output(MessageFormatter::error(format!("Failed to resume: {e}")));
+                    state.mode = TerminalMode::Normal;
+                }
+            }
+        } else {
+            if let Some(PendingInteraction::CommandApproval { ref command, .. }) = pending {
+                log::info!("User rejected command: {}", command);
+            }
+            state.add_output(MessageFormatter::info("Command rejected by user."));
+            state.mode = TerminalMode::Normal;
+        }
+
+        // If we're not in another waiting state, return to Normal
+        if state.mode != TerminalMode::AwaitingCommandApproval
+            && state.mode != TerminalMode::AwaitingAnswer
+        {
+            state.mode = TerminalMode::Normal;
+        }
+
+        Ok(())
+    }
+
+    /// Handle user's text answer to a question from the agent
+    ///
+    /// Called when user submits text while in AwaitingAnswer mode
+    pub async fn handle_answer(
+        &self,
+        answer: String,
+        state: &mut TerminalState,
+        ui: &mut TerminalUI,
+    ) -> Result<()> {
+        // Clear pending interaction
+        let pending = state.pending_interaction.take();
+
+        if let Some(PendingInteraction::Question { ref question, .. }) = pending {
+            log::info!("User answered question '{}' with: {}", question, answer);
+        }
+
+        state.add_output(MessageFormatter::info(format!("Your answer: {}", answer)));
+        state.add_output(MessageFormatter::info("Sending to agent..."));
+        ui.render(state)?;
+
+        // Resume the LLM run with the user's answer
+        match self.llm_client.resume_with_answer(&answer).await {
+            Ok(result) => {
+                self.handle_query_result(result, state);
+            }
+            Err(e) => {
+                state.add_output(MessageFormatter::error(format!(
+                    "Failed to send answer: {e}"
+                )));
+                state.mode = TerminalMode::Normal;
+            }
+        }
+
+        // If we're not in another waiting state, return to Normal
+        if state.mode != TerminalMode::AwaitingCommandApproval
+            && state.mode != TerminalMode::AwaitingAnswer
+        {
+            state.mode = TerminalMode::Normal;
+        }
+
+        Ok(())
+    }
+
+    /// Handle successful LLM response (legacy helper for tests)
+    #[cfg(test)]
     fn handle_success(&self, response: String, state: &mut TerminalState) {
         // Remove the "Querying..." message
         state.output.pop();

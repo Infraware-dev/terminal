@@ -1,3 +1,4 @@
+mod auth;
 mod executor;
 mod input;
 mod llm;
@@ -16,7 +17,9 @@ mod utils;
 
 use anyhow::Result;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
+use auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use input::{InputClassifier, InputType};
 use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
 use orchestrators::{CommandOrchestrator, NaturalLanguageOrchestrator, TabCompletionHandler};
@@ -48,6 +51,12 @@ pub struct InfrawareTerminal {
     tab_completion_handler: TabCompletionHandler,
     /// Shared history for history expansion (synchronized with state.history)
     history_arc: Arc<std::sync::RwLock<Vec<String>>>,
+    /// Optional authenticator for backend auth status checks
+    authenticator: Option<Arc<dyn Authenticator>>,
+    /// Whether using mock LLM client (for display purposes)
+    using_mock_llm: bool,
+    /// Cancellation token for interrupting long-running operations
+    cancellation_token: CancellationToken,
 }
 
 impl std::fmt::Debug for InfrawareTerminal {
@@ -61,6 +70,15 @@ impl std::fmt::Debug for InfrawareTerminal {
             .field("nl_orchestrator", &self.nl_orchestrator)
             .field("tab_completion_handler", &self.tab_completion_handler)
             .field("history_arc", &"<Arc<RwLock<Vec<String>>>>")
+            .field("authenticator", &self.authenticator.is_some())
+            .field("using_mock_llm", &self.using_mock_llm)
+            .field(
+                "cancellation_token",
+                &format!(
+                    "CancellationToken(cancelled={})",
+                    self.cancellation_token.is_cancelled()
+                ),
+            )
             .finish()
     }
 }
@@ -92,6 +110,8 @@ pub struct InfrawareTerminalBuilder {
     renderer: Option<ResponseRenderer>,
     command_orchestrator: Option<CommandOrchestrator>,
     tab_completion_handler: Option<TabCompletionHandler>,
+    authenticator: Option<Arc<dyn Authenticator>>,
+    using_mock_llm: bool,
 }
 
 impl std::fmt::Debug for InfrawareTerminalBuilder {
@@ -108,6 +128,8 @@ impl std::fmt::Debug for InfrawareTerminalBuilder {
                 "tab_completion_handler",
                 &self.tab_completion_handler.is_some(),
             )
+            .field("authenticator", &self.authenticator.is_some())
+            .field("using_mock_llm", &self.using_mock_llm)
             .finish()
     }
 }
@@ -124,6 +146,8 @@ impl InfrawareTerminalBuilder {
             renderer: None,
             command_orchestrator: None,
             tab_completion_handler: None,
+            authenticator: None,
+            using_mock_llm: true, // Default to mock until explicitly set
         }
     }
 
@@ -160,6 +184,18 @@ impl InfrawareTerminalBuilder {
     /// Set a custom ResponseRenderer
     pub fn with_renderer(mut self, renderer: ResponseRenderer) -> Self {
         self.renderer = Some(renderer);
+        self
+    }
+
+    /// Set an authenticator for backend auth status checks
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn Authenticator>) -> Self {
+        self.authenticator = Some(authenticator);
+        self
+    }
+
+    /// Set whether using mock LLM client (for display purposes)
+    pub const fn with_using_mock_llm(mut self, using_mock: bool) -> Self {
+        self.using_mock_llm = using_mock;
         self
     }
 
@@ -210,6 +246,9 @@ impl InfrawareTerminalBuilder {
             nl_orchestrator: NaturalLanguageOrchestrator::new(llm_client, renderer),
             tab_completion_handler: self.tab_completion_handler.unwrap_or_default(),
             history_arc: history_vec,
+            authenticator: self.authenticator,
+            using_mock_llm: self.using_mock_llm,
+            cancellation_token: CancellationToken::new(),
         })
     }
 }
@@ -226,7 +265,7 @@ impl InfrawareTerminal {
     /// Create a new terminal instance with provided LLM client
     ///
     /// This is a convenience method. For more control, use `builder()`.
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Convenience method for tests, builder pattern is preferred"
     )]
@@ -237,12 +276,27 @@ impl InfrawareTerminal {
     /// Create a new Infraware Terminal instance with mock LLM (for development/testing)
     ///
     /// This is a convenience method. For more control, use `builder()`.
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Convenience method for tests, builder pattern is preferred"
     )]
     fn new() -> Result<Self> {
         Self::builder().build()
+    }
+
+    /// Update the LLM client (used for deferred initialization after splash)
+    fn set_llm_client(&mut self, client: Arc<dyn LLMClientTrait>) {
+        self.nl_orchestrator.set_llm_client(client);
+    }
+
+    /// Set the authenticator (used for deferred initialization after splash)
+    fn set_authenticator(&mut self, auth: Option<Arc<dyn Authenticator>>) {
+        self.authenticator = auth;
+    }
+
+    /// Set whether using mock LLM (used for deferred initialization after splash)
+    fn set_using_mock_llm(&mut self, using_mock: bool) {
+        self.using_mock_llm = using_mock;
     }
 
     /// Run the main event loop
@@ -283,23 +337,101 @@ impl InfrawareTerminal {
         );
         self.state
             .add_output(MessageFormatter::banner_hint("Press Ctrl+C to quit"));
+
+        // Show LLM client status
+        if self.using_mock_llm {
+            self.state.add_output(MessageFormatter::info(
+                "LLM: Mock mode (backend not available)",
+            ));
+        } else {
+            self.state
+                .add_output(MessageFormatter::success("LLM: Connected to backend"));
+        }
         self.state.add_output(String::new());
 
         // Initial render
         self.ui.render(&self.state)?;
 
-        // Main event loop
-        loop {
-            // Poll for events with a short timeout
-            if let Some(event) = self.event_handler.poll_event(Duration::from_millis(100))? {
-                if !self.handle_event(event).await? {
-                    break; // Quit requested
+        // Create channel for events from background polling task
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(32);
+        let cancel_token_for_poller = self.cancellation_token.clone();
+
+        // Spawn background task for event polling
+        // This task runs independently and can detect Ctrl+C even during LLM queries
+        let poll_handle = tokio::task::spawn_blocking(move || {
+            let event_handler = EventHandler::new();
+            loop {
+                // Check if we should stop
+                if cancel_token_for_poller.is_cancelled() {
+                    log::info!("Event poller: cancellation detected, stopping");
+                    break;
                 }
 
-                // Re-render after handling event
-                self.ui.render(&self.state)?;
+                // Poll with short timeout
+                match event_handler.poll_event(Duration::from_millis(50)) {
+                    Ok(Some(event)) => {
+                        // For Quit events, we need to signal cancellation immediately
+                        if matches!(event, TerminalEvent::Quit) {
+                            log::info!("Event poller: Quit detected, cancelling token");
+                            cancel_token_for_poller.cancel();
+                        }
+                        // Send event to main loop (ignore error if channel closed)
+                        if event_tx.blocking_send(event).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        // No event, continue polling
+                    }
+                    Err(e) => {
+                        log::error!("Event polling error: {}", e);
+                        break;
+                    }
+                }
             }
+        });
+
+        // Main event loop - receives events from background poller
+        loop {
+            // Check cancellation first
+            if self.cancellation_token.is_cancelled() {
+                log::info!("Main loop: cancellation detected, exiting");
+                break;
+            }
+
+            // Wait for event with timeout, also checking cancellation
+            let event = tokio::select! {
+                maybe_event = event_rx.recv() => {
+                    match maybe_event {
+                        Some(event) => event,
+                        None => {
+                            log::info!("Event channel closed");
+                            break;
+                        }
+                    }
+                }
+                _ = self.cancellation_token.cancelled() => {
+                    log::info!("Main loop: cancelled via token during recv");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Periodic check for cancellation
+                    continue;
+                }
+            };
+
+            // Handle the event
+            if !self.handle_event(event).await? {
+                break; // Quit requested
+            }
+
+            // Re-render after handling event
+            self.ui.render(&self.state)?;
         }
+
+        // Clean up polling task
+        drop(event_rx);
+        let _ = poll_handle.await;
 
         Ok(())
     }
@@ -308,6 +440,8 @@ impl InfrawareTerminal {
     async fn handle_event(&mut self, event: TerminalEvent) -> Result<bool> {
         match event {
             TerminalEvent::Quit => {
+                log::info!("Quit signal received, cancelling ongoing operations");
+                self.cancellation_token.cancel();
                 return Ok(false);
             }
             TerminalEvent::InputChar(c) => {
@@ -359,6 +493,32 @@ impl InfrawareTerminal {
     async fn handle_submit(&mut self) -> Result<bool> {
         let input = self.state.submit_input();
 
+        // Handle human-in-the-loop command approval mode (y/n)
+        if self.state.mode == TerminalMode::AwaitingCommandApproval {
+            let trimmed = input.trim().to_lowercase();
+            let approved = trimmed == "y" || trimmed == "yes";
+            self.state.add_output(MessageFormatter::command(&input));
+
+            // Delegate to orchestrator for approval handling
+            self.nl_orchestrator
+                .handle_approval(approved, &mut self.state, &mut self.ui)
+                .await?;
+
+            return Ok(true);
+        }
+
+        // Handle human-in-the-loop answer mode (free-form text)
+        if self.state.mode == TerminalMode::AwaitingAnswer {
+            self.state.add_output(MessageFormatter::command(&input));
+
+            // Delegate to orchestrator for answer handling
+            self.nl_orchestrator
+                .handle_answer(input, &mut self.state, &mut self.ui)
+                .await?;
+
+            return Ok(true);
+        }
+
         if input.trim().is_empty() {
             return Ok(true);
         }
@@ -372,10 +532,10 @@ impl InfrawareTerminal {
 
         // Sync history with Arc for history expansion
         {
-            let mut history_guard = match self.history_arc.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let mut history_guard = self
+                .history_arc
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             *history_guard = self.state.history.all().to_vec();
         }
 
@@ -395,7 +555,15 @@ impl InfrawareTerminal {
             }
             InputType::NaturalLanguage(query) => {
                 self.state.add_output(MessageFormatter::command(&input));
-                self.handle_natural_language(&query).await?;
+
+                // Clone token (cheap Arc increment)
+                let token = self.cancellation_token.clone();
+                self.handle_natural_language(&query, token).await?;
+
+                // Reset token for next operation if it was cancelled
+                if self.cancellation_token.is_cancelled() {
+                    self.cancellation_token = CancellationToken::new();
+                }
             }
             InputType::CommandTypo {
                 input: typo_input,
@@ -426,9 +594,52 @@ impl InfrawareTerminal {
     ) -> Result<()> {
         self.state.mode = TerminalMode::ExecutingCommand;
 
+        // Handle auth-status builtin command
+        if cmd == "auth-status" {
+            return self.handle_auth_status_command().await;
+        }
+
         self.command_orchestrator
             .handle_command(cmd, args, original_input, &mut self.state, &mut self.ui)
             .await
+    }
+
+    /// Handle the built-in "auth-status" command
+    ///
+    /// Checks backend authentication status via GET /api/get-auth
+    async fn handle_auth_status_command(&mut self) -> Result<()> {
+        match &self.authenticator {
+            Some(auth) => {
+                self.state
+                    .add_output(MessageFormatter::info("Checking authentication status..."));
+
+                match auth.check_status().await {
+                    Ok(authenticated) => {
+                        if authenticated {
+                            self.state.add_output(MessageFormatter::success(
+                                "Backend authentication: Active",
+                            ));
+                        } else {
+                            self.state.add_output(MessageFormatter::error(
+                                "Backend authentication: Not authenticated",
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        self.state.add_output(MessageFormatter::error(format!(
+                            "Failed to check auth status: {e}"
+                        )));
+                    }
+                }
+            }
+            None => {
+                self.state.add_output(MessageFormatter::error(
+                    "No authenticator configured. Backend authentication not available.",
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// Handle command typo
@@ -477,11 +688,16 @@ impl InfrawareTerminal {
     /// Handle natural language query
     ///
     /// Delegates to NaturalLanguageOrchestrator (SRP compliance)
-    async fn handle_natural_language(&mut self, query: &str) -> Result<()> {
+    async fn handle_natural_language(
+        &mut self,
+        query: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        log::info!("Natural language query: {}", query);
         self.state.mode = TerminalMode::WaitingLLM;
 
         self.nl_orchestrator
-            .handle_query(query, &mut self.state, &mut self.ui)
+            .handle_query(query, &mut self.state, &mut self.ui, cancel_token)
             .await
     }
 
@@ -494,35 +710,119 @@ impl InfrawareTerminal {
     }
 }
 
+/// Authenticate with backend and determine LLM client (with silent fallback)
+///
+/// This function is designed to run in parallel with the splash screen.
+/// Returns: (llm_client, authenticator, using_mock_llm)
+async fn authenticate_backend(
+    backend_url: String,
+    api_key: String,
+) -> (
+    Arc<dyn LLMClientTrait>,
+    Option<Arc<dyn Authenticator>>,
+    bool,
+) {
+    log::info!("Backend URL configured: {}", backend_url);
+
+    let auth = Arc::new(HttpAuthenticator::new(backend_url.clone()));
+    match auth.authenticate(&api_key).await {
+        Ok(_) => {
+            log::info!("Backend authentication successful - using HttpLLMClient");
+            // Use backend_url directly for LLM (threads API is at root, not /api/llm)
+            let llm_url = std::env::var("INFRAWARE_LLM_URL").unwrap_or(backend_url);
+            (
+                Arc::new(HttpLLMClient::new(llm_url, api_key)) as Arc<dyn LLMClientTrait>,
+                Some(auth as Arc<dyn Authenticator>),
+                false,
+            )
+        }
+        Err(e) => {
+            // Silent fallback to MockLLMClient
+            log::warn!(
+                "Authentication failed: {} - falling back to MockLLMClient",
+                e
+            );
+            (Arc::new(MockLLMClient::new()), None, true)
+        }
+    }
+}
+
 /// Main entry point
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file (if present)
     dotenvy::dotenv().ok();
 
+    // Load secrets from .env.secrets file (if present)
+    dotenvy::from_filename(".env.secrets").ok();
+
     // Initialize logging system
     logging::init()?;
 
+    // Set up panic hook to log panics before they crash the app
+    std::panic::set_hook(Box::new(|panic_info| {
+        let location = panic_info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+
+        let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic payload".to_string()
+        };
+
+        log::error!("PANIC at {}: {}", location, message);
+        eprintln!("\n!!! PANIC at {}: {}", location, message);
+    }));
+
     log::info!("Infraware Terminal starting...");
 
-    // Configure LLM client based on environment variable
-    let llm_client: Arc<dyn LLMClientTrait> = if let Ok(url) = std::env::var("INFRAWARE_LLM_URL") {
-        log::info!("Using HTTP LLM client: {}", url);
-        Arc::new(HttpLLMClient::new(url))
-    } else {
-        log::info!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
-        Arc::new(MockLLMClient::new())
-    };
+    // Load auth config
+    let auth_config = AuthConfig::from_env();
 
-    // Create terminal using builder pattern
+    // Create terminal with defaults (MockLLMClient) - will be updated after auth
     log::debug!("Building terminal UI...");
     let mut terminal = InfrawareTerminal::builder()
-        .with_llm_client(llm_client)
+        .with_llm_client(Arc::new(MockLLMClient::new()))
+        .with_using_mock_llm(true)
         .build()?;
 
-    // Show animated splash screen
+    // Launch auth in background (runs in parallel with splash)
+    let auth_handle = match (auth_config.backend_url, auth_config.api_key) {
+        (Some(backend_url), Some(api_key)) => Some(tokio::spawn(async move {
+            authenticate_backend(backend_url, api_key).await
+        })),
+        (Some(_), None) => {
+            log::warn!("ANTHROPIC_API_KEY not found in .env.secrets");
+            log::warn!("Backend not configured - using MockLLMClient");
+            None
+        }
+        _ => {
+            log::warn!("Backend not configured - using MockLLMClient");
+            None
+        }
+    };
+
+    // Show animated splash screen (5s) - auth runs in parallel
     log::debug!("Showing splash screen");
     SplashScreen::run(terminal.ui.inner_terminal())?;
+
+    // Wait for auth result and update terminal
+    if let Some(handle) = auth_handle {
+        match handle.await {
+            Ok((llm_client, authenticator, using_mock_llm)) => {
+                terminal.set_llm_client(llm_client);
+                terminal.set_authenticator(authenticator);
+                terminal.set_using_mock_llm(using_mock_llm);
+            }
+            Err(e) => {
+                log::error!("Auth task panicked: {} - using MockLLMClient", e);
+            }
+        }
+    }
 
     // Run the main loop
     log::debug!("Starting main event loop");

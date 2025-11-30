@@ -3,7 +3,7 @@ use std::fmt;
 
 /// ANSI color codes for terminal output
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Complete ANSI color set, not all variants used
+#[allow(dead_code)] // Full color palette available for M2/M3
 pub enum AnsiColor {
     Black,
     Red,

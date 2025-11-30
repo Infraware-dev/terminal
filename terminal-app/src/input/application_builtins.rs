@@ -12,6 +12,7 @@
 /// - `clear`: Clear the terminal output buffer
 /// - `reload-aliases`: Reload alias definitions from system and user config files
 /// - `reload-commands`: Clear the command cache (useful after installing new commands)
+/// - `auth-status`: Check backend authentication status
 ///
 /// # Example
 /// ```
@@ -20,8 +21,10 @@
 /// assert!(APPLICATION_BUILTINS.contains(&"clear"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
+/// assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
 /// ```
-pub const APPLICATION_BUILTINS: &[&str] = &["clear", "reload-aliases", "reload-commands"];
+pub const APPLICATION_BUILTINS: &[&str] =
+    &["clear", "reload-aliases", "reload-commands", "auth-status"];
 
 /// Check if a command is an application builtin
 ///
@@ -77,12 +80,18 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_status_is_builtin() {
+        assert!(is_application_builtin("auth-status"));
+    }
+
+    #[test]
     fn test_builtin_list_count() {
-        // Verify we have exactly 3 application builtins
-        assert_eq!(APPLICATION_BUILTINS.len(), 3);
+        // Verify we have exactly 4 application builtins
+        assert_eq!(APPLICATION_BUILTINS.len(), 4);
         // Verify they are the expected ones
         assert!(APPLICATION_BUILTINS.contains(&"clear"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
+        assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
     }
 }

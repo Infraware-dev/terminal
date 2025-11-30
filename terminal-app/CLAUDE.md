@@ -7,10 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It intelligently routes user input to either shell command execution or an LLM backend for natural language queries.
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
-**Status**: M1 Complete, Production-Ready (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
+**Status**: M1 Complete + Backend Integration in Progress (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
 **Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
+
+**Environment Variables**:
+- `INFRAWARE_BACKEND_URL` - Backend API endpoint (e.g., `http://localhost:8000`)
+- `ANTHROPIC_API_KEY` - API key for LLM backend authentication
 
 ## Commands
 
@@ -22,13 +26,13 @@ cargo run                            # Run application
 
 # Testing
 cargo test                           # All tests
-cargo test --test classifier_tests   # SCAN algorithm tests
-cargo test --test executor_tests     # Executor tests
+cargo test --test classifier_tests   # SCAN algorithm tests (tests/classifier_tests.rs)
+cargo test --test executor_tests     # Executor tests (tests/executor_tests.rs)
 cargo test test_name                 # Run single test by name
 cargo test -- --nocapture            # Tests with output
 cargo test -- --show-output          # Show println! even for passing tests
 
-# Benchmarking
+# Benchmarking (benches/scan_benchmark.rs)
 cargo bench                          # All benchmarks
 cargo bench scan_                    # SCAN benchmarks only
 
@@ -68,45 +72,20 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 **Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
 
-### Module Structure
+### Key Modules
 
-**`terminal/`** - TUI rendering and state
-- `tui.rs`: ratatui rendering, suspend/resume for interactive commands
-- `state.rs`: Terminal state composition
-- `buffers.rs`: SRP-compliant buffers (OutputBuffer, InputBuffer, CommandHistory)
-- `events.rs`: Keyboard event handling (Windows: filter KeyEventKind::Press only)
-- `splash.rs`: Animated splash screen with particle assembly effect (5s duration, skippable)
-
-**`input/`** - SCAN Algorithm
-- `classifier.rs`: InputClassifier coordinating handler chain + alias expansion
-- `handler.rs`: 10-handler Chain of Responsibility implementation
-- `history_expansion.rs`: Bash-style `!!`, `!$`, `!^`, `!*` with Arc<RwLock>
-- `application_builtins.rs`: App builtin commands (clear, reload-aliases, reload-commands)
-- `shell_builtins.rs`: 45+ builtins with `ShellBuiltinInfo` metadata
-- `known_commands.rs`: Single source of truth for 60+ DevOps commands
-- `patterns.rs`: Precompiled RegexSet patterns
-- `discovery.rs`: PATH-aware CommandCache + alias loading/expansion
-- `typo_detection.rs`: Levenshtein distance with `strsim`
-- `parser.rs`: Shell parsing with `shell-words`
-
-**`executor/`** - Command execution
-- `command.rs`: Async execution + interactive command support (28 supported, 31 blocked)
-- `package_manager.rs`: Strategy pattern for 7 package managers
-- `install.rs`: Auto-install workflow
-- `completion.rs`: Tab completion
-
-**`orchestrators/`** - Workflow coordination (SRP)
-- `command.rs`: Command execution + auto-install prompts
-- `natural_language.rs`: LLM queries + response rendering
-- `tab_completion.rs`: Tab completion workflow
-
-**`llm/`** - LLM integration
-- `client.rs`: MockLLMClient (testing), HttpLLMClient (production)
-- `renderer.rs`: Markdown with syntax highlighting
+| Directory | Purpose | Key Files |
+|-----------|---------|-----------|
+| `terminal/` | TUI rendering and state | `tui.rs` (suspend/resume), `buffers.rs` (SRP buffers), `events.rs` (keyboard) |
+| `input/` | SCAN Algorithm | `classifier.rs` (coordinator), `handler.rs` (10-handler chain), `known_commands.rs` (command registry) |
+| `executor/` | Command execution | `command.rs` (async exec), `package_manager.rs` (Strategy pattern) |
+| `orchestrators/` | Workflow coordination | `command.rs`, `natural_language.rs`, `tab_completion.rs` |
+| `llm/` | LLM integration | `client.rs` (Mock/HTTP clients with HITL support), `renderer.rs` (syntax highlighting) |
+| `auth/` | Backend authentication | `authenticator.rs` (HTTP/Mock auth), `config.rs` (env config), `models.rs` (API types) |
 
 ### Design Patterns
-- **Chain of Responsibility**: Input classification (`handler.rs`)
-- **Strategy Pattern**: Package managers (`package_manager.rs`)
+- **Chain of Responsibility**: Input classification (`input/handler.rs`)
+- **Strategy Pattern**: Package managers (`executor/package_manager.rs`)
 - **Builder Pattern**: Terminal construction (`main.rs`)
 - **SRP**: Orchestrators, buffer components
 
@@ -121,6 +100,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 2. Add to chain in `InputClassifier::new()` - ORDER MATTERS (fast paths first)
 3. Use precompiled patterns from `patterns.rs` - NEVER compile regex in handlers
 4. Run `cargo bench` to verify no performance regression
+5. Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases)
 
 ### History Expansion
 - Patterns: `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args)
@@ -156,6 +136,19 @@ These commands are recognized early in the classification chain to prevent miscl
 - Executed via `sh -c` (Unix) or `cmd /C` (Windows)
 - `ShellBuiltinInfo` provides metadata: `requires_shell`, `unix_only`
 
+### LLM Integration (Human-in-the-Loop)
+
+The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) interactions:
+
+- **Thread-based conversations**: Maintains context via `/threads` API
+- **SSE streaming**: Real-time responses via Server-Sent Events
+- **LLMQueryResult enum**:
+  - `Complete(String)` - Final response from LLM
+  - `CommandApproval { command, message }` - LLM wants to execute a command (y/n)
+  - `Question { question, options }` - LLM is asking a question (free-form text)
+- **Resume methods**: `resume_run()` for approval, `resume_with_answer()` for questions
+- **Authentication**: API key via `BACKEND_API_KEY` environment variable
+
 ### Error Handling
 - Use `anyhow::Result` for all errors
 - Display user-friendly messages in TUI, don't crash on failures
@@ -165,7 +158,7 @@ These commands are recognized early in the classification chain to prevent miscl
 ### CI/CD
 - `cargo fmt --all --check` must pass
 - `cargo clippy --all-targets --all-features -- -D warnings` must pass
-- 75% test coverage minimum
+- 75% test coverage minimum (~645 tests across unit/integration/doc tests)
 - Multi-platform: Ubuntu, Windows, macOS
 
 ### Git Commits
@@ -189,7 +182,6 @@ These commands are recognized early in the classification chain to prevent miscl
 - See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines
 
 ### M1 Scope Limitations (Deferred to M2/M3)
-- LLM backend: HttpLLMClient exists but needs real endpoint/auth
 - Auto-install: Framework prompts but doesn't execute
 - Tab completion: Basic only, no bash/zsh integration
 - History: Session-only, not persisted to disk
