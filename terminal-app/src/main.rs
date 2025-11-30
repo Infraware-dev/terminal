@@ -516,13 +516,6 @@ impl InfrawareTerminal {
             return Ok(true);
         }
 
-        // Handle built-in exit command
-        let trimmed = input.trim().to_lowercase();
-        if trimmed == "exit" || trimmed == "quit" {
-            self.state.add_output(MessageFormatter::info("Goodbye!"));
-            return Ok(false); // Signal to exit
-        }
-
         // Sync history with Arc for history expansion
         {
             let mut history_guard = self
