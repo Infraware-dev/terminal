@@ -240,10 +240,9 @@ mod tests {
         );
 
         // Questions starting with "what" - should match question_words pattern
-        // Note: "kubernetes" alone might be detected as command typo of "kubectl"
-        // Using different phrasing
+        // Note: Avoid words that might be commands on some systems (e.g., "containers" on macOS)
         assert!(matches!(
-            classifier.classify("what are containers?").unwrap(),
+            classifier.classify("what is the weather today?").unwrap(),
             InputType::NaturalLanguage(_)
         ));
     }
