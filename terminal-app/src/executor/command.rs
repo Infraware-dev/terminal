@@ -23,8 +23,8 @@ impl CommandOutput {
     }
 
     /// Get combined output (stdout + stderr)
-    #[allow(dead_code)] // Utility method for combined output formatting, used in tests
     #[must_use]
+    #[allow(dead_code)] // Public API for M2/M3
     pub fn combined_output(&self) -> String {
         let mut result = String::new();
         if !self.stdout.is_empty() {
@@ -368,11 +368,8 @@ impl CommandExecutor {
     }
 
     /// Get the full path of a command
-    #[allow(
-        dead_code,
-        reason = "Public API for command path resolution, used in M2/M3"
-    )]
     #[must_use]
+    #[allow(dead_code)] // Public API for M2/M3
     pub fn get_command_path(cmd: &str) -> Option<String> {
         which::which(cmd)
             .ok()
@@ -380,10 +377,7 @@ impl CommandExecutor {
     }
 
     /// Execute a command with sudo privileges (M2/M3)
-    #[allow(
-        dead_code,
-        reason = "Used by package manager implementations for privileged operations"
-    )]
+    #[allow(dead_code)] // Used by package manager implementations for privileged operations
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {

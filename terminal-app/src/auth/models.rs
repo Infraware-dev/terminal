@@ -14,16 +14,15 @@ pub struct AuthRequest {
 /// Response from POST /api/auth on success
 #[derive(Debug, Deserialize)]
 pub struct AuthResponse {
-    #[allow(dead_code, reason = "Deserialized from API, available for validation")]
     pub success: bool,
     pub message: String,
 }
 
 /// Response from GET /api/get-auth
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "Used by check_status() method in M2/M3")]
 pub struct AuthStatus {
     pub authenticated: bool,
+    #[allow(dead_code)] // Deserialized from API, may be used in M2/M3
     pub has_api_key: bool,
 }
 

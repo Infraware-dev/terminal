@@ -36,10 +36,6 @@ pub trait Authenticator: Send + Sync + Debug {
     /// * `Ok(true)` if authenticated
     /// * `Ok(false)` if not authenticated
     /// * `Err` on network or server error
-    #[allow(
-        dead_code,
-        reason = "Available for M2/M3 - verify auth status before requests"
-    )]
     async fn check_status(&self) -> Result<bool>;
 }
 
@@ -132,15 +128,12 @@ impl Authenticator for HttpAuthenticator {
 ///
 /// Always succeeds authentication without making network calls.
 #[derive(Debug, Default)]
-#[allow(
-    dead_code,
-    reason = "Available for integration tests - Liskov Substitution"
-)]
+#[allow(dead_code)] // Available for integration tests - Liskov Substitution
 pub struct MockAuthenticator;
 
 impl MockAuthenticator {
     /// Create a new mock authenticator
-    #[allow(dead_code, reason = "Constructor for test use")]
+    #[allow(dead_code)] // Constructor for test use
     pub fn new() -> Self {
         Self
     }

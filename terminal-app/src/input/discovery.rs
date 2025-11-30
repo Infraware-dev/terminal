@@ -106,7 +106,7 @@ impl CommandCache {
     /// // Check if alias exists
     /// let is_alias = CommandCache::is_alias("ll");
     /// ```
-    #[allow(dead_code, reason = "Public API for alias checking, used in M2/M3")]
+    #[allow(dead_code)] // Public API for alias checking, used in M2/M3
     pub fn is_alias(command: &str) -> bool {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
@@ -121,7 +121,7 @@ impl CommandCache {
     /// Get the expanded command for an alias
     ///
     /// Returns `None` if not an alias, or `Some(expanded_command)` if found.
-    #[allow(dead_code, reason = "Public API for alias expansion, used in M2/M3")]
+    #[allow(dead_code)] // Public API for alias expansion, used in M2/M3
     pub fn get_alias_expansion(alias: &str) -> Option<String> {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
@@ -148,10 +148,6 @@ impl CommandCache {
     ///
     /// CommandCache::load_user_aliases();
     /// ```
-    #[allow(
-        dead_code,
-        reason = "Called during startup, not from multiple callsites"
-    )]
     pub fn load_user_aliases() {
         let mut aliases = HashMap::new();
 
@@ -297,10 +293,7 @@ impl CommandCache {
     ///
     /// CommandCache::clear();
     /// ```
-    #[allow(
-        dead_code,
-        reason = "Public API for cache management, used for testing and reload-commands"
-    )]
+    #[allow(dead_code)] // Public API for cache management, used in testing
     pub fn clear() {
         let mut cache = match COMMAND_CACHE.write() {
             Ok(cache) => cache,
@@ -341,10 +334,7 @@ impl CommandCache {
     }
 
     /// Get statistics about cache contents (for debugging/monitoring)
-    #[allow(
-        dead_code,
-        reason = "Diagnostic API for cache stats, reserved for monitoring in M2/M3"
-    )]
+    #[allow(dead_code)] // Diagnostic API for cache stats, used in M2/M3
     pub fn stats() -> CacheStats {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
@@ -363,7 +353,7 @@ impl CommandCache {
 
 /// Cache statistics
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields returned by stats() for diagnostics in M2/M3
+#[allow(dead_code)] // Used by stats() method, available for M2/M3
 pub struct CacheStats {
     pub available_count: usize,
     pub unavailable_count: usize,

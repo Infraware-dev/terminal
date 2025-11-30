@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 /// Request to the LLM backend (legacy - kept for backward compatibility)
 #[derive(Debug, Serialize)]
-#[allow(dead_code)] // Legacy struct - may be used for non-streaming endpoints
+#[allow(dead_code)] // Legacy API for M2/M3
 pub struct LLMRequest {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -16,7 +17,7 @@ pub struct LLMRequest {
 
 /// Response from the LLM backend
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Struct fields used in HTTP deserialization, metadata for M2/M3
+#[allow(dead_code)] // Legacy API for M2/M3
 pub struct LLMResponse {
     pub text: String,
     #[serde(default)]
@@ -167,7 +168,6 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult>;
 
     /// Query with command history context (M2/M3)
-    #[allow(dead_code)] // Context-aware LLM API for M2/M3
     async fn query_with_history(
         &self,
         text: &str,
@@ -180,6 +180,33 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
         };
 
         self.query_with_context(text, context).await
+    }
+
+    /// Query with cancellation support (default: no cancellation)
+    async fn query_cancellable(
+        &self,
+        text: &str,
+        _cancel_token: CancellationToken,
+    ) -> Result<LLMQueryResult> {
+        // Default: ignore cancellation token
+        self.query(text).await
+    }
+
+    /// Resume with cancellation support
+    async fn resume_run_cancellable(
+        &self,
+        _cancel_token: CancellationToken,
+    ) -> Result<LLMQueryResult> {
+        self.resume_run().await
+    }
+
+    /// Resume with answer and cancellation support
+    async fn resume_with_answer_cancellable(
+        &self,
+        answer: &str,
+        _cancel_token: CancellationToken,
+    ) -> Result<LLMQueryResult> {
+        self.resume_with_answer(answer).await
     }
 }
 
@@ -222,7 +249,7 @@ impl HttpLLMClient {
     }
 
     /// Create a new HTTP LLM client with custom timeout
-    #[allow(dead_code)] // Constructor for custom timeout configuration
+    #[allow(dead_code)] // Constructor with custom timeout for testing
     pub fn with_timeout(base_url: String, api_key: String, timeout_secs: u64) -> Result<Self> {
         Ok(Self {
             base_url,
@@ -292,6 +319,7 @@ impl HttpLLMClient {
         thread_id: &str,
         input: Option<&str>,
         resume: bool,
+        cancel_token: CancellationToken,
     ) -> Result<StreamResult> {
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
         log::info!("Starting stream run at {}", url);
@@ -326,13 +354,21 @@ impl HttpLLMClient {
         log::info!("Sending POST request to {} ...", url);
         let send_start = std::time::Instant::now();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("X-Api-Key", &self.api_key)
-            .json(&request)
-            .send()
-            .await?;
+        // Use tokio::select! to race HTTP request vs cancellation
+        let response = tokio::select! {
+            result = self
+                .client
+                .post(&url)
+                .header("X-Api-Key", &self.api_key)
+                .json(&request)
+                .send() => {
+                    result?
+            }
+            _ = cancel_token.cancelled() => {
+                log::info!("HTTP request cancelled before response");
+                anyhow::bail!("Query cancelled by user")
+            }
+        };
 
         log::info!(
             "POST response received in {:?}: status={}",
@@ -348,12 +384,16 @@ impl HttpLLMClient {
         }
 
         log::info!("Starting SSE stream parsing...");
-        self.parse_sse_stream(response).await
+        self.parse_sse_stream(response, cancel_token).await
     }
 
     /// Parse SSE stream and accumulate AI messages
     /// Returns StreamResult::Complete, CommandApproval, or Question
-    async fn parse_sse_stream(&self, response: reqwest::Response) -> Result<StreamResult> {
+    async fn parse_sse_stream(
+        &self,
+        response: reqwest::Response,
+        cancel_token: CancellationToken,
+    ) -> Result<StreamResult> {
         let mut result = String::new();
         let mut interrupt_data: Option<InterruptData> = None;
         let mut stream = response.bytes_stream();
@@ -365,6 +405,12 @@ impl HttpLLMClient {
         log::info!("SSE stream started, waiting for chunks...");
 
         while let Some(chunk_result) = stream.next().await {
+            // Check for cancellation FIRST (before processing chunk)
+            if cancel_token.is_cancelled() {
+                log::info!("SSE stream cancelled by user after {} chunks", chunk_count);
+                anyhow::bail!("Query cancelled by user");
+            }
+
             match chunk_result {
                 Ok(chunk) => {
                     chunk_count += 1;
@@ -828,8 +874,32 @@ impl LLMClientTrait for HttpLLMClient {
             None => text.to_string(),
         };
 
+        // Create a default non-cancelled token for non-cancellable query
         let stream_result = self
-            .stream_run(&thread_id, Some(&full_query), false)
+            .stream_run(
+                &thread_id,
+                Some(&full_query),
+                false,
+                CancellationToken::new(),
+            )
+            .await?;
+
+        // Convert internal StreamResult to public LLMQueryResult
+        Self::convert_stream_result(stream_result)
+    }
+
+    async fn query_cancellable(
+        &self,
+        text: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<LLMQueryResult> {
+        log::info!("LLM query (cancellable): {}", text);
+
+        // Use streaming endpoint via threads
+        let thread_id = self.ensure_thread().await?;
+
+        let stream_result = self
+            .stream_run(&thread_id, Some(text), false, cancel_token)
             .await?;
 
         // Convert internal StreamResult to public LLMQueryResult
@@ -846,7 +916,9 @@ impl LLMClientTrait for HttpLLMClient {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
 
-        let stream_result = self.stream_run(&thread_id, None, true).await?;
+        let stream_result = self
+            .stream_run(&thread_id, None, true, CancellationToken::new())
+            .await?;
 
         // Convert internal StreamResult to public LLMQueryResult
         Self::convert_stream_result(stream_result)
@@ -895,7 +967,9 @@ impl LLMClientTrait for HttpLLMClient {
             anyhow::bail!("Resume with answer failed ({}): {}", status, error_text);
         }
 
-        let stream_result = self.parse_sse_stream(response).await?;
+        let stream_result = self
+            .parse_sse_stream(response, CancellationToken::new())
+            .await?;
         Self::convert_stream_result(stream_result)
     }
 }
@@ -974,6 +1048,25 @@ impl LLMClientTrait for MockLLMClient {
             "Mock received answer: '{}' - Processing complete.",
             answer
         )))
+    }
+
+    async fn query_cancellable(
+        &self,
+        text: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<LLMQueryResult> {
+        // Simulate network delay with cancellation checks
+        // Split into 10 chunks of 100ms each to allow responsive cancellation
+        for i in 0..10 {
+            if cancel_token.is_cancelled() {
+                log::info!("Mock LLM query cancelled after {}ms", i * 100);
+                anyhow::bail!("Query cancelled by user");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Return mock response (same as non-cancellable version)
+        self.query(text).await
     }
 }
 

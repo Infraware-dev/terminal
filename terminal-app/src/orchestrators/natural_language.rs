@@ -7,6 +7,7 @@
 /// - Human-in-the-loop interactions (command approval and questions)
 use anyhow::Result;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::llm::{LLMClientTrait, LLMQueryResult, ResponseRenderer};
 use crate::terminal::{PendingInteraction, TerminalMode, TerminalState, TerminalUI};
@@ -49,11 +50,13 @@ impl NaturalLanguageOrchestrator {
     /// - Rendering the response
     /// - Human-in-the-loop command approval flow
     /// - Error handling
+    /// - Cancellation support (via CancellationToken)
     pub async fn handle_query(
         &self,
         query: &str,
         state: &mut TerminalState,
         ui: &mut TerminalUI,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
         log::info!("Orchestrator handling query: {}", query);
 
@@ -65,15 +68,33 @@ impl NaturalLanguageOrchestrator {
 
         log::info!("Calling LLM client...");
 
-        // Query the LLM
-        match self.llm_client.query(query).await {
-            Ok(result) => {
-                log::debug!("LLM query completed successfully");
-                self.handle_query_result(result, state);
+        // Query the LLM with cancellation support using tokio::select!
+        tokio::select! {
+            result = self.llm_client.query_cancellable(query, cancel_token.clone()) => {
+                match result {
+                    Ok(llm_result) => {
+                        log::debug!("LLM query completed successfully");
+                        self.handle_query_result(llm_result, state);
+                    }
+                    Err(e) if e.to_string().contains("cancelled") => {
+                        log::info!("LLM query cancelled by user");
+                        // Remove waiting message
+                        state.output.pop();
+                        state.add_output(MessageFormatter::info("Query cancelled by user"));
+                        state.mode = TerminalMode::Normal;
+                    }
+                    Err(e) => {
+                        log::error!("LLM query failed: {}", e);
+                        self.handle_error(e, state);
+                    }
+                }
             }
-            Err(e) => {
-                log::error!("LLM query failed: {}", e);
-                self.handle_error(e, state);
+            _ = cancel_token.cancelled() => {
+                log::info!("LLM query cancelled via token");
+                // Remove waiting message
+                state.output.pop();
+                state.add_output(MessageFormatter::info("Query cancelled by user"));
+                state.mode = TerminalMode::Normal;
             }
         }
 

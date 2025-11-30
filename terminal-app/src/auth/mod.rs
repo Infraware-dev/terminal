@@ -43,10 +43,3 @@ pub use authenticator::{Authenticator, HttpAuthenticator};
 pub use config::AuthConfig;
 
 // Re-exports for lib consumers and testing (not used directly in bin)
-#[allow(
-    unused_imports,
-    reason = "Public API for lib consumers and integration tests"
-)]
-pub use authenticator::MockAuthenticator;
-#[allow(unused_imports, reason = "Public API for lib consumers")]
-pub use models::{AuthRequest, AuthResponse, AuthStatus};

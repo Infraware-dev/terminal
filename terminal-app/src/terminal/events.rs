@@ -86,7 +86,6 @@ impl Default for EventHandler {
 
 /// Custom terminal events
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Some event variants reserved for future terminal features
 pub enum TerminalEvent {
     /// User input character
     InputChar(char),

@@ -15,10 +15,7 @@ pub struct TabCompletionHandler;
 
 impl TabCompletionHandler {
     /// Create a new tab completion handler
-    #[allow(
-        dead_code,
-        reason = "Constructor used in tests, Default trait is preferred"
-    )]
+    #[allow(dead_code)] // Constructor used in tests, Default trait is preferred
     pub const fn new() -> Self {
         Self
     }

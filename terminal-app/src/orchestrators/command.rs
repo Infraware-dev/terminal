@@ -19,10 +19,7 @@ pub struct CommandOrchestrator;
 
 impl CommandOrchestrator {
     /// Create a new command orchestrator
-    #[allow(
-        dead_code,
-        reason = "Constructor used in tests, Default trait is preferred"
-    )]
+    #[allow(dead_code)] // Constructor used in tests, Default trait is preferred
     pub const fn new() -> Self {
         Self
     }
