@@ -1,9 +1,3 @@
-mod auth;
-mod executor;
-mod input;
-mod llm;
-mod logging;
-mod orchestrators;
 /// Infraware Terminal - Hybrid Command Interpreter with AI Assistance
 ///
 /// This is a TUI-based terminal that accepts user input and intelligently
@@ -12,8 +6,7 @@ mod orchestrators;
 /// 2. LLM backend for natural language queries
 ///
 /// Target use case: DevOps operations in cloud environments (AWS/Azure) with AI assistance
-mod terminal;
-mod utils;
+use infraware_terminal::{auth, input, llm, logging, orchestrators, terminal, utils};
 
 use anyhow::Result;
 use std::time::Duration;
@@ -521,13 +514,6 @@ impl InfrawareTerminal {
 
         if input.trim().is_empty() {
             return Ok(true);
-        }
-
-        // Handle built-in exit command
-        let trimmed = input.trim().to_lowercase();
-        if trimmed == "exit" || trimmed == "quit" {
-            self.state.add_output(MessageFormatter::info("Goodbye!"));
-            return Ok(false); // Signal to exit
         }
 
         // Sync history with Arc for history expansion
