@@ -329,7 +329,7 @@ impl InfrawareTerminal {
             "Type a command to execute or ask a question in natural language.".to_string(),
         );
         self.state
-            .add_output(MessageFormatter::banner_hint("Press Ctrl+C to quit"));
+            .add_output(MessageFormatter::banner_hint("Type 'exit' to quit"));
 
         // Show LLM client status
         if self.using_mock_llm {
@@ -471,6 +471,9 @@ impl InfrawareTerminal {
             }
             TerminalEvent::ClearScreen => {
                 self.state.output.clear();
+            }
+            TerminalEvent::ClearInput => {
+                self.state.clear_input();
             }
             TerminalEvent::Resize(_, _) => {
                 // Terminal resized - re-render will handle it

@@ -43,8 +43,8 @@ impl EventHandler {
         }
 
         match (key.code, key.modifiers) {
-            // Ctrl+C - Quit
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::Quit,
+            // Ctrl+C - Clear input
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::ClearInput,
             // Ctrl+L - Clear screen
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => TerminalEvent::ClearScreen,
 
@@ -107,6 +107,8 @@ pub enum TerminalEvent {
     TabComplete,
     /// Clear screen
     ClearScreen,
+    /// Clear input line
+    ClearInput,
     /// Quit application
     Quit,
     /// Terminal resized (width, height) - M2/M3 feature
@@ -228,11 +230,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_c_quit() {
+    fn test_ctrl_c_clear_input() {
         let handler = EventHandler::new();
         let event = create_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
         let result = handler.map_key_event(event);
-        assert!(matches!(result, TerminalEvent::Quit));
+        assert!(matches!(result, TerminalEvent::ClearInput));
     }
 
     #[test]
