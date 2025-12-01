@@ -8,13 +8,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
 **Status**: M1 Complete + Backend Integration in Progress (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
+**Recent**: Chain of Responsibility refactoring complete (ClassifierContext DI, HandlerPosition enum, external language config)
 **Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
 
 **Environment Variables**:
 - `INFRAWARE_BACKEND_URL` - Backend API endpoint (e.g., `http://localhost:8000`)
-- `ANTHROPIC_API_KEY` - API key for LLM backend authentication
+- `BACKEND_API_KEY` - API key for LLM backend authentication
 
 ## Commands
 
@@ -25,9 +26,12 @@ cargo build --release                # Release build
 cargo run                            # Run application
 
 # Testing
-cargo test                           # All tests
+cargo test                           # All tests (~645 tests across unit/integration/doc)
 cargo test --test classifier_tests   # SCAN algorithm tests (tests/classifier_tests.rs)
 cargo test --test executor_tests     # Executor tests (tests/executor_tests.rs)
+cargo test --test integration_tests  # Integration tests (tests/integration_tests.rs)
+cargo test --test terminal_state_tests # Terminal state tests
+cargo test --test interactive_command_test # Interactive command tests
 cargo test test_name                 # Run single test by name
 cargo test -- --nocapture            # Tests with output
 cargo test -- --show-output          # Show println! even for passing tests
@@ -35,6 +39,8 @@ cargo test -- --show-output          # Show println! even for passing tests
 # Benchmarking (benches/scan_benchmark.rs)
 cargo bench                          # All benchmarks
 cargo bench scan_                    # SCAN benchmarks only
+cargo bench scan_individual_handlers # Individual handler benchmarks (measures each handler in isolation)
+cargo bench scan_full_classification # Full classification pipeline benchmarks
 
 # Development (run before commits)
 cargo fmt                            # Format code
@@ -47,7 +53,7 @@ cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info  # Cove
 ### Core Flow
 ```
 User Input → Alias Expansion → InputClassifier → [Command Path | Natural Language Path]
-              (if matches)    (10-handler chain)     ↓                    ↓
+              (if matches)    (11-handler chain)     ↓                    ↓
                            incl. History Expansion  CommandExecutor      LLMClient
                                                          ↓                    ↓
                                                     Shell Output      ResponseRenderer
@@ -55,7 +61,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-10-handler Chain of Responsibility executing in strict order (<100μs average):
+11-handler Chain of Responsibility executing in strict order (<100μs average):
 
 | # | Handler | Purpose | Performance |
 |---|---------|---------|-------------|
@@ -65,10 +71,11 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 | 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
 | 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
 | 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
-| 7 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
-| 8 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker") | ~100μs |
-| 9 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
-| 10 | DefaultHandler | Fallback to LLM | <1μs |
+| 7 | PathDiscoveryHandler | Auto-discover newly installed commands | ~1-5ms |
+| 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
+| 9 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker"), disabled by default (max_distance=0) | ~100μs |
+| 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
+| 11 | DefaultHandler | Fallback to LLM | <1μs |
 
 **Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
 
@@ -77,11 +84,12 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 | Directory | Purpose | Key Files |
 |-----------|---------|-----------|
 | `terminal/` | TUI rendering and state | `tui.rs` (suspend/resume), `buffers.rs` (SRP buffers), `events.rs` (keyboard) |
-| `input/` | SCAN Algorithm | `classifier.rs` (coordinator), `handler.rs` (10-handler chain), `known_commands.rs` (command registry) |
+| `input/` | SCAN Algorithm | `classifier.rs` (coordinator), `handler.rs` (11-handler chain), `known_commands.rs` (command registry) |
 | `executor/` | Command execution | `command.rs` (async exec), `package_manager.rs` (Strategy pattern) |
 | `orchestrators/` | Workflow coordination | `command.rs`, `natural_language.rs`, `tab_completion.rs` |
 | `llm/` | LLM integration | `client.rs` (Mock/HTTP clients with HITL support), `renderer.rs` (syntax highlighting) |
 | `auth/` | Backend authentication | `authenticator.rs` (HTTP/Mock auth), `config.rs` (env config), `models.rs` (API types) |
+| `config/` | Configuration management | `language.rs` (multilingual patterns), `language.toml` (language config) |
 
 ### Design Patterns
 - **Chain of Responsibility**: Input classification (`input/handler.rs`)
@@ -97,10 +105,14 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 ### Adding New Handlers
 1. Implement `InputHandler` trait in `handler.rs`
-2. Add to chain in `InputClassifier::new()` - ORDER MATTERS (fast paths first)
-3. Use precompiled patterns from `patterns.rs` - NEVER compile regex in handlers
-4. Run `cargo bench` to verify no performance regression
-5. Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases)
+2. Add new position to `HandlerPosition` enum - ORDER MATTERS (fast paths first, expensive checks last)
+3. Add to chain in `InputClassifier::new()` using the new `HandlerPosition` variant
+4. Use precompiled patterns from `patterns.rs` - NEVER compile regex in handlers
+5. If handler needs language-specific patterns, use `ClassifierContext::language_patterns`
+6. If handler needs shared state (cache, patterns), access via `ClassifierContext` parameter (no global state)
+7. Run `cargo bench scan_individual_handlers` to measure handler performance in isolation
+8. Run `cargo bench scan_full_classification` to verify no regression in overall pipeline
+9. Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases)
 
 ### History Expansion
 - Patterns: `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args)
@@ -153,6 +165,16 @@ The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) int
 - Use `anyhow::Result` for all errors
 - Display user-friendly messages in TUI, don't crash on failures
 
+### Logging
+
+The application uses `log4rs` for structured logging with size-based rotation:
+
+- **Configuration**: Loaded from `.env` file via `dotenvy`
+- **Log File**: `infraware-terminal.log` with automatic rotation and gzip compression
+- **Usage**: Use `log::debug!()`, `log::info!()`, `log::warn!()`, `log::error!()`
+- **Initialization**: `logging::init()` called in `main.rs` before starting TUI
+- **Module**: `src/logging.rs`
+
 ## Constraints
 
 ### CI/CD
@@ -181,18 +203,32 @@ The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) int
 - Zero clippy warnings, all tests passing
 - See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines
 
+### Multilingual Support
+
+Language-specific patterns are now externalized to `config/language.toml`:
+
+- **Configuration File Priority** (checked in order):
+  1. `./config/language.toml` (project directory)
+  2. `~/.config/infraware-terminal/language.toml` (user config)
+  3. Built-in English defaults (fallback)
+- **Supported Languages**: English (en), Italian (it), Spanish (es) - easily extensible
+- **Pattern Types**: Single words, question patterns, article patterns, polite patterns
+- **Usage**: Patterns loaded via `ClassifierContext::language_patterns` at initialization
+- **Adding Languages**: Add new `[languages.xx]` section in `language.toml` with appropriate patterns
+
+Example from `config/language.toml`:
+```toml
+[languages.it]
+single_words = ["cosa", "come", "perché", "quando", "dove", "chi", "quale"]
+question_patterns = ["(?i)^(come|cosa|perché|quando|dove|chi|quale)\\s"]
+```
+
 ### M1 Scope Limitations (Deferred to M2/M3)
 - Auto-install: Framework prompts but doesn't execute
 - Tab completion: Basic only, no bash/zsh integration
 - History: Session-only, not persisted to disk
-- Config: Hardcoded defaults, no config file
 - Markdown: Basic rendering only, no tables/images
 - Cache TTL: No automatic invalidation (use `reload-commands` after installing new commands)
-- **Hardcoded English Fallback Words**:
-  - `typo_detection.rs:100-103` contains `NL_SINGLE_WORDS` list with 15 hardcoded English words
-  - `patterns.rs:60-68` contains regex patterns for English question words/articles
-  - These patterns should be replaced with language-agnostic heuristics like `NaturalLanguageHandler` (commit cc6b784)
-  - Issue: Single-word multilingual inputs (e.g., "cosa", "como") may be incorrectly classified as command typos
 
 ## Common Patterns
 
@@ -205,11 +241,22 @@ The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) int
 1. Implement `PackageManager` trait in `package_manager.rs`
 2. Add to `PackageInstaller::detect_package_manager()` in `install.rs`
 
-### InputType Enum
+### InputType Enum (src/input/classifier.rs)
 - `Command { command, args, original_input }` - shell operators in `original_input`
 - `NaturalLanguage(String)` - sent to LLM
 - `Empty` - ignored
 - `CommandTypo { input, suggestion, distance }` - shows suggestion
+
+### ClassifierContext (Dependency Injection)
+
+The `ClassifierContext` struct provides shared dependencies to all handlers via dependency injection:
+- **Command Cache**: Thread-safe `Arc<RwLock<CommandCache>>` for PATH lookups and alias storage
+- **Compiled Patterns**: Precompiled `Arc<CompiledPatterns>` from `patterns.rs` for performance
+- **Language Patterns**: External language-specific patterns from `config/language.toml`
+
+Context is passed to handlers that need shared state (e.g., `KnownCommandHandler`, `TypoDetectionHandler`, `NaturalLanguageHandler`). This design enables testability and avoids global state.
+
+**Recent Refactoring**: Chain of Responsibility refactored to use explicit `HandlerPosition` enum (preventing accidental reordering), `ClassifierContext` for dependency injection (eliminating global state), and external language configuration (supporting multilingual patterns without code changes).
 
 ## Performance Targets
 
@@ -217,11 +264,11 @@ The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) int
 |-----------|--------|
 | Average classification | <100μs |
 | Known command (cache hit) | <1μs |
-| Typo detection | <100μs |
+| Typo detection | <100μs (disabled by default) |
 | Natural language | <5μs |
 | PATH lookup (cache miss) | 1-5ms |
 
-Run `cargo bench scan_` to verify.
+Run `cargo bench scan_` to verify. Use `cargo bench scan_individual_handlers` to measure each handler in isolation and identify bottlenecks.
 
 ## Windows Notes
 

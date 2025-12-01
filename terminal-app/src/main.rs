@@ -532,8 +532,8 @@ impl InfrawareTerminal {
                 args,
                 original_input,
             } => {
-                // Handle exit/quit builtins - exit immediately
-                if command == "exit" || command == "quit" {
+                // Handle exit builtin - exit immediately
+                if command == "exit" {
                     self.state.add_output(MessageFormatter::info("Goodbye!"));
                     self.cancellation_token.cancel(); // Signal poller to stop
                     return Ok(false);
