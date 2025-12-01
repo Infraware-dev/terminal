@@ -5,9 +5,9 @@
 use anyhow::Result;
 
 use super::handler::{
-    ApplicationBuiltinHandler, ClassifierChain, CommandSyntaxHandler, DefaultHandler,
-    EmptyInputHandler, HandlerPosition, KnownCommandHandler, NaturalLanguageHandler,
-    PathCommandHandler, PathDiscoveryHandler,
+    ApplicationBuiltinHandler, ClassifierChain, ClassifierContext, CommandSyntaxHandler,
+    DefaultHandler, EmptyInputHandler, HandlerPosition, KnownCommandHandler,
+    NaturalLanguageHandler, PathCommandHandler, PathDiscoveryHandler,
 };
 use super::history_expansion::HistoryExpansionHandler;
 use super::shell_builtins::ShellBuiltinHandler;
@@ -59,6 +59,7 @@ pub enum InputType {
 /// 11. DefaultHandler - fallback to natural language
 pub struct InputClassifier {
     chain: ClassifierChain,
+    context: ClassifierContext,
     history: Option<Arc<RwLock<Vec<String>>>>,
 }
 
@@ -66,6 +67,7 @@ impl std::fmt::Debug for InputClassifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InputClassifier")
             .field("chain", &"<ClassifierChain>")
+            .field("context", &self.context)
             .finish()
     }
 }
@@ -139,6 +141,7 @@ impl InputClassifier {
 
         Self {
             chain,
+            context: ClassifierContext::new(),
             history: None,
         }
     }
@@ -236,7 +239,7 @@ impl InputClassifier {
     /// Internal classification method (without alias expansion)
     fn classify_internal(&self, input: &str) -> Result<InputType> {
         // Process through the chain of handlers
-        match self.chain.process(input) {
+        match self.chain.process(input, &self.context) {
             Some(result) => Ok(result),
             None => {
                 // This should never happen with DefaultHandler at the end,

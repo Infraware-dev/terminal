@@ -83,6 +83,61 @@ static PATTERNS: std::sync::LazyLock<CompiledPatterns> = std::sync::LazyLock::ne
 });
 
 impl CompiledPatterns {
+    /// Create a new instance of compiled patterns
+    ///
+    /// Compiles all regex patterns. This is expensive, so prefer reusing
+    /// instances via `Arc<CompiledPatterns>` or using the global `get()` method.
+    ///
+    /// # Panics
+    /// Panics if any regex pattern fails to compile (should never happen with valid patterns)
+    pub fn new() -> Self {
+        Self {
+            // Command syntax patterns
+            command_syntax: RegexSet::new([
+                r"^[a-zA-Z0-9_-]+(\s+--?[a-zA-Z0-9])", // Flags: --flag, -f
+                r"(^|\s)(\./|\.\./)[\w.-]+",           // Relative paths: ./, ../
+                r"^/[\w/.-]+",                         // Absolute paths: /usr/bin
+                r"\$\{?[A-Z_][A-Z0-9_]*\}?",           // Env vars: $VAR, ${VAR}
+            ])
+            .expect("Failed to compile command_syntax patterns"),
+
+            // Natural language indicators
+            natural_language: RegexSet::new([
+                r"[\?¿]",                                         // Question marks (universal)
+                r"!",                                             // Exclamation marks
+                r"\.\s+[A-Z]",                                    // Sentence boundaries
+                r",\s+\w+",                                       // Commas with continuation
+                r"(?i)(^|\s)(please|help|show me|explain)(\s|$)", // English polite/request words
+            ])
+            .expect("Failed to compile natural_language patterns"),
+
+            // Shell operators (pipes, redirects, subshells)
+            shell_operators: RegexSet::new([
+                r"\|",      // Pipe
+                r"&&|\|\|", // Logical operators
+                r"[<>]",    // Redirects
+                r"[;&]",    // Command separators
+                r"\$\(",    // Subshell start
+                r"`[^`]+`", // Backtick command substitution
+                r"\{|\}",   // Braces
+                r"\(|\)",   // Parentheses
+            ])
+            .expect("Failed to compile shell_operators patterns"),
+
+            // English question words only (multilingual handled by LLM)
+            question_words: RegexSet::new([
+                r"(?i)^(how|what|why|when|where|who|which)\s",
+                r"(?i)^(can you|could you|would you|will you)\s",
+                r"(?i)^(please|help|show me|explain)\s",
+            ])
+            .expect("Failed to compile question_words patterns"),
+
+            // English articles only (indicates natural language structure)
+            articles: RegexSet::new([r"\s(a|an|the)\s", r"^(a|an|the)\s"])
+                .expect("Failed to compile articles patterns"),
+        }
+    }
+
     /// Get the global instance of precompiled patterns
     ///
     /// # Example
@@ -124,6 +179,12 @@ impl CompiledPatterns {
     #[inline]
     pub fn has_articles(&self, input: &str) -> bool {
         self.articles.is_match(input)
+    }
+}
+
+impl Default for CompiledPatterns {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

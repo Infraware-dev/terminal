@@ -3,8 +3,59 @@
 /// This module implements a flexible chain of handlers that can classify
 /// user input as either commands or natural language queries.
 use anyhow::Result;
+use std::sync::{Arc, RwLock};
 
+use super::discovery::CommandCache;
+use super::patterns::CompiledPatterns;
 use super::InputType;
+
+/// Context shared across all handlers in the classification chain
+///
+/// Provides access to shared resources (command cache, compiled patterns)
+/// without relying on global state. This enables:
+/// - Testability (can create custom contexts for tests)
+/// - Thread safety (Arc for shared ownership, RwLock for concurrent access)
+/// - No global state (follows dependency injection principle)
+#[derive(Clone)]
+pub struct ClassifierContext {
+    /// Shared command cache for PATH lookups and aliases
+    pub cache: Arc<RwLock<CommandCache>>,
+    /// Precompiled regex patterns for classification
+    pub patterns: Arc<CompiledPatterns>,
+}
+
+impl ClassifierContext {
+    /// Create a new context with default cache and patterns
+    pub fn new() -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(CommandCache::new())),
+            patterns: Arc::new(CompiledPatterns::new()),
+        }
+    }
+
+    /// Create a context with custom cache and patterns (for testing)
+    pub fn with_cache_and_patterns(
+        cache: Arc<RwLock<CommandCache>>,
+        patterns: Arc<CompiledPatterns>,
+    ) -> Self {
+        Self { cache, patterns }
+    }
+}
+
+impl Default for ClassifierContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for ClassifierContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClassifierContext")
+            .field("cache", &"<Arc<RwLock<CommandCache>>>")
+            .field("patterns", &"<Arc<CompiledPatterns>>")
+            .finish()
+    }
+}
 
 /// Explicit ordering for handlers in the classification chain
 ///
@@ -83,13 +134,24 @@ impl HandlerPosition {
 /// Each handler in the chain can either:
 /// 1. Handle the input and return a classification
 /// 2. Pass it to the next handler in the chain
+///
+/// # Context
+/// Handlers receive a `ClassifierContext` providing access to:
+/// - `cache`: Command cache for PATH lookups and aliases
+/// - `patterns`: Precompiled regex patterns
+///
+/// This enables dependency injection and eliminates global state.
 pub trait InputHandler: Send + Sync {
-    /// Attempt to handle the input
+    /// Attempt to handle the input with access to shared context
     ///
-    /// Returns:
+    /// # Arguments
+    /// - `input`: The user input to classify
+    /// - `ctx`: Shared context with cache and patterns
+    ///
+    /// # Returns
     /// - `Some(InputType)` if this handler can classify the input
     /// - `None` if the input should be passed to the next handler
-    fn handle(&self, input: &str) -> Option<InputType>;
+    fn handle(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType>;
 }
 
 /// Chain of handlers for input classification
@@ -154,10 +216,15 @@ impl ClassifierChain {
 
     /// Process input through the chain of handlers
     ///
-    /// Returns the first successful classification, or None if no handler matches
-    pub fn process(&self, input: &str) -> Option<InputType> {
+    /// # Arguments
+    /// - `input`: The user input to classify
+    /// - `ctx`: Shared context with cache and patterns
+    ///
+    /// # Returns
+    /// The first successful classification, or None if no handler matches
+    pub fn process(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         for (_position, handler) in &self.handlers {
-            if let Some(result) = handler.handle(input) {
+            if let Some(result) = handler.handle(input, ctx) {
                 return Some(result);
             }
         }
@@ -182,7 +249,7 @@ impl EmptyInputHandler {
 }
 
 impl InputHandler for EmptyInputHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, _ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             Some(InputType::Empty)
@@ -217,7 +284,7 @@ impl ApplicationBuiltinHandler {
 }
 
 impl InputHandler for ApplicationBuiltinHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
 
         // Extract the command (first word)
@@ -233,8 +300,7 @@ impl InputHandler for ApplicationBuiltinHandler {
                 .collect();
 
             // Only preserve original_input if shell operators present (consistent with other handlers)
-            let patterns = crate::input::patterns::CompiledPatterns::get();
-            let original_input = if patterns.has_shell_operators(trimmed) {
+            let original_input = if ctx.patterns.has_shell_operators(trimmed) {
                 Some(trimmed.to_string())
             } else {
                 None
@@ -287,7 +353,7 @@ impl KnownCommandHandler {
     }
 
     /// Parse input as a command
-    fn parse_as_command(&self, input: &str) -> Result<InputType> {
+    fn parse_as_command(&self, input: &str, ctx: &ClassifierContext) -> Result<InputType> {
         let parts = shell_words::split(input)?;
 
         if parts.is_empty() {
@@ -295,8 +361,7 @@ impl KnownCommandHandler {
         }
 
         // Preserve original input if it contains shell operators
-        let patterns = crate::input::patterns::CompiledPatterns::get();
-        let original_input = if patterns.has_shell_operators(input) {
+        let original_input = if ctx.patterns.has_shell_operators(input) {
             Some(input.to_string())
         } else {
             None
@@ -311,7 +376,7 @@ impl KnownCommandHandler {
 }
 
 impl InputHandler for KnownCommandHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
 
         if !self.is_known_command(trimmed) {
@@ -321,12 +386,28 @@ impl InputHandler for KnownCommandHandler {
         // Command is in whitelist - verify it actually exists in PATH
         let first_word = trimmed.split_whitespace().next()?;
 
-        // Use CommandCache for fast existence check
-        if crate::input::discovery::CommandCache::is_available(first_word) {
-            self.parse_as_command(trimmed).ok()
-        } else {
-            // Command in whitelist but not installed - pass to next handler
-            None
+        // Fast path: check cache (read lock)
+        {
+            let cache = ctx.cache.read().ok()?;
+            if let Some(available) = cache.is_cached(first_word) {
+                return if available {
+                    drop(cache); // Release lock
+                    self.parse_as_command(trimmed, ctx).ok()
+                } else {
+                    None
+                };
+            }
+        }
+
+        // Slow path: not in cache, check and update (write lock)
+        {
+            let mut cache = ctx.cache.write().ok()?;
+            if cache.check_and_cache(first_word) {
+                drop(cache); // Release lock
+                self.parse_as_command(trimmed, ctx).ok()
+            } else {
+                None
+            }
         }
     }
 }
@@ -347,9 +428,7 @@ impl CommandSyntaxHandler {
     /// - Has shell operators (|, >, <, &&) → Command
     /// - Has paths (./, ../, /) or env vars ($VAR) → Command
     /// - Multi-word without above → Natural Language (defer to next handler)
-    fn looks_like_command(&self, input: &str) -> bool {
-        let patterns = crate::input::patterns::CompiledPatterns::get();
-
+    fn looks_like_command(&self, input: &str, patterns: &CompiledPatterns) -> bool {
         // Shell operators (|, >, <, &&, ||, ;) → definitely a command
         if patterns.has_shell_operators(input) {
             return true;
@@ -367,7 +446,7 @@ impl CommandSyntaxHandler {
     }
 
     /// Parse input as a command
-    fn parse_as_command(&self, input: &str) -> Result<InputType> {
+    fn parse_as_command(&self, input: &str, ctx: &ClassifierContext) -> Result<InputType> {
         let parts = shell_words::split(input)?;
 
         if parts.is_empty() {
@@ -375,8 +454,7 @@ impl CommandSyntaxHandler {
         }
 
         // Preserve original input if it contains shell operators
-        let patterns = crate::input::patterns::CompiledPatterns::get();
-        let original_input = if patterns.has_shell_operators(input) {
+        let original_input = if ctx.patterns.has_shell_operators(input) {
             Some(input.to_string())
         } else {
             None
@@ -391,10 +469,10 @@ impl CommandSyntaxHandler {
 }
 
 impl InputHandler for CommandSyntaxHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
-        if self.looks_like_command(trimmed) {
-            self.parse_as_command(trimmed).ok()
+        if self.looks_like_command(trimmed, &ctx.patterns) {
+            self.parse_as_command(trimmed, ctx).ok()
         } else {
             None
         }
@@ -423,9 +501,8 @@ impl NaturalLanguageHandler {
     /// - Non-ASCII characters (accents, unicode, non-Latin scripts)
     /// - Structural patterns (word count, spacing, capitalization)
     /// - Statistical analysis (word/symbol ratios)
-    fn is_likely_natural_language(&self, input: &str) -> bool {
-        // Get precompiled patterns
-        let patterns = crate::input::patterns::CompiledPatterns::get();
+    fn is_likely_natural_language(&self, input: &str, ctx: &ClassifierContext) -> bool {
+        let patterns = &ctx.patterns;
 
         // 1. Universal punctuation patterns (question/exclamation marks, sentence boundaries)
         if patterns.has_natural_language_indicators(input) {
@@ -491,7 +568,11 @@ impl NaturalLanguageHandler {
             // Additional check: no known command at start
             // Use CommandCache for consistency with KnownCommandHandler (DRY principle)
             let first_word = words.first().map(|w| w.to_lowercase()).unwrap_or_default();
-            if !crate::input::discovery::CommandCache::is_available(&first_word) {
+            let cache = ctx.cache.read().ok();
+            let is_command = cache
+                .and_then(|c| c.is_cached(&first_word))
+                .unwrap_or(false);
+            if !is_command {
                 return true;
             }
         }
@@ -508,9 +589,9 @@ impl NaturalLanguageHandler {
 }
 
 impl InputHandler for NaturalLanguageHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
-        if self.is_likely_natural_language(trimmed) {
+        if self.is_likely_natural_language(trimmed, ctx) {
             Some(InputType::NaturalLanguage(trimmed.to_string()))
         } else {
             None
@@ -543,7 +624,7 @@ impl PathDiscoveryHandler {
     }
 
     /// Parse input as a command
-    fn parse_as_command(&self, input: &str) -> Option<InputType> {
+    fn parse_as_command(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         let parts = shell_words::split(input).ok()?;
 
         if parts.is_empty() {
@@ -551,8 +632,7 @@ impl PathDiscoveryHandler {
         }
 
         // Preserve original input if it contains shell operators
-        let patterns = crate::input::patterns::CompiledPatterns::get();
-        let original_input = if patterns.has_shell_operators(input) {
+        let original_input = if ctx.patterns.has_shell_operators(input) {
             Some(input.to_string())
         } else {
             None
@@ -567,7 +647,7 @@ impl PathDiscoveryHandler {
 }
 
 impl InputHandler for PathDiscoveryHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
 
         // Get first word (the command)
@@ -578,15 +658,29 @@ impl InputHandler for PathDiscoveryHandler {
             return None;
         }
 
-        // Check if command exists in PATH using CommandCache
-        // This uses `which` internally and caches the result
-        // We check PATH first because commands like "gh auth login" are valid
-        // even without flags - the subcommands (auth, login) are arguments
-        if crate::input::discovery::CommandCache::is_available(first_word) {
-            return self.parse_as_command(trimmed);
+        // Fast path: check cache (read lock)
+        {
+            let cache = ctx.cache.read().ok()?;
+            if let Some(available) = cache.is_cached(first_word) {
+                return if available {
+                    drop(cache);
+                    self.parse_as_command(trimmed, ctx)
+                } else {
+                    None
+                };
+            }
         }
 
-        None
+        // Slow path: not in cache, check and update (write lock)
+        {
+            let mut cache = ctx.cache.write().ok()?;
+            if cache.check_and_cache(first_word) {
+                drop(cache);
+                self.parse_as_command(trimmed, ctx)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -648,7 +742,7 @@ impl PathCommandHandler {
     }
 
     /// Parse input as a command
-    fn parse_as_command(&self, input: &str) -> anyhow::Result<InputType> {
+    fn parse_as_command(&self, input: &str, ctx: &ClassifierContext) -> anyhow::Result<InputType> {
         let parts = shell_words::split(input)?;
 
         if parts.is_empty() {
@@ -656,8 +750,7 @@ impl PathCommandHandler {
         }
 
         // Preserve original input if it contains shell operators
-        let patterns = crate::input::patterns::CompiledPatterns::get();
-        let original_input = if patterns.has_shell_operators(input) {
+        let original_input = if ctx.patterns.has_shell_operators(input) {
             Some(input.to_string())
         } else {
             None
@@ -672,7 +765,7 @@ impl PathCommandHandler {
 }
 
 impl InputHandler for PathCommandHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
 
         if !self.is_path(trimmed) {
@@ -684,7 +777,7 @@ impl InputHandler for PathCommandHandler {
 
         // Check if it's executable
         if self.is_executable(first_token) {
-            self.parse_as_command(trimmed).ok()
+            self.parse_as_command(trimmed, ctx).ok()
         } else {
             // Path exists but not executable, or doesn't exist
             // Pass to next handler
@@ -713,7 +806,7 @@ impl DefaultHandler {
 }
 
 impl InputHandler for DefaultHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, _ctx: &ClassifierContext) -> Option<InputType> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             Some(InputType::Empty)
@@ -734,22 +827,28 @@ mod tests {
     use super::*;
     use crate::input::history_expansion::HistoryExpansionHandler;
 
+    fn create_context() -> ClassifierContext {
+        ClassifierContext::new()
+    }
+
     #[test]
     fn test_empty_input_handler() {
         let handler = EmptyInputHandler::new();
+        let ctx = create_context();
 
-        assert_eq!(handler.handle(""), Some(InputType::Empty));
-        assert_eq!(handler.handle("   "), Some(InputType::Empty));
-        assert_eq!(handler.handle("test"), None);
+        assert_eq!(handler.handle("", &ctx), Some(InputType::Empty));
+        assert_eq!(handler.handle("   ", &ctx), Some(InputType::Empty));
+        assert_eq!(handler.handle("test", &ctx), None);
     }
 
     #[test]
     fn test_application_builtin_handler() {
         let handler = ApplicationBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test clear command
         assert!(matches!(
-            handler.handle("clear"),
+            handler.handle("clear", &ctx),
             Some(InputType::Command {
                 command,
                 args,
@@ -759,7 +858,7 @@ mod tests {
 
         // Test reload-aliases command
         assert!(matches!(
-            handler.handle("reload-aliases"),
+            handler.handle("reload-aliases", &ctx),
             Some(InputType::Command {
                 command,
                 args,
@@ -769,7 +868,7 @@ mod tests {
 
         // Test reload-commands command
         assert!(matches!(
-            handler.handle("reload-commands"),
+            handler.handle("reload-commands", &ctx),
             Some(InputType::Command {
                 command,
                 args,
@@ -779,7 +878,7 @@ mod tests {
 
         // Test application builtin with arguments (should still work)
         assert!(matches!(
-            handler.handle("clear --extra-arg"),
+            handler.handle("clear --extra-arg", &ctx),
             Some(InputType::Command {
                 command,
                 args,
@@ -788,17 +887,18 @@ mod tests {
         ));
 
         // Test non-builtin commands should pass through
-        assert_eq!(handler.handle("docker ps"), None);
-        assert_eq!(handler.handle("ls -la"), None);
-        assert_eq!(handler.handle("how do I clear the screen"), None);
+        assert_eq!(handler.handle("docker ps", &ctx), None);
+        assert_eq!(handler.handle("ls -la", &ctx), None);
+        assert_eq!(handler.handle("how do I clear the screen", &ctx), None);
     }
 
     #[test]
     fn test_application_builtin_original_input() {
         let handler = ApplicationBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test without shell operators → original_input should be None
-        match handler.handle("clear") {
+        match handler.handle("clear", &ctx) {
             Some(InputType::Command {
                 command,
                 original_input,
@@ -814,7 +914,7 @@ mod tests {
         }
 
         // Test with pipe operator → original_input should be Some
-        match handler.handle("clear | grep foo") {
+        match handler.handle("clear | grep foo", &ctx) {
             Some(InputType::Command {
                 command,
                 original_input,
@@ -831,7 +931,7 @@ mod tests {
         }
 
         // Test with redirect → original_input should be Some
-        match handler.handle("reload-aliases > output.txt") {
+        match handler.handle("reload-aliases > output.txt", &ctx) {
             Some(InputType::Command { original_input, .. }) => {
                 assert!(original_input.is_some());
             }
@@ -842,19 +942,20 @@ mod tests {
     #[test]
     fn test_known_command_handler() {
         let handler = KnownCommandHandler::with_defaults();
+        let ctx = create_context();
 
         // Test behavior based on what's actually installed
         // The handler correctly returns None if command is in whitelist but not in PATH
 
         // Test 1: Unknown commands should always pass through
-        assert_eq!(handler.handle("unknown-command-xyz-123"), None);
-        assert_eq!(handler.handle("how do I list files"), None);
+        assert_eq!(handler.handle("unknown-command-xyz-123", &ctx), None);
+        assert_eq!(handler.handle("how do I list files", &ctx), None);
 
         // Test 2: Test with a command that should be universally available
         // If 'ls' exists in PATH (common on Unix), it should be recognized
         if crate::input::discovery::CommandCache::is_available("ls") {
             assert!(matches!(
-                handler.handle("ls -la"),
+                handler.handle("ls -la", &ctx),
                 Some(InputType::Command { .. })
             ));
         }
@@ -864,94 +965,103 @@ mod tests {
         if crate::input::discovery::CommandCache::is_available("docker") {
             // If docker IS installed, handler should recognize it
             assert!(matches!(
-                handler.handle("docker ps"),
+                handler.handle("docker ps", &ctx),
                 Some(InputType::Command { .. })
             ));
         } else {
             // If docker not installed, handler should return None (correct)
-            assert_eq!(handler.handle("docker ps"), None);
+            assert_eq!(handler.handle("docker ps", &ctx), None);
         }
     }
 
     #[test]
     fn test_command_syntax_handler() {
         let handler = CommandSyntaxHandler::new();
+        let ctx = create_context();
 
         // Commands with flags
         assert!(matches!(
-            handler.handle("unknown-cmd --flag"),
+            handler.handle("unknown-cmd --flag", &ctx),
             Some(InputType::Command { .. })
         ));
 
         // Commands with pipes
         assert!(matches!(
-            handler.handle("cat file.txt | grep pattern"),
+            handler.handle("cat file.txt | grep pattern", &ctx),
             Some(InputType::Command { .. })
         ));
 
         // Paths
         assert!(matches!(
-            handler.handle("./deploy.sh"),
+            handler.handle("./deploy.sh", &ctx),
             Some(InputType::Command { .. })
         ));
 
         // Natural language should pass through
-        assert_eq!(handler.handle("how do I list files"), None);
+        assert_eq!(handler.handle("how do I list files", &ctx), None);
     }
 
     #[test]
     fn test_natural_language_handler() {
         let handler = NaturalLanguageHandler::new();
+        let ctx = create_context();
 
         // Questions
         assert!(matches!(
-            handler.handle("how do I list files?"),
+            handler.handle("how do I list files?", &ctx),
             Some(InputType::NaturalLanguage(_))
         ));
 
         // Long phrases
         assert!(matches!(
-            handler.handle("show me the docker containers"),
+            handler.handle("show me the docker containers", &ctx),
             Some(InputType::NaturalLanguage(_))
         ));
 
         // Polite expressions
         assert!(matches!(
-            handler.handle("please help me"),
+            handler.handle("please help me", &ctx),
             Some(InputType::NaturalLanguage(_))
         ));
 
         // Commands should pass through
-        assert_eq!(handler.handle("ls"), None);
+        assert_eq!(handler.handle("ls", &ctx), None);
     }
 
     #[test]
     fn test_natural_language_contractions_edge_cases() {
         let handler = NaturalLanguageHandler::new();
+        let ctx = create_context();
 
         // Test contractions at end of sentence (no trailing space)
         assert!(
-            matches!(handler.handle("don't"), Some(InputType::NaturalLanguage(_))),
+            matches!(
+                handler.handle("don't", &ctx),
+                Some(InputType::NaturalLanguage(_))
+            ),
             "Should detect contraction 'don't' at end of input"
         );
 
         assert!(
             matches!(
-                handler.handle("I can't"),
+                handler.handle("I can't", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect contraction 'can't' at end of input"
         );
 
         assert!(
-            matches!(handler.handle("I'm"), Some(InputType::NaturalLanguage(_))),
+            matches!(
+                handler.handle("I'm", &ctx),
+                Some(InputType::NaturalLanguage(_))
+            ),
             "Should detect contraction 'I'm' at end of input"
         );
 
         // Test contractions before punctuation
         assert!(
             matches!(
-                handler.handle("can't."),
+                handler.handle("can't.", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect contraction before period"
@@ -959,7 +1069,7 @@ mod tests {
 
         assert!(
             matches!(
-                handler.handle("don't!"),
+                handler.handle("don't!", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect contraction before exclamation"
@@ -967,7 +1077,7 @@ mod tests {
 
         assert!(
             matches!(
-                handler.handle("won't?"),
+                handler.handle("won't?", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect contraction before question mark"
@@ -976,7 +1086,7 @@ mod tests {
         // Test contractions in middle of sentence (original behavior still works)
         assert!(
             matches!(
-                handler.handle("don't know"),
+                handler.handle("don't know", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect contraction in middle of sentence"
@@ -984,7 +1094,7 @@ mod tests {
 
         assert!(
             matches!(
-                handler.handle("you're right"),
+                handler.handle("you're right", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect contraction 'you're' in middle"
@@ -993,7 +1103,7 @@ mod tests {
         // Test multiple contractions
         assert!(
             matches!(
-                handler.handle("I don't think you're right"),
+                handler.handle("I don't think you're right", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect multiple contractions"
@@ -1003,12 +1113,13 @@ mod tests {
     #[test]
     fn test_natural_language_medium_phrases() {
         let handler = NaturalLanguageHandler::new();
+        let ctx = create_context();
 
         // Test 3-5 word phrase with no known command at start → should be NL
         // "show" is not a known system command
         assert!(
             matches!(
-                handler.handle("show container status now"),
+                handler.handle("show container status now", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect 4-word phrase with unknown command as NL"
@@ -1017,7 +1128,7 @@ mod tests {
         // Test 3-word phrase with unknown verb
         assert!(
             matches!(
-                handler.handle("explain this thing"),
+                handler.handle("explain this thing", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect 3-word phrase with unknown command as NL"
@@ -1030,7 +1141,7 @@ mod tests {
         // Test edge case: less than 3 words should not trigger medium-phrase heuristic
         // (though it might be caught by other NL indicators)
         // Use a phrase that's clearly 2 words and not in regex patterns
-        let result = handler.handle("check now");
+        let result = handler.handle("check now", &ctx);
         // "check now" is 2 words, no clear NL indicators, should pass through
         assert_eq!(
             result, None,
@@ -1040,7 +1151,7 @@ mod tests {
         // Test edge case: more than 5 words falls back to word count > 5 heuristic
         assert!(
             matches!(
-                handler.handle("please show me all the logs now"),
+                handler.handle("please show me all the logs now", &ctx),
                 Some(InputType::NaturalLanguage(_))
             ),
             "6+ word phrase should be caught by word count heuristic"
@@ -1055,31 +1166,32 @@ mod tests {
             .add_handler_for_test(Box::new(CommandSyntaxHandler::new()))
             .add_handler_for_test(Box::new(NaturalLanguageHandler::new()))
             .add_handler_for_test(Box::new(DefaultHandler::new()));
+        let ctx = create_context();
 
         // Empty input
-        assert_eq!(chain.process(""), Some(InputType::Empty));
+        assert_eq!(chain.process("", &ctx), Some(InputType::Empty));
 
         // Known command
         assert!(matches!(
-            chain.process("ls -la"),
+            chain.process("ls -la", &ctx),
             Some(InputType::Command { .. })
         ));
 
         // Command syntax
         assert!(matches!(
-            chain.process("unknown --flag"),
+            chain.process("unknown --flag", &ctx),
             Some(InputType::Command { .. })
         ));
 
         // Natural language
         assert!(matches!(
-            chain.process("how do I list files?"),
+            chain.process("how do I list files?", &ctx),
             Some(InputType::NaturalLanguage(_))
         ));
 
         // Default (ambiguous input)
         assert!(matches!(
-            chain.process("something ambiguous"),
+            chain.process("something ambiguous", &ctx),
             Some(InputType::NaturalLanguage(_))
         ));
     }
@@ -1090,13 +1202,14 @@ mod tests {
         let chain = ClassifierChain::new()
             .add_handler_for_test(Box::new(EmptyInputHandler::new()))
             .add_handler_for_test(Box::new(KnownCommandHandler::with_defaults()));
+        let ctx = create_context();
 
-        assert_eq!(chain.process(""), Some(InputType::Empty));
+        assert_eq!(chain.process("", &ctx), Some(InputType::Empty));
 
         // Without empty handler first, default would catch it
         let chain2 = ClassifierChain::new().add_handler_for_test(Box::new(DefaultHandler::new()));
 
-        assert!(matches!(chain2.process(""), Some(InputType::Empty)));
+        assert!(matches!(chain2.process("", &ctx), Some(InputType::Empty)));
     }
 
     #[test]
@@ -1112,9 +1225,10 @@ mod tests {
                 HandlerPosition::ApplicationBuiltin,
                 Box::new(ApplicationBuiltinHandler::new()),
             );
+        let ctx = create_context();
 
         // Verify chain processes empty input correctly
-        assert_eq!(chain.process(""), Some(InputType::Empty));
+        assert_eq!(chain.process("", &ctx), Some(InputType::Empty));
     }
 
     #[test]
@@ -1132,6 +1246,7 @@ mod tests {
     #[test]
     fn test_path_command_handler() {
         let handler = PathCommandHandler::new();
+        let _ctx = create_context();
 
         // Relative paths should be detected
         assert!(handler.is_path("./script.sh"));
@@ -1152,6 +1267,7 @@ mod tests {
     #[cfg(unix)]
     fn test_path_executable_check_unix() {
         let handler = PathCommandHandler::new();
+        let _ctx = create_context();
 
         // Common executables that should exist on Unix systems
         assert!(handler.is_executable("/bin/sh") || handler.is_executable("/bin/bash"));
@@ -1167,6 +1283,7 @@ mod tests {
     #[cfg(windows)]
     fn test_path_executable_check_windows() {
         let handler = PathCommandHandler::new();
+        let ctx = create_context();
 
         // Windows executables by extension
         assert!(handler.is_executable("./script.bat"));
