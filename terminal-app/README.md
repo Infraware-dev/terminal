@@ -179,7 +179,29 @@ cargo test
 
 # Run the application
 cargo run
+
+# Run with debug logging
+LOG_LEVEL=debug cargo run
+
+# Run with trace logging (very verbose)
+LOG_LEVEL=trace cargo run
 ```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOG_LEVEL` | Log level: trace, debug, info, warn, error | `info` |
+| `LOG_MAX_SIZE_MB` | Max log file size before rotation | `10` |
+| `LOG_MAX_FILES` | Number of rotated log files to keep | `5` |
+| `LOG_PATH` | Custom log directory path | Platform-specific |
+| `INFRAWARE_BACKEND_URL` | Backend API endpoint | - |
+| `BACKEND_API_KEY` | API key for LLM backend | - |
+
+Log files are stored in:
+- **Linux**: `~/.local/share/infraware-terminal/logs/`
+- **macOS**: `~/Library/Logs/infraware-terminal/`
+- **Windows**: `%APPDATA%\infraware-terminal\logs\`
 
 ### Usage
 

@@ -26,7 +26,7 @@ cargo build --release                # Release build
 cargo run                            # Run application
 
 # Testing
-cargo test                           # All tests (~645 tests across unit/integration/doc)
+cargo test                           # All tests (~440 tests across unit/integration/doc)
 cargo test --test classifier_tests   # SCAN algorithm tests (tests/classifier_tests.rs)
 cargo test --test executor_tests     # Executor tests (tests/executor_tests.rs)
 cargo test --test integration_tests  # Integration tests (tests/integration_tests.rs)
@@ -130,9 +130,12 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 ### Built-in Commands
 
 Application-specific commands recognized by `ApplicationBuiltinHandler` (position 3 in SCAN chain):
+- `cd` - Change working directory (handled by parent process to affect shell state)
 - `clear` - Clear terminal output buffer
+- `exit` - Exit the terminal application
 - `reload-aliases` - Reload aliases from system/user config files
 - `reload-commands` - Clear command cache (use after installing new commands)
+- `auth-status` - Check backend authentication status
 
 These commands are recognized early in the classification chain to prevent misclassification as natural language.
 
@@ -178,18 +181,43 @@ The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) int
 
 The application uses `log4rs` for structured logging with size-based rotation:
 
-- **Configuration**: Loaded from `.env` file via `dotenvy`
-- **Log File**: `infraware-terminal.log` with automatic rotation and gzip compression
+- **Configuration**: Environment variables (see below)
+- **Log File**: `infraware.log` with automatic rotation and gzip compression
+- **Timestamp Format**: ISO 8601 with milliseconds (e.g., `[2025-12-02T10:30:45.123]`)
 - **Usage**: Use `log::debug!()`, `log::info!()`, `log::warn!()`, `log::error!()`
 - **Initialization**: `logging::init()` called in `main.rs` before starting TUI
 - **Module**: `src/logging.rs`
+- **HTTP Logging**: All LLM HTTP operations log with structured prefixes:
+  - `[HTTP-OUT]` - Request initiated (includes URL)
+  - `[HTTP-IN]` - Response received (includes status code and elapsed time in ms)
+  - Example: `[HTTP-IN] POST /threads | status=200 OK | elapsed=333ms`
+- **SSE Logging**: Per-chunk logs use `debug` level to reduce I/O overhead
+
+**Running with debug logging**:
+```bash
+LOG_LEVEL=debug cargo run       # Debug level
+LOG_LEVEL=trace cargo run       # Trace level (very verbose)
+```
+
+**Environment variables**:
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LOG_LEVEL` | trace, debug, info, warn, error | `info` |
+| `LOG_MAX_SIZE_MB` | Max file size before rotation | `10` |
+| `LOG_MAX_FILES` | Rotated files to keep | `5` |
+| `LOG_PATH` | Custom log directory | Platform-specific |
+
+**Log file locations**:
+- Linux: `~/.local/share/infraware-terminal/logs/`
+- macOS: `~/Library/Logs/infraware-terminal/`
+- Windows: `%APPDATA%\infraware-terminal\logs\`
 
 ## Constraints
 
 ### CI/CD
 - `cargo fmt --all --check` must pass
 - `cargo clippy --all-targets --all-features -- -D warnings` must pass
-- 75% test coverage minimum (~645 tests across unit/integration/doc tests)
+- 75% test coverage minimum (~440 tests across unit/integration/doc tests)
 - Multi-platform: Ubuntu, Windows, macOS
 
 ### Git Commits
