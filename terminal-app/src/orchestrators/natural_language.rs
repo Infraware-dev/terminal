@@ -200,9 +200,7 @@ impl NaturalLanguageOrchestrator {
         }
 
         // If we're not in another waiting state, return to Normal
-        if state.mode != TerminalMode::AwaitingCommandApproval
-            && state.mode != TerminalMode::AwaitingAnswer
-        {
+        if !state.is_in_hitl_mode() {
             state.mode = TerminalMode::Normal;
         }
 
@@ -243,9 +241,7 @@ impl NaturalLanguageOrchestrator {
         }
 
         // If we're not in another waiting state, return to Normal
-        if state.mode != TerminalMode::AwaitingCommandApproval
-            && state.mode != TerminalMode::AwaitingAnswer
-        {
+        if !state.is_in_hitl_mode() {
             state.mode = TerminalMode::Normal;
         }
 

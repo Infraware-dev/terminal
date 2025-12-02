@@ -126,6 +126,16 @@ impl TerminalState {
     pub const fn scroll_down(&mut self) {
         self.output.scroll_down();
     }
+
+    /// Check if terminal is in a Human-in-the-Loop (HITL) waiting state
+    ///
+    /// Returns true if waiting for user approval (y/n) or answer (free text)
+    pub fn is_in_hitl_mode(&self) -> bool {
+        matches!(
+            self.mode,
+            TerminalMode::AwaitingCommandApproval | TerminalMode::AwaitingAnswer
+        )
+    }
 }
 
 impl Default for TerminalState {

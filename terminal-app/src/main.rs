@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 use auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use input::{InputClassifier, InputType};
 use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
-use orchestrators::{CommandOrchestrator, NaturalLanguageOrchestrator, TabCompletionHandler};
+use orchestrators::{
+    CommandOrchestrator, HitlOrchestrator, NaturalLanguageOrchestrator, TabCompletionHandler,
+};
 use std::sync::Arc;
 use terminal::events::TerminalEvent;
 use terminal::{EventHandler, SplashScreen, TerminalMode, TerminalState, TerminalUI};
@@ -507,10 +509,7 @@ impl InfrawareTerminal {
 
         // Handle human-in-the-loop command approval mode (y/n)
         if self.state.mode == TerminalMode::AwaitingCommandApproval {
-            let trimmed = input.trim().to_lowercase();
-            // Approve: "y", "yes", or empty (Enter = default approve, like Python backend)
-            // Reject: "n", "no", or any other input
-            let approved = trimmed.is_empty() || trimmed == "y" || trimmed == "yes";
+            let approved = HitlOrchestrator::parse_approval(&input);
             self.state.add_output(MessageFormatter::command(&input));
 
             // Delegate to orchestrator for approval handling
@@ -609,9 +608,7 @@ impl InfrawareTerminal {
 
         // Only reset to Normal if not in a HITL waiting state
         // (handle_query_result may have set AwaitingCommandApproval or AwaitingAnswer)
-        if self.state.mode != TerminalMode::AwaitingCommandApproval
-            && self.state.mode != TerminalMode::AwaitingAnswer
-        {
+        if !self.state.is_in_hitl_mode() {
             self.state.mode = TerminalMode::Normal;
         }
 
