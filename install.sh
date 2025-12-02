@@ -56,11 +56,35 @@ if command_exists pip3; then
     PIP_VERSION=$(pip3 --version | awk '{print $2}')
     echo -e "${GREEN}Found${NC} (version $PIP_VERSION)"
     echo "Upgrading pip..."
-    pip3 install --upgrade pip
+    pip3 install --upgrade pip --break-system-packages 2>/dev/null || pip3 install --upgrade pip
 else
     echo -e "${RED}Not found${NC}"
     echo "Installing pip..."
-    python3 -m ensurepip --upgrade
+
+    # Try ensurepip first
+    if python3 -m ensurepip --upgrade 2>/dev/null; then
+        echo "pip installed via ensurepip"
+    else
+        # Fall back to system package manager
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            if command_exists apt-get; then
+                sudo apt-get update
+                sudo apt-get install -y python3-pip
+            elif command_exists yum; then
+                sudo yum install -y python3-pip
+            elif command_exists dnf; then
+                sudo dnf install -y python3-pip
+            else
+                echo -e "${RED}Unable to install pip. Please install manually.${NC}"
+                exit 1
+            fi
+        elif [[ "$OSTYPE" == "darwin"* ]]; then
+            python3 -m ensurepip --upgrade
+        else
+            echo -e "${RED}Unable to install pip. Please install manually.${NC}"
+            exit 1
+        fi
+    fi
 fi
 
 # Check uv package manager
@@ -71,7 +95,7 @@ if command_exists uv; then
 else
     echo -e "${YELLOW}Not found${NC}"
     echo "Installing uv..."
-    pip3 install uv
+    pip3 install uv --break-system-packages 2>/dev/null || pip3 install uv
 fi
 
 # Check wget
@@ -154,6 +178,13 @@ fi
 # Sync dependencies with uv
 echo ""
 echo "Syncing project dependencies..."
+
+# Change to backend directory if it exists
+if [ -d "backend" ]; then
+    cd backend
+    echo "Changed to backend directory"
+fi
+
 if [ -f "pyproject.toml" ] && [ -f "uv.lock" ]; then
     uv sync
 else
