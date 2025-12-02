@@ -86,17 +86,28 @@ impl OutputBuffer {
         self.scroll_position
     }
 
-    /// Scroll up by one line
+    /// Scroll up by one line (moves view window up)
     pub const fn scroll_up(&mut self) {
         if self.scroll_position > 0 {
             self.scroll_position -= 1;
         }
     }
 
-    /// Scroll down by one line
-    pub const fn scroll_down(&mut self) {
-        if self.scroll_position < self.buffer.len().saturating_sub(1) {
+    /// Scroll down by one line (moves view window down)
+    pub fn scroll_down(&mut self, visible_lines: usize) {
+        let max_scroll = self.buffer.len().saturating_sub(visible_lines);
+        if self.scroll_position < max_scroll {
             self.scroll_position += 1;
+        }
+    }
+
+    /// Set the number of visible lines for scroll calculations
+    /// Call this when the terminal is resized
+    pub fn set_visible_lines(&mut self, visible_lines: usize) {
+        // Clamp scroll position to valid range
+        let max_scroll = self.buffer.len().saturating_sub(visible_lines);
+        if self.scroll_position > max_scroll {
+            self.scroll_position = max_scroll;
         }
     }
 
@@ -110,8 +121,11 @@ impl OutputBuffer {
     }
 
     /// Auto-scroll to the bottom of the buffer
-    const fn auto_scroll_to_bottom(&mut self) {
-        self.scroll_position = self.buffer.len().saturating_sub(1);
+    /// Sets scroll_position to show the last lines (maximum scroll value)
+    fn auto_scroll_to_bottom(&mut self) {
+        // Setting to buffer.len() ensures render_output() will show the last visible_lines
+        // The actual clamping happens in render_output() based on visible area
+        self.scroll_position = self.buffer.len();
     }
 
     /// Remove the last line from the buffer (used for removing temporary messages)
@@ -341,14 +355,26 @@ mod tests {
         buffer.add_line("line 2".to_string());
         buffer.add_line("line 3".to_string());
 
-        // Auto-scrolls to bottom
-        assert_eq!(buffer.scroll_position(), 2);
+        // Auto-scrolls to bottom (scroll_position = total lines)
+        assert_eq!(buffer.scroll_position(), 3);
 
         buffer.scroll_up();
-        assert_eq!(buffer.scroll_position(), 1);
-
-        buffer.scroll_down();
         assert_eq!(buffer.scroll_position(), 2);
+
+        // With 2 visible lines, max scroll is 3-2=1, but we're at 2
+        // scroll_down clamps to max_scroll
+        let visible_lines = 2;
+        buffer.scroll_down(visible_lines);
+        assert_eq!(buffer.scroll_position(), 2); // Already past max, stays at 2
+
+        // Scroll up more
+        buffer.scroll_up();
+        buffer.scroll_up();
+        assert_eq!(buffer.scroll_position(), 0);
+
+        // Now scroll down works
+        buffer.scroll_down(visible_lines);
+        assert_eq!(buffer.scroll_position(), 1);
     }
 
     #[test]
@@ -454,16 +480,19 @@ mod tests {
         buffer.add_line("line 2".to_string());
         buffer.add_line("line 3".to_string());
 
+        // After 3 adds, scroll_position is at bottom (3)
+        assert_eq!(buffer.scroll_position(), 3);
+
         // Scroll up from bottom
         buffer.scroll_up();
-        assert_eq!(buffer.scroll_position(), 1);
+        assert_eq!(buffer.scroll_position(), 2);
 
         // Pop last line
         let popped = buffer.pop();
         assert_eq!(popped, Some("line 3".to_string()));
         assert_eq!(buffer.lines().len(), 2);
 
-        // Scroll should still be valid
+        // Scroll position should be clamped to valid range
         assert!(buffer.scroll_position() <= buffer.lines().len());
     }
 

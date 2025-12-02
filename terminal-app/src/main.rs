@@ -349,7 +349,7 @@ impl InfrawareTerminal {
         self.state.add_output(String::new());
 
         // Initial render
-        self.ui.render(&self.state)?;
+        self.ui.render(&mut self.state)?;
 
         // Create channel for events from background polling task
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(32);
@@ -423,7 +423,7 @@ impl InfrawareTerminal {
             }
 
             // Re-render after handling event
-            self.ui.render(&self.state)?;
+            self.ui.render(&mut self.state)?;
         }
 
         // Clean up polling task

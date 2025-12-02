@@ -54,9 +54,13 @@ impl EventHandler {
             // Backspace - Delete character
             (KeyCode::Backspace, _) => TerminalEvent::DeleteChar,
 
-            // Arrow keys
-            (KeyCode::Up, _) => TerminalEvent::HistoryPrevious,
-            (KeyCode::Down, _) => TerminalEvent::HistoryNext,
+            // Ctrl+Arrow - Scroll output (alternative to PageUp/PageDown for laptops)
+            (KeyCode::Up, KeyModifiers::CONTROL) => TerminalEvent::ScrollUp,
+            (KeyCode::Down, KeyModifiers::CONTROL) => TerminalEvent::ScrollDown,
+
+            // Arrow keys (without modifiers) - History and cursor navigation
+            (KeyCode::Up, KeyModifiers::NONE) => TerminalEvent::HistoryPrevious,
+            (KeyCode::Down, KeyModifiers::NONE) => TerminalEvent::HistoryNext,
             (KeyCode::Left, _) => TerminalEvent::MoveCursorLeft,
             (KeyCode::Right, _) => TerminalEvent::MoveCursorRight,
 
@@ -225,6 +229,22 @@ mod tests {
     fn test_page_down() {
         let handler = EventHandler::new();
         let event = create_key_event(KeyCode::PageDown, KeyModifiers::NONE);
+        let result = handler.map_key_event(event);
+        assert!(matches!(result, TerminalEvent::ScrollDown));
+    }
+
+    #[test]
+    fn test_ctrl_arrow_up_scroll() {
+        let handler = EventHandler::new();
+        let event = create_key_event(KeyCode::Up, KeyModifiers::CONTROL);
+        let result = handler.map_key_event(event);
+        assert!(matches!(result, TerminalEvent::ScrollUp));
+    }
+
+    #[test]
+    fn test_ctrl_arrow_down_scroll() {
+        let handler = EventHandler::new();
+        let event = create_key_event(KeyCode::Down, KeyModifiers::CONTROL);
         let result = handler.map_key_event(event);
         assert!(matches!(result, TerminalEvent::ScrollDown));
     }

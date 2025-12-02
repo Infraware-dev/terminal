@@ -6,10 +6,10 @@ use crossterm::{
 /// TUI rendering logic using ratatui
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
 use std::io;
@@ -42,7 +42,17 @@ impl TerminalUI {
     }
 
     /// Render the terminal UI
-    pub fn render(&mut self, state: &TerminalState) -> Result<()> {
+    /// Updates state.visible_lines based on actual terminal size
+    pub fn render(&mut self, state: &mut TerminalState) -> Result<()> {
+        // Calculate visible lines from terminal size before rendering
+        let size = self.terminal.size()?;
+        // Layout: output (Min(1)), status (1), input (3)
+        // Output area height = total - status(1) - input(3)
+        // Visible lines = output area - 2 (for borders)
+        let output_height = size.height.saturating_sub(4);
+        let visible_lines = output_height.saturating_sub(2) as usize;
+        state.set_visible_lines(visible_lines);
+
         self.terminal.draw(|frame| {
             render_frame(frame, state);
         })?;
@@ -139,19 +149,30 @@ fn render_frame(frame: &mut Frame, state: &TerminalState) {
     render_input(frame, chunks[2], state);
 }
 
-/// Render the output buffer
+/// Render the output buffer with scrollbar
 fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
-    let output_text = if state.output.lines().is_empty() {
+    let total_lines = state.output.lines().len();
+    let visible_lines = area.height.saturating_sub(2) as usize; // -2 for borders
+
+    let output_text = if total_lines == 0 {
         vec![Line::from(Span::styled(
             "Infraware Terminal - Type a command or ask a question",
             Style::default().fg(Color::Gray),
         ))]
     } else {
-        // Show the last N lines that fit in the area
-        let visible_lines = area.height.saturating_sub(2) as usize; // -2 for borders
-        let start = state.output.lines().len().saturating_sub(visible_lines);
+        // Calculate visible window based on scroll position
+        // scroll_position represents the first line to show (0 = top, max = bottom)
+        let scroll_pos = state.output.scroll_position();
 
-        state.output.lines()[start..]
+        // Clamp scroll position to valid range
+        let max_scroll = total_lines.saturating_sub(visible_lines);
+        let effective_scroll = scroll_pos.min(max_scroll);
+
+        // Calculate start and end indices
+        let start = effective_scroll;
+        let end = (start + visible_lines).min(total_lines);
+
+        state.output.lines()[start..end]
             .iter()
             .map(|line| {
                 // Parse ANSI codes and convert to ratatui spans with proper styling
@@ -178,6 +199,28 @@ fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(output_widget, area);
+
+    // Render scrollbar only if content exceeds visible area
+    if total_lines > visible_lines {
+        let scroll_pos = state.output.scroll_position();
+        let max_scroll = total_lines.saturating_sub(visible_lines);
+        let effective_scroll = scroll_pos.min(max_scroll);
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(effective_scroll);
+
+        // Render scrollbar in the inner area (inside the border)
+        let inner_area = area.inner(Margin {
+            horizontal: 0,
+            vertical: 1,
+        });
+        frame.render_stateful_widget(scrollbar, inner_area, &mut scrollbar_state);
+    }
 }
 
 /// Render the status bar
