@@ -16,6 +16,14 @@ use std::io;
 
 use super::state::{TerminalMode, TerminalState};
 
+// Layout constants for terminal areas
+/// Height of the status bar (1 line)
+const STATUS_BAR_HEIGHT: u16 = 1;
+/// Height of the input area (3 lines including borders)
+const INPUT_AREA_HEIGHT: u16 = 3;
+/// Height of output area borders (top + bottom)
+const OUTPUT_BORDER_HEIGHT: u16 = 2;
+
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -46,11 +54,13 @@ impl TerminalUI {
     pub fn render(&mut self, state: &mut TerminalState) -> Result<()> {
         // Calculate visible lines from terminal size before rendering
         let size = self.terminal.size()?;
-        // Layout: output (Min(1)), status (1), input (3)
-        // Output area height = total - status(1) - input(3)
-        // Visible lines = output area - 2 (for borders)
-        let output_height = size.height.saturating_sub(4);
-        let visible_lines = output_height.saturating_sub(2) as usize;
+
+        // Output area height = total - status bar - input area
+        let output_height = size
+            .height
+            .saturating_sub(STATUS_BAR_HEIGHT + INPUT_AREA_HEIGHT);
+        // Visible content lines = output area minus borders
+        let visible_lines = output_height.saturating_sub(OUTPUT_BORDER_HEIGHT) as usize;
         state.set_visible_lines(visible_lines);
 
         self.terminal.draw(|frame| {
@@ -152,7 +162,13 @@ fn render_frame(frame: &mut Frame, state: &TerminalState) {
 /// Render the output buffer with scrollbar
 fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
     let total_lines = state.output.lines().len();
-    let visible_lines = area.height.saturating_sub(2) as usize; // -2 for borders
+    // Use pre-calculated visible_lines from state (set in render())
+    let visible_lines = state.visible_lines();
+
+    // Calculate scroll position once for both content and scrollbar
+    let scroll_pos = state.output.scroll_position();
+    let max_scroll = total_lines.saturating_sub(visible_lines);
+    let effective_scroll = scroll_pos.min(max_scroll);
 
     let output_text = if total_lines == 0 {
         vec![Line::from(Span::styled(
@@ -160,15 +176,7 @@ fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
             Style::default().fg(Color::Gray),
         ))]
     } else {
-        // Calculate visible window based on scroll position
-        // scroll_position represents the first line to show (0 = top, max = bottom)
-        let scroll_pos = state.output.scroll_position();
-
-        // Clamp scroll position to valid range
-        let max_scroll = total_lines.saturating_sub(visible_lines);
-        let effective_scroll = scroll_pos.min(max_scroll);
-
-        // Calculate start and end indices
+        // Calculate start and end indices for visible window
         let start = effective_scroll;
         let end = (start + visible_lines).min(total_lines);
 
@@ -202,10 +210,6 @@ fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
 
     // Render scrollbar only if content exceeds visible area
     if total_lines > visible_lines {
-        let scroll_pos = state.output.scroll_position();
-        let max_scroll = total_lines.saturating_sub(visible_lines);
-        let effective_scroll = scroll_pos.min(max_scroll);
-
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"))

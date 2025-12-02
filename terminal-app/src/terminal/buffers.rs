@@ -87,7 +87,7 @@ impl OutputBuffer {
     }
 
     /// Scroll up by one line (moves view window up)
-    pub const fn scroll_up(&mut self) {
+    pub fn scroll_up(&mut self) {
         if self.scroll_position > 0 {
             self.scroll_position -= 1;
         }
@@ -215,7 +215,7 @@ impl InputBuffer {
     }
 
     /// Move cursor left
-    pub const fn move_cursor_left(&mut self) {
+    pub fn move_cursor_left(&mut self) {
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
         }
@@ -317,7 +317,7 @@ impl CommandHistory {
     }
 
     /// Reset the history navigation position
-    pub const fn reset_position(&mut self) {
+    pub fn reset_position(&mut self) {
         self.position = None;
     }
 

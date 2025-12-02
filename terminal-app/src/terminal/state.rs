@@ -106,7 +106,7 @@ impl TerminalState {
     }
 
     /// Move cursor left
-    pub const fn move_cursor_left(&mut self) {
+    pub fn move_cursor_left(&mut self) {
         self.input.move_cursor_left();
     }
 
@@ -131,7 +131,7 @@ impl TerminalState {
     }
 
     /// Scroll output up
-    pub const fn scroll_up(&mut self) {
+    pub fn scroll_up(&mut self) {
         self.output.scroll_up();
     }
 
