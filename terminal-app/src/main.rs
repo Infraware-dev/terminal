@@ -482,6 +482,14 @@ impl InfrawareTerminal {
                 log::info!("Ctrl+C: Clearing input (mode={:?})", self.state.mode);
                 self.state.clear_input();
 
+                // Cancel multiline input if in multiline mode
+                if self.state.is_in_multiline_mode() {
+                    log::info!("Ctrl+C: Cancelling multiline input");
+                    self.state.cancel_multiline();
+                    self.state
+                        .add_output(MessageFormatter::info("Multiline input cancelled"));
+                }
+
                 // Reset token only if:
                 // 1. Token was cancelled (by poller)
                 // 2. We're NOT in WaitingLLM mode (avoid race with async operation checking token)
@@ -505,6 +513,8 @@ impl InfrawareTerminal {
     /// Handle input submission
     /// Returns false if the terminal should exit
     async fn handle_submit(&mut self) -> Result<bool> {
+        use crate::input::multiline::{is_incomplete, is_multiline_complete, join_lines};
+
         let input = self.state.submit_input();
 
         // Handle human-in-the-loop command approval mode (y/n)
@@ -532,6 +542,52 @@ impl InfrawareTerminal {
             return Ok(true);
         }
 
+        // Handle multiline input mode
+        if self.state.is_in_multiline_mode() {
+            // Add current line to multiline buffer
+            self.state.multiline_buffer.push(input.clone());
+
+            // Check if we're now complete
+            if let Some(reason) = is_multiline_complete(&self.state.multiline_buffer) {
+                // Still incomplete, update the reason and wait for more input
+                self.state.mode = TerminalMode::AwaitingMoreInput(reason);
+                return Ok(true);
+            }
+
+            // Complete! Join lines and process as single input
+            let full_input = join_lines(&self.state.multiline_buffer);
+            self.state.multiline_buffer.clear();
+            self.state.pending_heredoc = None;
+            self.state.mode = TerminalMode::Normal;
+
+            // Process the full multiline input (recursive call with joined input)
+            return self.handle_submit_with_input(full_input).await;
+        }
+
+        // Check if this single line is incomplete (needs more input)
+        if let Some(reason) = is_incomplete(&input, self.state.pending_heredoc.as_deref()) {
+            // Track heredoc delimiter if starting one
+            if let crate::input::IncompleteReason::HeredocPending { ref delimiter } = reason {
+                self.state.pending_heredoc = Some(delimiter.clone());
+            }
+
+            // Start multiline mode
+            self.state.multiline_buffer.push(input);
+            self.state.mode = TerminalMode::AwaitingMoreInput(reason);
+            return Ok(true);
+        }
+
+        if input.trim().is_empty() {
+            return Ok(true);
+        }
+
+        // Process complete single-line input
+        self.handle_submit_with_input(input).await
+    }
+
+    /// Handle input submission with a specific input string
+    /// This is used both for single-line and joined multiline input
+    async fn handle_submit_with_input(&mut self, input: String) -> Result<bool> {
         if input.trim().is_empty() {
             return Ok(true);
         }

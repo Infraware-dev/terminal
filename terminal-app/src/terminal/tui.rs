@@ -236,6 +236,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
         TerminalMode::PromptingInstall => "INSTALL PROMPT",
         TerminalMode::AwaitingCommandApproval => "APPROVE? [y/n]",
         TerminalMode::AwaitingAnswer => "ANSWER?",
+        TerminalMode::AwaitingMoreInput(_) => "MULTILINE...",
     };
 
     let mode_color = match state.mode {
@@ -245,6 +246,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
         TerminalMode::PromptingInstall => Color::Magenta,
         TerminalMode::AwaitingCommandApproval => Color::Cyan,
         TerminalMode::AwaitingAnswer => Color::Yellow,
+        TerminalMode::AwaitingMoreInput(_) => Color::Magenta,
     };
 
     let status_text = Line::from(vec![
@@ -268,9 +270,16 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
 
 /// Render the input area
 fn render_input(frame: &mut Frame, area: Rect, state: &TerminalState) {
+    // Show continuation prompt "> " when in multiline mode, normal prompt "❯ " otherwise
+    let prompt = if state.is_in_multiline_mode() {
+        "> "
+    } else {
+        "❯ "
+    };
+
     let input_text = Line::from(vec![
         Span::styled(
-            "❯ ",
+            prompt,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),

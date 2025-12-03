@@ -26,7 +26,7 @@ cargo build --release                # Release build
 cargo run                            # Run application
 
 # Testing
-cargo test                           # All tests (~440 tests across unit/integration/doc)
+cargo test                           # All tests
 cargo test --test classifier_tests   # SCAN algorithm tests (tests/classifier_tests.rs)
 cargo test --test executor_tests     # Executor tests (tests/executor_tests.rs)
 cargo test --test integration_tests  # Integration tests (tests/integration_tests.rs)
@@ -45,7 +45,9 @@ cargo bench scan_full_classification # Full classification pipeline benchmarks
 # Development (run before commits)
 cargo fmt                            # Format code
 cargo clippy                         # Lint (warnings = errors in CI)
-cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info  # Coverage
+
+# Coverage (requires: cargo install cargo-llvm-cov)
+cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 ```
 
 ## Architecture
@@ -61,23 +63,23 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-11-handler Chain of Responsibility executing in strict order (<100μs average):
+Chain of Responsibility with 11 handlers executing in strict order (<100μs average):
 
-| # | Handler | Purpose | Performance |
-|---|---------|---------|-------------|
-| 1 | EmptyInputHandler | Fast path for empty/whitespace | <1μs |
-| 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion | ~1-5μs |
-| 3 | ApplicationBuiltinHandler | App builtins (clear, reload-aliases, reload-commands) | <1μs |
-| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
-| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
-| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
-| 7 | PathDiscoveryHandler | Auto-discover newly installed commands | ~1-5ms |
-| 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
-| 9 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker"), disabled by default (max_distance=0) | ~100μs |
-| 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
-| 11 | DefaultHandler | Fallback to LLM | <1μs |
+| # | Handler | Purpose |
+|---|---------|---------|
+| 1 | EmptyInputHandler | Fast path for empty/whitespace |
+| 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion |
+| 3 | ApplicationBuiltinHandler | App builtins (clear, exit, reload-aliases, reload-commands, auth-status) |
+| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export, eval, exec) |
+| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd |
+| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache |
+| 7 | PathDiscoveryHandler | Auto-discover newly installed commands |
+| 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects |
+| 9 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker"), disabled by default |
+| 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) |
+| 11 | DefaultHandler | Fallback to LLM |
 
-**Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
+**Key optimizations**: Precompiled RegexSet, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
 
 ### Key Modules
 
@@ -138,17 +140,6 @@ Application-specific commands recognized by `ApplicationBuiltinHandler` (positio
 - `auth-status` - Check backend authentication status
 
 These commands are recognized early in the classification chain to prevent misclassification as natural language.
-
-### Output Scrolling
-
-Infraware Terminal supports scrolling through command output when content exceeds the visible area:
-
-- **Primary controls**: `PageUp` / `PageDown` keys scroll output one page at a time
-- **Laptop-friendly alternative**: `Ctrl+↑` / `Ctrl+↓` scroll output (useful when Fn+PageUp/PageDown is inconvenient)
-- **Visual feedback**: Vertical scrollbar (▲│█▼) appears on the right side of the output area when content exceeds visible lines
-- **No conflict with history**: Arrow keys (↑/↓ without Ctrl) navigate command history; arrow keys with Ctrl navigate output
-- **Auto-scroll**: Output automatically scrolls to the bottom when new command results arrive
-- **Implementation**: Scroll position managed in `OutputBuffer`, rendered via ratatui's `Scrollbar` widget
 
 ### Interactive Commands
 - **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.
@@ -228,7 +219,7 @@ LOG_LEVEL=trace cargo run       # Trace level (very verbose)
 ### CI/CD
 - `cargo fmt --all --check` must pass
 - `cargo clippy --all-targets --all-features -- -D warnings` must pass
-- 75% test coverage minimum (~440 tests across unit/integration/doc tests)
+- 75% test coverage minimum
 - Multi-platform: Ubuntu, Windows, macOS
 
 ### Git Commits
@@ -280,33 +271,20 @@ question_patterns = ["(?i)^(come|cosa|perché|quando|dove|chi|quale)\\s"]
 
 ## Keyboard Shortcuts
 
-The terminal implements the following keyboard shortcuts via the `EventHandler` in `src/terminal/events.rs`:
+Defined in `EventHandler::map_key_event()` (`src/terminal/events.rs`):
 
-| Key(s) | Event | Purpose |
-|--------|-------|---------|
-| **Input & Submission** | | |
-| Character (a-z, A-Z, 0-9, symbols) | `InputChar(c)` | Type character into input |
-| Backspace | `DeleteChar` | Delete character before cursor |
-| Enter | `Submit` | Execute command or query |
-| ← | `MoveCursorLeft` | Move cursor left in input |
-| → | `MoveCursorRight` | Move cursor right in input |
-| **History Navigation** | | |
-| ↑ (no modifiers) | `HistoryPrevious` | Navigate to previous command |
-| ↓ (no modifiers) | `HistoryNext` | Navigate to next command |
-| **Output Scrolling** | | |
-| PageUp | `ScrollUp` | Scroll output up |
-| PageDown | `ScrollDown` | Scroll output down |
-| Ctrl+↑ | `ScrollUp` | Alternative scroll up (laptop-friendly) |
-| Ctrl+↓ | `ScrollDown` | Alternative scroll down (laptop-friendly) |
-| **Control** | | |
-| Ctrl+C | `CtrlC` | Context-aware: cancel ops or clear input |
-| Ctrl+L | `ClearScreen` | Clear screen |
-| Tab | `TabComplete` | Tab completion |
+| Key | Action |
+|-----|--------|
+| ↑/↓ | History navigation |
+| ←/→ | Cursor movement |
+| PageUp/PageDown | Output scrolling |
+| Ctrl+↑/↓ | Output scrolling (laptop-friendly alternative) |
+| Tab | Tab completion |
+| Ctrl+C | Cancel/clear input |
+| Ctrl+L | Clear screen |
+| Enter | Execute |
 
-**Key Implementation Details**:
-- Windows support: Filters `KeyEventKind::Release` and `KeyEventKind::Repeat` to avoid duplicate input
-- Arrow key conflict prevention: Ctrl+↑/↓ for scrolling, plain ↑/↓ for history (no collision)
-- Event mapping in `EventHandler::map_key_event()` - single source of truth for keyboard handling
+**Note**: Windows filters `KeyEventKind::Release/Repeat` to avoid duplicate input.
 
 ## Common Patterns
 
