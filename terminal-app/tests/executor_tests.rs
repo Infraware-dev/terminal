@@ -510,3 +510,261 @@ async fn test_comma_brace_expansion() {
         let _ = fs::remove_file(&file);
     }
 }
+
+#[tokio::test]
+async fn test_brace_expansion_letter_range() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_letter_range_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    // Clean up any previous test files
+    for c in 'a'..='c' {
+        let file = format!("{}_{}", base.display(), c);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with letter range brace expansion {a..c}
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}_{{a..c}}", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Letter range brace expansion failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created: file_a, file_b, file_c
+    for c in 'a'..='c' {
+        let file = format!("{}_{}", base.display(), c);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after letter range expansion",
+            file
+        );
+        let _ = fs::remove_file(&file);
+    }
+}
+
+#[tokio::test]
+async fn test_brace_expansion_reverse_range() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_reverse_range_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    // Clean up any previous test files
+    for i in 1..=3 {
+        let file = format!("{}_{}", base.display(), i);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with reverse range brace expansion {3..1}
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}_{{3..1}}", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Reverse range brace expansion failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created: file_3, file_2, file_1 (order doesn't matter for files)
+    for i in 1..=3 {
+        let file = format!("{}_{}", base.display(), i);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after reverse range expansion",
+            file
+        );
+        let _ = fs::remove_file(&file);
+    }
+}
+
+#[tokio::test]
+async fn test_brace_expansion_zero_padding() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_zero_pad_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    // Clean up any previous test files
+    for i in 1..=3 {
+        let file = format!("{}_{:02}", base.display(), i);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with zero-padded brace expansion {01..03}
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}_{{01..03}}", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Zero-padded brace expansion failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created: file_01, file_02, file_03
+    for i in 1..=3 {
+        let file = format!("{}_{:02}", base.display(), i);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after zero-padded expansion",
+            file
+        );
+        let _ = fs::remove_file(&file);
+    }
+}
+
+#[tokio::test]
+async fn test_brace_expansion_step() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_step_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    let expected = [0, 2, 4];
+
+    // Clean up any previous test files
+    for i in &expected {
+        let file = format!("{}_{}", base.display(), i);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with step brace expansion {0..4..2}
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}_{{0..4..2}}", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Step brace expansion failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created: file_0, file_2, file_4
+    for i in &expected {
+        let file = format!("{}_{}", base.display(), i);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after step expansion",
+            file
+        );
+        let _ = fs::remove_file(&file);
+    }
+}
+
+#[tokio::test]
+async fn test_brace_expansion_nested() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_nested_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    let expected = ["a1", "a2", "b1", "b2"];
+
+    // Clean up any previous test files
+    for suffix in &expected {
+        let file = format!("{}_{}", base.display(), suffix);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with nested brace expansion {a,b}{1,2}
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}_{{a,b}}{{1,2}}", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Nested brace expansion failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created: file_a1, file_a2, file_b1, file_b2
+    for suffix in &expected {
+        let file = format!("{}_{}", base.display(), suffix);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after nested expansion",
+            file
+        );
+        let _ = fs::remove_file(&file);
+    }
+}
+
+#[tokio::test]
+async fn test_brace_expansion_preamble_postscript() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_preamble_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    let expected = ["pre_A_post", "pre_B_post"];
+
+    // Clean up any previous test files
+    for suffix in &expected {
+        let file = format!("{}_{}", base.display(), suffix);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with preamble/postscript brace expansion pre_{A,B}_post
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}_pre_{{A,B}}_post", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Preamble/postscript brace expansion failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created
+    for suffix in &expected {
+        let file = format!("{}_{}", base.display(), suffix);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after preamble/postscript expansion",
+            file
+        );
+        let _ = fs::remove_file(&file);
+    }
+}
