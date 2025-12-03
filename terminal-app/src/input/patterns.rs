@@ -320,6 +320,11 @@ mod tests {
         assert!(patterns.has_shell_operators("echo $(date)"));
         assert!(patterns.has_shell_operators("echo `date`"));
 
+        // Brace expansion (bash feature)
+        assert!(patterns.has_shell_operators("touch file{1..3}"));
+        assert!(patterns.has_shell_operators("echo {a,b,c}"));
+        assert!(patterns.has_shell_operators("mkdir -p dir/{src,test,docs}"));
+
         // Not shell operators
         assert!(!patterns.has_shell_operators("how do I use pipes?"));
     }

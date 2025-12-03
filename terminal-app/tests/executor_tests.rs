@@ -420,3 +420,93 @@ async fn test_yes_piped_to_head_via_shell_allowed() {
         "yes piped to head should not be blocked for infinite output reasons"
     );
 }
+
+// =============================================================================
+// Brace Expansion Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_brace_expansion_execution() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_brace_test_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    // Clean up any previous test files
+    for i in 1..=3 {
+        let file = format!("{}_{}", base.display(), i);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with brace expansion via original_input (triggers bash -c)
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}{{1..3}}", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Brace expansion command failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created by bash's brace expansion
+    for i in 1..=3 {
+        let file = format!("{}{}", base.display(), i);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after brace expansion",
+            file
+        );
+        // Clean up
+        let _ = fs::remove_file(&file);
+    }
+}
+
+#[tokio::test]
+async fn test_comma_brace_expansion() {
+    use std::fs;
+    use std::path::Path;
+
+    let temp_dir = std::env::temp_dir();
+    let base_name = format!("infraware_comma_brace_{}", std::process::id());
+    let base = temp_dir.join(&base_name);
+
+    // Clean up any previous test files
+    for suffix in ["a", "b", "c"] {
+        let file = format!("{}_{}", base.display(), suffix);
+        let _ = fs::remove_file(&file);
+    }
+
+    // Execute with comma brace expansion {a,b,c}
+    let output = CommandExecutor::execute(
+        "touch",
+        &[],
+        Some(&format!("touch {}_{{a,b,c}}", base.display())),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        output.is_success(),
+        "Comma brace expansion failed: stderr={}",
+        output.stderr
+    );
+
+    // Verify files were created
+    for suffix in ["a", "b", "c"] {
+        let file = format!("{}_{}", base.display(), suffix);
+        assert!(
+            Path::new(&file).exists(),
+            "File {} should exist after comma brace expansion",
+            file
+        );
+        // Clean up
+        let _ = fs::remove_file(&file);
+    }
+}

@@ -890,4 +890,27 @@ fn test_classify_command_with_original_input() {
         }
         other => panic!("Expected Command, got: {:?}", other),
     }
+
+    // Commands with brace expansion should preserve original_input for bash execution
+    match classifier.classify("touch file{1..3}").unwrap() {
+        InputType::Command { original_input, .. } => {
+            assert!(
+                original_input.is_some(),
+                "Brace expansion needs original_input for bash execution"
+            );
+            assert!(original_input.unwrap().contains("{"));
+        }
+        other => panic!("Expected Command for brace expansion, got: {:?}", other),
+    }
+
+    // Multiple brace expansion patterns
+    match classifier.classify("echo {a,b,c}").unwrap() {
+        InputType::Command { original_input, .. } => {
+            assert!(original_input.is_some());
+        }
+        other => panic!(
+            "Expected Command for comma brace expansion, got: {:?}",
+            other
+        ),
+    }
 }

@@ -213,7 +213,7 @@ impl CommandExecutor {
     /// Get the platform-appropriate shell and shell command flag
     ///
     /// Returns a tuple of (`shell_executable`, `command_flag`):
-    /// - Unix/Linux/macOS: ("sh", "-c")
+    /// - Unix/Linux/macOS: ("bash", "-c") - bash supports brace expansion {1..3}
     /// - Windows: ("cmd", "/C")
     const fn get_platform_shell() -> (&'static str, &'static str) {
         #[cfg(target_os = "windows")]
@@ -222,7 +222,7 @@ impl CommandExecutor {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            ("sh", "-c")
+            ("bash", "-c")
         }
     }
 
