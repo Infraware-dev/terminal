@@ -15,6 +15,14 @@ echo ""
 echo -e "${YELLOW}WARNING: This script will install packages using pip with --break-system-packages flag.${NC}"
 echo -e "${YELLOW}This may override system-managed packages. Use with caution.${NC}"
 echo ""
+echo -ne "${YELLOW}Do you want to proceed? (Y/n): ${NC}"
+read -n 1 -r
+echo ""
+if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ ! -z $REPLY ]]; then
+    echo "Installation cancelled."
+    exit 0
+fi
+echo ""
 
 # Function to check if a command exists
 command_exists() {
