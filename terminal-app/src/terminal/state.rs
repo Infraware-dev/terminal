@@ -1,15 +1,17 @@
 /// Terminal state management using separated buffer components
 use super::buffers::{CommandHistory, InputBuffer, OutputBuffer};
+use crate::input::IncompleteReason;
 
 /// Represents the current mode of the terminal
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalMode {
-    Normal,                  // Waiting for input
-    ExecutingCommand,        // Running shell command
-    WaitingLLM,              // Querying LLM
-    PromptingInstall,        // Asking to install missing command (M2/M3)
+    Normal,                              // Waiting for input
+    ExecutingCommand,                    // Running shell command
+    WaitingLLM,                          // Querying LLM
+    PromptingInstall,                    // Asking to install missing command (M2/M3)
     AwaitingCommandApproval, // Human-in-the-loop: waiting for user to approve LLM command (y/n)
     AwaitingAnswer, // Human-in-the-loop: waiting for user to answer LLM question (free text)
+    AwaitingMoreInput(IncompleteReason), // Multiline: waiting for more input lines
 }
 
 /// Pending interaction with the LLM for human-in-the-loop flow
@@ -47,6 +49,10 @@ pub struct TerminalState {
     pub pending_interaction: Option<PendingInteraction>,
     /// Number of visible lines in output area (updated during render)
     visible_lines: usize,
+    /// Accumulated lines for multiline input (backslash continuation, heredoc, etc.)
+    pub multiline_buffer: Vec<String>,
+    /// Pending heredoc delimiter (if waiting for heredoc content)
+    pub pending_heredoc: Option<String>,
 }
 
 impl TerminalState {
@@ -59,6 +65,8 @@ impl TerminalState {
             mode: TerminalMode::Normal,
             pending_interaction: None,
             visible_lines: 20, // Default, updated during render
+            multiline_buffer: Vec::new(),
+            pending_heredoc: None,
         }
     }
 
@@ -150,6 +158,23 @@ impl TerminalState {
             self.mode,
             TerminalMode::AwaitingCommandApproval | TerminalMode::AwaitingAnswer
         )
+    }
+
+    /// Check if terminal is in multiline input mode
+    pub fn is_in_multiline_mode(&self) -> bool {
+        matches!(self.mode, TerminalMode::AwaitingMoreInput(_))
+    }
+
+    /// Clear multiline state and return to normal mode
+    pub fn cancel_multiline(&mut self) {
+        self.multiline_buffer.clear();
+        self.pending_heredoc = None;
+        self.mode = TerminalMode::Normal;
+    }
+
+    /// Get the full accumulated multiline input joined together
+    pub fn get_multiline_input(&self) -> String {
+        crate::input::multiline::join_lines(&self.multiline_buffer)
     }
 }
 

@@ -40,8 +40,13 @@ This is the initial project setup with the complete module structure. Implementa
   - Shell operator support (pipes, redirects, logical operators)
   - Language-agnostic classification (works for any language)
 - ✅ **Command Execution**: Async shell command execution with stdout/stderr capture
+- ✅ **Background Processes**: Execute commands in the background with `&` suffix (e.g., `sleep 10 &`)
+  - Job tracking with 1-based job IDs and process IDs
+  - `jobs` builtin command to list all background jobs
+  - Real-time notifications when jobs complete
+  - Non-blocking execution with independent job management
 - ✅ **Shell Operator Support**: Full support for pipes (`|`), redirects (`>`/`<`), logical operators (`&&`/`||`), subshells
-- ✅ **Performance Optimizations**: Precompiled regex patterns, thread-safe command caching, RwLock poisoning recovery
+- ✅ **Performance Optimizations**: Precompiled regex patterns, thread-safe command caching, fail-fast lock poisoning recovery, periodic job checking (250ms)
 - ✅ **Interactive Commands**: 28 commands with full TUI suspension (vim, nano, less, man, top, htop, sudo, etc.) + 31 blocked commands with helpful alternatives
 - ✅ **Auto-Install Framework**: Detect missing commands and prompt for installation (execution deferred to M2)
 - ✅ **LLM Integration**: Mock client ready, route natural language queries to AI backend
@@ -51,7 +56,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
 - ✅ **Unicode Support**: Full Unicode support for international users (CJK, emoji, etc.) with character-count based cursor positioning
-- ✅ **Code Quality**: 224 tests passing with comprehensive edge case coverage, 0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant (Debug on all public types, #[expect] for lint overrides, static verification lints enabled)
+- ✅ **Code Quality**: 224 tests passing with comprehensive edge case coverage, 0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant (Debug on all public types, #[expect] for lint overrides, fail-fast lock poisoning recovery, static verification lints enabled)
 
 ### Coming in M2/M3
 
@@ -77,25 +82,27 @@ User Input → Alias Expansion → InputClassifier (9-Handler Chain)
                           Shell Exec Suggest LLM Backend
 ```
 
-**10-Handler Chain** (executed in strict order):
+**11-Handler Chain** (executed in strict order):
 1. **EmptyInputHandler** - Fast path for empty input (<1μs)
 2. **HistoryExpansionHandler** - Bash-style history expansion: `!!`,  `!$`, `!^`, `!*` (~1-5μs)
-3. **ApplicationBuiltinHandler** - App-specific commands: clear, reload-aliases, reload-commands (<1μs)
+3. **ApplicationBuiltinHandler** - App-specific commands: clear, exit, jobs, reload-aliases, reload-commands, auth-status (<1μs)
 4. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
-5. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
+5. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd`, background processes with `&` (~10μs)
 6. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
-7. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects (~10μs)
-8. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
-9. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~0.5μs)
-10. **DefaultHandler** - Fallback to LLM (<1μs)
+7. **PathDiscoveryHandler** - Auto-discover newly installed commands (~1-5ms)
+8. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects (~10μs)
+9. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
+10. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~0.5μs)
+11. **DefaultHandler** - Fallback to LLM (<1μs)
 
 **Key Features**:
 - Average classification: <100μs
 - Language-agnostic core algorithm (works for any language)
 - Precompiled regex patterns (10-100x faster)
-- Thread-safe command cache (RwLock) with poisoning recovery
+- Thread-safe locks with fail-fast poisoning recovery (Microsoft Rust Guidelines M-PANIC-IS-STOP)
 - Panic-safe indexing on all array access (no unwrap() on array indices)
 - English-first fast path with universal LLM fallback
+- Periodic background job checking (250ms interval) to minimize lock contention
 
 See `docs/SCAN_ARCHITECTURE.md` for complete documentation.
 
@@ -114,16 +121,18 @@ infraware-terminal/
 │   │   └── events.rs             # Keyboard event handling
 │   ├── input/                     # SCAN Algorithm
 │   │   ├── classifier.rs         # InputClassifier coordinator
-│   │   ├── handler.rs            # 9-handler Chain of Responsibility
+│   │   ├── handler.rs            # 11-handler Chain of Responsibility
 │   │   ├── history_expansion.rs  # Bash-style history expansion (!!, !$, !^, !*)
 │   │   ├── shell_builtins.rs     # Shell builtin recognition (., :, [, [[, etc.)
+│   │   ├── application_builtins.rs # Application builtins (clear, exit, jobs, etc.)
 │   │   ├── patterns.rs           # Precompiled RegexSet patterns
 │   │   ├── discovery.rs          # PATH-aware command cache
 │   │   ├── known_commands.rs     # Single source of truth for 60+ DevOps commands
 │   │   ├── typo_detection.rs     # Levenshtein distance typo detection
 │   │   └── parser.rs             # Shell command parsing
 │   ├── executor/                  # Command execution
-│   │   ├── command.rs            # Async command execution + 43 blocklist
+│   │   ├── command.rs            # Async command execution + background processes (&)
+│   │   ├── job_manager.rs        # Background job tracking with JobManager
 │   │   ├── package_manager.rs    # Strategy pattern (apt, yum, brew, etc.)
 │   │   ├── install.rs            # Auto-install workflow
 │   │   └── completion.rs         # Tab completion
@@ -213,19 +222,24 @@ Once running, you can:
    - Pagers: `less output.log`, `man docker`, `info grep`
    - File managers: `mc`, `ranger`, `nnn`
    - System monitoring: `watch -n 1 'ps aux'`
-3. **Use history expansion**: Use bash-style history patterns:
+3. **Run background processes**: Execute commands in the background with `&` suffix:
+   - `sleep 10 &` - Run sleep in the background, terminal stays responsive
+   - `long-running-task &` - Start any long-running task without blocking
+   - `jobs` - List all background jobs with their status and process IDs
+   - Auto-notification when jobs complete with exit status
+4. **Use history expansion**: Use bash-style history patterns:
    - `!!` - Re-run previous command: `sudo !!`
    - `!$` - Use last argument: `vim !$` (if previous was `cat file.txt`)
    - `!^` - Use first argument: `echo !^` (if previous was `cat file1 file2`)
    - `!*` - Use all arguments: `find !*` (if previous was `ls -la /tmp`)
-4. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
-5. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
-6. **Navigate history**: Use ↑/↓ arrow keys
-7. **Scroll output**: Navigate previous command output when it exceeds the visible area
-8. **Tab completion**: Press Tab to complete commands/paths
-9. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-10. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
-11. **Quit**: Press Ctrl+C or type `exit`
+5. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
+6. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
+7. **Navigate history**: Use ↑/↓ arrow keys
+8. **Scroll output**: Navigate previous command output when it exceeds the visible area
+9. **Tab completion**: Press Tab to complete commands/paths
+10. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
+11. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
+12. **Quit**: Press Ctrl+C or type `exit`
 
 #### Keyboard Shortcuts
 
@@ -400,6 +414,8 @@ xdg-open target/criterion/report/index.html  # Linux
 - Average SCAN classification: <100μs
 - Known command (cache hit): <1μs
 - Typo detection: <100μs
+- Background job check (read path, no jobs): <1μs
+- Job polling interval: 250ms (balances responsiveness vs lock contention)
 
 ## 📝 Development Status
 

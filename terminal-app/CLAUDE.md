@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
 **Status**: M1 Complete + Backend Integration in Progress (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
-**Recent**: Chain of Responsibility refactoring complete (ClassifierContext DI, HandlerPosition enum, external language config)
+**Recent**: Background process support (`&` suffix), multiline command support (continuation `\`, heredocs `<<EOF`)
 **Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
@@ -21,31 +21,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build and Run
-cargo build                          # Build
+cargo build                          # Debug build
 cargo build --release                # Release build
 cargo run                            # Run application
+cargo check                          # Fast type check (no codegen)
 
 # Testing
-cargo test                           # All tests (~440 tests across unit/integration/doc)
-cargo test --test classifier_tests   # SCAN algorithm tests (tests/classifier_tests.rs)
-cargo test --test executor_tests     # Executor tests (tests/executor_tests.rs)
-cargo test --test integration_tests  # Integration tests (tests/integration_tests.rs)
-cargo test --test terminal_state_tests # Terminal state tests
-cargo test --test interactive_command_test # Interactive command tests
-cargo test test_name                 # Run single test by name
-cargo test -- --nocapture            # Tests with output
-cargo test -- --show-output          # Show println! even for passing tests
+cargo test                           # All tests
+cargo test --test classifier_tests   # SCAN algorithm tests
+cargo test --test executor_tests     # Executor tests
+cargo test --test integration_tests  # Integration tests
+cargo test test_name                 # Single test by name
+cargo test -- --nocapture            # Show output during tests
+cargo test -- --show-output          # Show println! for passing tests
 
 # Benchmarking (benches/scan_benchmark.rs)
 cargo bench                          # All benchmarks
 cargo bench scan_                    # SCAN benchmarks only
-cargo bench scan_individual_handlers # Individual handler benchmarks (measures each handler in isolation)
-cargo bench scan_full_classification # Full classification pipeline benchmarks
+cargo bench scan_individual_handlers # Individual handler isolation benchmarks
+cargo bench scan_full_classification # Full pipeline benchmarks
 
-# Development (run before commits)
-cargo fmt                            # Format code
-cargo clippy                         # Lint (warnings = errors in CI)
-cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info  # Coverage
+# Pre-commit (required)
+cargo fmt && cargo clippy            # Format + lint (CI enforces both)
+
+# Coverage (requires: cargo install cargo-llvm-cov)
+cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 ```
 
 ## Architecture
@@ -61,23 +61,23 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-11-handler Chain of Responsibility executing in strict order (<100μs average):
+Chain of Responsibility with 11 handlers executing in strict order (<100μs average):
 
-| # | Handler | Purpose | Performance |
-|---|---------|---------|-------------|
-| 1 | EmptyInputHandler | Fast path for empty/whitespace | <1μs |
-| 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion | ~1-5μs |
-| 3 | ApplicationBuiltinHandler | App builtins (clear, reload-aliases, reload-commands) | <1μs |
-| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
-| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
-| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
-| 7 | PathDiscoveryHandler | Auto-discover newly installed commands | ~1-5ms |
-| 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
-| 9 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker"), disabled by default (max_distance=0) | ~100μs |
-| 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
-| 11 | DefaultHandler | Fallback to LLM | <1μs |
+| # | Handler | Purpose |
+|---|---------|---------|
+| 1 | EmptyInputHandler | Fast path for empty/whitespace |
+| 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion |
+| 3 | ApplicationBuiltinHandler | App builtins (clear, exit, jobs, reload-aliases, reload-commands, auth-status) |
+| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export, eval, exec) |
+| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd, background suffix detection |
+| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache |
+| 7 | PathDiscoveryHandler | Auto-discover newly installed commands |
+| 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects |
+| 9 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker"), disabled by default |
+| 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) |
+| 11 | DefaultHandler | Fallback to LLM |
 
-**Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
+**Key optimizations**: Precompiled RegexSet, thread-safe locks with fail-fast poisoning recovery, periodic job checking (250ms), fast paths first.
 
 ### Key Modules
 
@@ -85,7 +85,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 |-----------|---------|-----------|
 | `terminal/` | TUI rendering and state | `tui.rs` (suspend/resume), `buffers.rs` (SRP buffers), `events.rs` (keyboard) |
 | `input/` | SCAN Algorithm | `classifier.rs` (coordinator), `handler.rs` (11-handler chain), `known_commands.rs` (command registry) |
-| `executor/` | Command execution | `command.rs` (async exec), `package_manager.rs` (Strategy pattern) |
+| `executor/` | Command execution | `command.rs` (async exec, background processes), `package_manager.rs` (Strategy pattern), `job_manager.rs` (background job tracking) |
 | `orchestrators/` | Workflow coordination | `command.rs`, `natural_language.rs`, `tab_completion.rs` |
 | `llm/` | LLM integration | `client.rs` (Mock/HTTP clients with HITL support), `renderer.rs` (syntax highlighting) |
 | `auth/` | Backend authentication | `authenticator.rs` (HTTP/Mock auth), `config.rs` (env config), `models.rs` (API types) |
@@ -112,7 +112,9 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 6. If handler needs shared state (cache, patterns), access via `ClassifierContext` parameter (no global state)
 7. Run `cargo bench scan_individual_handlers` to measure handler performance in isolation
 8. Run `cargo bench scan_full_classification` to verify no regression in overall pipeline
-9. Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases)
+
+### Testing with Shared State
+Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases). This prevents flaky tests from concurrent test execution.
 
 ### History Expansion
 - Patterns: `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args)
@@ -129,42 +131,29 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 ### Built-in Commands
 
-Application-specific commands recognized by `ApplicationBuiltinHandler` (position 3 in SCAN chain):
-- `cd` - Change working directory (handled by parent process to affect shell state)
-- `clear` - Clear terminal output buffer
-- `exit` - Exit the terminal application
-- `reload-aliases` - Reload aliases from system/user config files
-- `reload-commands` - Clear command cache (use after installing new commands)
-- `auth-status` - Check backend authentication status
+Application builtins (`ApplicationBuiltinHandler`, position 3): `cd`, `clear`, `exit`, `jobs`, `reload-aliases`, `reload-commands`, `auth-status`
 
-These commands are recognized early in the classification chain to prevent misclassification as natural language.
-
-### Output Scrolling
-
-Infraware Terminal supports scrolling through command output when content exceeds the visible area:
-
-- **Primary controls**: `PageUp` / `PageDown` keys scroll output one page at a time
-- **Laptop-friendly alternative**: `Ctrl+↑` / `Ctrl+↓` scroll output (useful when Fn+PageUp/PageDown is inconvenient)
-- **Visual feedback**: Vertical scrollbar (▲│█▼) appears on the right side of the output area when content exceeds visible lines
-- **No conflict with history**: Arrow keys (↑/↓ without Ctrl) navigate command history; arrow keys with Ctrl navigate output
-- **Auto-scroll**: Output automatically scrolls to the bottom when new command results arrive
-- **Implementation**: Scroll position managed in `OutputBuffer`, rendered via ratatui's `Scrollbar` widget
+Add new builtins to `src/input/application_builtins.rs`.
 
 ### Interactive Commands
 - **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.
 - **31 blocked** (helpful error): ssh, tmux, screen, python, mysql, gdb, etc.
 - Unix/Linux/macOS only (Windows returns error)
-- Implementation: `TerminalUI::suspend()` → command runs → `TerminalUI::resume()`
-- Panic-safe via RAII `TuiGuard`
+- Implementation: `TerminalUI::suspend()` → command runs → `TerminalUI::resume()` (panic-safe via RAII `TuiGuard`)
 
-### Infinite Output Commands (Blocked)
-Commands that would freeze the terminal by producing infinite output are blocked with helpful suggestions:
-- `yes` - produces infinite "y" output
-- `cat /dev/zero`, `cat /dev/urandom`, `cat /dev/random` - infinite device output
-- `dd if=/dev/zero`, `dd if=/dev/urandom` - infinite data copy
-- `ping` without `-c N` flag - infinite ping
+### Blocked Commands
+**Infinite output** (blocked with suggestions): `yes`, `cat /dev/zero`, `dd if=/dev/zero`, `ping` without `-c`
+**Not blocked** (Ctrl+C works): `tail -f`, `docker logs -f`, `watch`
 
-**Not blocked** (useful for DevOps, Ctrl+C works): `tail -f`, `docker logs -f`, `watch`
+### Background Process Support
+
+Commands with `&` suffix run in background. `jobs` builtin lists all jobs. Implementation: `JobManager` (`src/executor/job_manager.rs`) with `Arc<RwLock>` for thread-safe access. Main event loop checks for completed jobs periodically (250ms interval) to minimize lock contention. Lock poisoning triggers fail-fast (bail/return early) per Microsoft Rust Guidelines.
+
+### Multiline Command Support
+
+- **Line continuation**: End line with `\`
+- **Heredocs**: `<<EOF` syntax
+- **Brace expansion**: `file{1..3}` → `file1 file2 file3`
 
 ### Shell Builtins
 - 45+ recognized without PATH verification (., :, [, [[, export, eval, exec, etc.)
@@ -190,45 +179,23 @@ The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) int
 
 ### Logging
 
-The application uses `log4rs` for structured logging with size-based rotation:
+Uses `log4rs` with size-based rotation (`src/logging.rs`). Use `log::debug!()`, `log::info!()`, etc.
 
-- **Configuration**: Environment variables (see below)
-- **Log File**: `infraware.log` with automatic rotation and gzip compression
-- **Timestamp Format**: ISO 8601 with milliseconds (e.g., `[2025-12-02T10:30:45.123]`)
-- **Usage**: Use `log::debug!()`, `log::info!()`, `log::warn!()`, `log::error!()`
-- **Initialization**: `logging::init()` called in `main.rs` before starting TUI
-- **Module**: `src/logging.rs`
-- **HTTP Logging**: All LLM HTTP operations log with structured prefixes:
-  - `[HTTP-OUT]` - Request initiated (includes URL)
-  - `[HTTP-IN]` - Response received (includes status code and elapsed time in ms)
-  - Example: `[HTTP-IN] POST /threads | status=200 OK | elapsed=333ms`
-- **SSE Logging**: Per-chunk logs use `debug` level to reduce I/O overhead
-
-**Running with debug logging**:
 ```bash
 LOG_LEVEL=debug cargo run       # Debug level
 LOG_LEVEL=trace cargo run       # Trace level (very verbose)
 ```
 
-**Environment variables**:
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOG_LEVEL` | trace, debug, info, warn, error | `info` |
-| `LOG_MAX_SIZE_MB` | Max file size before rotation | `10` |
-| `LOG_MAX_FILES` | Rotated files to keep | `5` |
-| `LOG_PATH` | Custom log directory | Platform-specific |
+HTTP operations use structured prefixes: `[HTTP-OUT]` (request), `[HTTP-IN]` (response with timing).
 
-**Log file locations**:
-- Linux: `~/.local/share/infraware-terminal/logs/`
-- macOS: `~/Library/Logs/infraware-terminal/`
-- Windows: `%APPDATA%\infraware-terminal\logs\`
+**Log locations**: Linux `~/.local/share/infraware-terminal/logs/`, macOS `~/Library/Logs/infraware-terminal/`, Windows `%APPDATA%\infraware-terminal\logs\`
 
 ## Constraints
 
 ### CI/CD
 - `cargo fmt --all --check` must pass
 - `cargo clippy --all-targets --all-features -- -D warnings` must pass
-- 75% test coverage minimum (~440 tests across unit/integration/doc tests)
+- 75% test coverage minimum
 - Multi-platform: Ubuntu, Windows, macOS
 
 ### Git Commits
@@ -248,6 +215,7 @@ LOG_LEVEL=trace cargo run       # Trace level (very verbose)
 
 - All public types implement `Debug` (custom impl for complex types to protect sensitive data)
 - Use `#[expect]` instead of `#[allow]` for lint overrides
+- Panic safety (M-PANIC-IS-STOP): Lock poisoning triggers fail-fast (bail/return early), not recovery with potentially corrupted state
 - Zero clippy warnings, all tests passing
 - See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines
 
@@ -280,33 +248,9 @@ question_patterns = ["(?i)^(come|cosa|perché|quando|dove|chi|quale)\\s"]
 
 ## Keyboard Shortcuts
 
-The terminal implements the following keyboard shortcuts via the `EventHandler` in `src/terminal/events.rs`:
+Defined in `EventHandler::map_key_event()` (`src/terminal/events.rs`). Add new shortcuts by adding `KeyEvent` patterns there.
 
-| Key(s) | Event | Purpose |
-|--------|-------|---------|
-| **Input & Submission** | | |
-| Character (a-z, A-Z, 0-9, symbols) | `InputChar(c)` | Type character into input |
-| Backspace | `DeleteChar` | Delete character before cursor |
-| Enter | `Submit` | Execute command or query |
-| ← | `MoveCursorLeft` | Move cursor left in input |
-| → | `MoveCursorRight` | Move cursor right in input |
-| **History Navigation** | | |
-| ↑ (no modifiers) | `HistoryPrevious` | Navigate to previous command |
-| ↓ (no modifiers) | `HistoryNext` | Navigate to next command |
-| **Output Scrolling** | | |
-| PageUp | `ScrollUp` | Scroll output up |
-| PageDown | `ScrollDown` | Scroll output down |
-| Ctrl+↑ | `ScrollUp` | Alternative scroll up (laptop-friendly) |
-| Ctrl+↓ | `ScrollDown` | Alternative scroll down (laptop-friendly) |
-| **Control** | | |
-| Ctrl+C | `CtrlC` | Context-aware: cancel ops or clear input |
-| Ctrl+L | `ClearScreen` | Clear screen |
-| Tab | `TabComplete` | Tab completion |
-
-**Key Implementation Details**:
-- Windows support: Filters `KeyEventKind::Release` and `KeyEventKind::Repeat` to avoid duplicate input
-- Arrow key conflict prevention: Ctrl+↑/↓ for scrolling, plain ↑/↓ for history (no collision)
-- Event mapping in `EventHandler::map_key_event()` - single source of truth for keyboard handling
+**Note**: Windows filters `KeyEventKind::Release/Repeat` to avoid duplicate input.
 
 ## Common Patterns
 
@@ -345,8 +289,27 @@ Context is passed to handlers that need shared state (e.g., `KnownCommandHandler
 | Typo detection | <100μs (disabled by default) |
 | Natural language | <5μs |
 | PATH lookup (cache miss) | 1-5ms |
+| Background job check (read path) | <1μs (no jobs) |
+| Job polling interval | 250ms (balances responsiveness vs lock contention) |
 
 Run `cargo bench scan_` to verify. Use `cargo bench scan_individual_handlers` to measure each handler in isolation and identify bottlenecks.
+
+## Claude Code Agents
+
+Specialized agents in `.claude/agents/` for automated workflows:
+
+| Agent | Model | Purpose | When to Use |
+|-------|-------|---------|-------------|
+| `rust-clippy-enforcer` | sonnet | Run clippy and fix warnings | After code changes, before commits |
+| `rust-code-reviewer` | sonnet | Code review for best practices | After implementing features |
+| `code-metrics-analyzer` | sonnet | LOC, complexity, maintainability metrics | After significant code changes |
+| `docs-updater` | haiku | Update CLAUDE.md/README.md | After architectural changes |
+| `uml-diagram-generator` | haiku | Generate PlantUML diagrams | After refactoring |
+| `git-committer` | haiku | Create clean commits (no emojis, no Co-Author) | After completing work |
+
+**Usage**: Agents are invoked automatically by Claude Code when appropriate, or manually via Task tool.
+
+**Adding Agents**: Create `.claude/agents/<name>.md` with frontmatter (name, description, model, color) and system prompt.
 
 ## Windows Notes
 

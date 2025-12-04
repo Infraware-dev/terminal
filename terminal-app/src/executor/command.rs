@@ -5,6 +5,7 @@ use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
 
+use super::job_manager::SharedJobManager;
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
@@ -24,7 +25,6 @@ impl CommandOutput {
 
     /// Get combined output (stdout + stderr)
     #[must_use]
-    #[allow(dead_code)] // Public API for M2/M3
     pub fn combined_output(&self) -> String {
         let mut result = String::new();
         if !self.stdout.is_empty() {
@@ -89,6 +89,20 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     "nethogs",
     // Infinite output commands
     "yes", // Produces infinite "y" output - would freeze terminal
+];
+
+/// Commands with specific subcommands that are interactive (open browser, etc.)
+/// Format: (command, subcommand) - blocks "command subcommand ..."
+const INTERACTIVE_SUBCOMMANDS: &[(&str, &str)] = &[
+    // Cloud CLI auth commands that open browser
+    ("gcloud", "auth"),    // gcloud auth login opens browser
+    ("az", "login"),       // az login opens browser
+    ("aws", "sso"),        // aws sso login opens browser
+    ("gh", "auth"),        // gh auth login opens browser
+    ("firebase", "login"), // firebase login opens browser
+    ("heroku", "login"),   // heroku login opens browser
+    ("netlify", "login"),  // netlify login opens browser
+    ("vercel", "login"),   // vercel login opens browser
 ];
 
 /// Device paths that produce infinite output
@@ -194,6 +208,41 @@ impl CommandExecutor {
         ALL_INTERACTIVE.contains(cmd)
     }
 
+    /// Check if a command with its arguments matches an interactive subcommand pattern
+    ///
+    /// Returns Some((cmd, subcmd)) if blocked, None otherwise.
+    /// Example: "gcloud auth login" matches ("gcloud", "auth")
+    fn is_interactive_subcommand(
+        cmd: &str,
+        args: &[String],
+    ) -> Option<(&'static str, &'static str)> {
+        let first_arg = args.first().map(|s| s.as_str()).unwrap_or("");
+
+        INTERACTIVE_SUBCOMMANDS
+            .iter()
+            .find(|(blocked_cmd, blocked_subcmd)| {
+                cmd == *blocked_cmd && first_arg == *blocked_subcmd
+            })
+            .copied()
+    }
+
+    /// Check if shell input contains an interactive subcommand pattern
+    fn shell_has_interactive_subcommand(shell_input: &str) -> Option<(&'static str, &'static str)> {
+        let normalized = shell_input.trim();
+
+        INTERACTIVE_SUBCOMMANDS
+            .iter()
+            .find(|(cmd, subcmd)| {
+                // Match "cmd subcmd" at start of input (with word boundary)
+                let pattern = format!("{} {}", cmd, subcmd);
+                normalized.starts_with(&pattern)
+                    && normalized
+                        .get(pattern.len()..pattern.len() + 1)
+                        .is_none_or(|c| c == " " || c.is_empty())
+            })
+            .copied()
+    }
+
     /// Check if a command requires interactive execution with TUI suspension
     ///
     /// These commands need a real TTY and will be executed with the TUI suspended.
@@ -213,7 +262,7 @@ impl CommandExecutor {
     /// Get the platform-appropriate shell and shell command flag
     ///
     /// Returns a tuple of (`shell_executable`, `command_flag`):
-    /// - Unix/Linux/macOS: ("sh", "-c")
+    /// - Unix/Linux/macOS: ("bash", "-c") - bash supports brace expansion {1..3}
     /// - Windows: ("cmd", "/C")
     const fn get_platform_shell() -> (&'static str, &'static str) {
         #[cfg(target_os = "windows")]
@@ -222,7 +271,7 @@ impl CommandExecutor {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            ("sh", "-c")
+            ("bash", "-c")
         }
     }
 
@@ -262,6 +311,26 @@ impl CommandExecutor {
                      - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
                      - For 'ssh/tmux/screen': use in a separate terminal window\n\
                      - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')"
+                ),
+                exit_code: 1,
+            });
+        }
+
+        // Block interactive subcommands (e.g., "gcloud auth login" opens browser)
+        if let Some((blocked_cmd, blocked_subcmd)) = Self::is_interactive_subcommand(cmd, args) {
+            log::warn!(
+                "Blocked interactive subcommand: {} {}",
+                blocked_cmd,
+                blocked_subcmd
+            );
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
+                     Reason: This command opens a browser or requires interactive input.\n\n\
+                     Suggestions:\n\
+                     - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
+                     - Use non-interactive authentication (service accounts, tokens, etc.)"
                 ),
                 exit_code: 1,
             });
@@ -376,6 +445,28 @@ impl CommandExecutor {
                              Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
                              Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
                         .to_string(),
+                    exit_code: 1,
+                });
+            }
+
+            // Check for interactive subcommands in shell input (e.g., "gcloud auth login")
+            if let Some((blocked_cmd, blocked_subcmd)) =
+                Self::shell_has_interactive_subcommand(shell_input)
+            {
+                log::warn!(
+                    "Blocked interactive subcommand in shell: {} {}",
+                    blocked_cmd,
+                    blocked_subcmd
+                );
+                return Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!(
+                        "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
+                         Reason: This command opens a browser or requires interactive input.\n\n\
+                         Suggestions:\n\
+                         - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
+                         - Use non-interactive authentication (service accounts, tokens, etc.)"
+                    ),
                     exit_code: 1,
                 });
             }
@@ -515,7 +606,6 @@ impl CommandExecutor {
 
     /// Get the full path of a command
     #[must_use]
-    #[allow(dead_code)] // Public API for M2/M3
     pub fn get_command_path(cmd: &str) -> Option<String> {
         which::which(cmd)
             .ok()
@@ -523,7 +613,6 @@ impl CommandExecutor {
     }
 
     /// Execute a command with sudo privileges (M2/M3)
-    #[allow(dead_code)] // Used by package manager implementations for privileged operations
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {
@@ -545,6 +634,131 @@ impl CommandExecutor {
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             exit_code: output.status.code().unwrap_or(-1),
         })
+    }
+
+    /// Check if a command should be executed in the background
+    ///
+    /// Returns true if the command ends with `&` but NOT `&&`.
+    /// Also checks that the `&` is not inside quotes.
+    ///
+    /// # Examples
+    /// ```
+    /// use infraware_terminal::executor::CommandExecutor;
+    ///
+    /// assert!(CommandExecutor::is_background_command("sleep 10 &"));
+    /// assert!(CommandExecutor::is_background_command("echo hello &"));
+    /// assert!(!CommandExecutor::is_background_command("cmd1 && cmd2"));
+    /// assert!(!CommandExecutor::is_background_command("echo hello"));
+    /// assert!(!CommandExecutor::is_background_command("echo \"a & b\""));
+    /// ```
+    #[must_use]
+    pub fn is_background_command(input: &str) -> bool {
+        let trimmed = input.trim();
+
+        // Fast path: Must end with & but not &&
+        if !trimmed.ends_with('&') || trimmed.ends_with("&&") {
+            return false;
+        }
+
+        // Zero-allocation quote tracking via character iterator with peekable
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut last_was_backslash = false;
+        let mut chars = trimmed.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            let is_last = chars.peek().is_none();
+
+            if last_was_backslash {
+                // This character is escaped
+                if is_last && c == '&' {
+                    // The trailing & is escaped
+                    return false;
+                }
+                last_was_backslash = false;
+                continue;
+            }
+
+            match c {
+                '\\' if !in_single_quote => {
+                    // Backslash escapes next char (unless in single quotes)
+                    last_was_backslash = true;
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                _ => {}
+            }
+        }
+
+        // If we're still inside quotes at the end, the & is quoted
+        !in_single_quote && !in_double_quote
+    }
+
+    /// Execute a command in the background without waiting
+    ///
+    /// Spawns the process and immediately returns, adding it to the job manager.
+    /// The job manager tracks the process and can report when it completes.
+    ///
+    /// # Arguments
+    /// * `command` - The full command string (including the trailing &)
+    /// * `job_manager` - Shared job manager for tracking
+    ///
+    /// # Returns
+    /// Tuple of (job_id, pid) on success
+    pub async fn execute_background(
+        command: &str,
+        job_manager: &SharedJobManager,
+    ) -> Result<(usize, u32)> {
+        let (shell, flag) = Self::get_platform_shell();
+
+        // Remove the trailing & from the command - we handle backgrounding ourselves
+        // If we pass "sleep 10 &" to bash, bash will fork internally and exit immediately,
+        // making it impossible to track the actual sleep process.
+        let command_without_amp = command.trim().trim_end_matches('&').trim();
+
+        log::info!(
+            "Spawning background command: {} (original: {})",
+            command_without_amp,
+            command
+        );
+
+        let child = TokioCommand::new(shell)
+            .arg(flag)
+            .arg(command_without_amp)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()) // Don't capture output for background
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn background command")?;
+
+        let pid = child
+            .id()
+            .context("Failed to get PID for background process - this should never happen")?;
+
+        let job_id = {
+            let mut mgr = match job_manager.write() {
+                Ok(guard) => guard,
+                Err(_poisoned) => {
+                    // Lock poisoning indicates a previous panic violated invariants.
+                    // Per Microsoft Rust Guidelines M-PANIC-IS-STOP, fail fast rather
+                    // than continue with potentially corrupted state.
+                    anyhow::bail!(
+                        "JobManager lock poisoned during execute_background. \
+                         Cannot safely track background job due to potential state corruption."
+                    );
+                }
+            };
+            // Store original command (with &) for display
+            mgr.add_job(command.trim().to_string(), pid, child)
+        };
+
+        log::info!("Background job [{}] started with PID {}", job_id, pid);
+
+        Ok((job_id, pid))
     }
 }
 
@@ -734,6 +948,70 @@ mod tests {
     }
 
     #[test]
+    fn test_is_interactive_subcommand() {
+        // gcloud auth should be blocked
+        let args = vec!["auth".to_string(), "login".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("gcloud", &args).is_some());
+
+        // gcloud compute should NOT be blocked
+        let args = vec!["compute".to_string(), "instances".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("gcloud", &args).is_none());
+
+        // az login should be blocked
+        let args = vec!["login".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("az", &args).is_some());
+
+        // az vm should NOT be blocked
+        let args = vec!["vm".to_string(), "list".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("az", &args).is_none());
+
+        // gh auth should be blocked
+        let args = vec!["auth".to_string(), "login".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("gh", &args).is_some());
+
+        // Empty args should not match
+        assert!(CommandExecutor::is_interactive_subcommand("gcloud", &[]).is_none());
+    }
+
+    #[test]
+    fn test_shell_has_interactive_subcommand() {
+        // Direct commands
+        assert!(CommandExecutor::shell_has_interactive_subcommand("gcloud auth login").is_some());
+        assert!(CommandExecutor::shell_has_interactive_subcommand("az login").is_some());
+        assert!(CommandExecutor::shell_has_interactive_subcommand("gh auth login").is_some());
+
+        // With extra args
+        assert!(CommandExecutor::shell_has_interactive_subcommand(
+            "gcloud auth login --no-launch-browser"
+        )
+        .is_some());
+
+        // Non-interactive subcommands
+        assert!(
+            CommandExecutor::shell_has_interactive_subcommand("gcloud compute instances list")
+                .is_none()
+        );
+        assert!(CommandExecutor::shell_has_interactive_subcommand("az vm list").is_none());
+
+        // Partial matches should NOT trigger (word boundary)
+        assert!(
+            CommandExecutor::shell_has_interactive_subcommand("gcloud authorization").is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gcloud_auth_blocked() {
+        let output =
+            CommandExecutor::execute("gcloud", &["auth".to_string(), "login".to_string()], None)
+                .await
+                .unwrap();
+
+        assert!(!output.is_success());
+        assert!(output.stderr.contains("not supported"));
+        assert!(output.stderr.contains("opens a browser"));
+    }
+
+    #[test]
     fn test_get_command_path() {
         let path = CommandExecutor::get_command_path("echo");
         assert!(path.is_some());
@@ -863,5 +1141,51 @@ mod tests {
             .unwrap();
         assert!(output.is_success());
         assert_eq!(output.stdout.trim(), "nested");
+    }
+
+    // ========== Background Command Detection Tests ==========
+
+    #[test]
+    fn test_is_background_command_simple() {
+        assert!(CommandExecutor::is_background_command("sleep 10 &"));
+        assert!(CommandExecutor::is_background_command("echo hello &"));
+        assert!(CommandExecutor::is_background_command("  sleep 5 &  ")); // with whitespace
+    }
+
+    #[test]
+    fn test_is_background_command_not_double_ampersand() {
+        assert!(!CommandExecutor::is_background_command("cmd1 && cmd2"));
+        assert!(!CommandExecutor::is_background_command("echo a && echo b"));
+    }
+
+    #[test]
+    fn test_is_background_command_no_ampersand() {
+        assert!(!CommandExecutor::is_background_command("echo hello"));
+        assert!(!CommandExecutor::is_background_command("ls -la"));
+    }
+
+    #[test]
+    fn test_is_background_command_ampersand_in_quotes() {
+        // Ampersand inside quotes is NOT a background operator
+        assert!(!CommandExecutor::is_background_command("echo \"a & b\""));
+        assert!(!CommandExecutor::is_background_command(
+            "echo 'run in background &'"
+        ));
+    }
+
+    #[test]
+    fn test_is_background_command_escaped_ampersand() {
+        // Escaped ampersand is NOT a background operator
+        assert!(!CommandExecutor::is_background_command("echo hello \\&"));
+    }
+
+    #[test]
+    fn test_is_background_command_complex() {
+        // Multiple commands with final background
+        assert!(CommandExecutor::is_background_command("cmd1; cmd2 &"));
+        // Pipe with background
+        assert!(CommandExecutor::is_background_command(
+            "cat file | grep pattern &"
+        ));
     }
 }

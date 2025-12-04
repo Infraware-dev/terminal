@@ -6,15 +6,26 @@
 /// 2. LLM backend for natural language queries
 ///
 /// Target use case: DevOps operations in cloud environments (AWS/Azure) with AI assistance
-use infraware_terminal::{auth, input, llm, logging, orchestrators, terminal, utils};
+use infraware_terminal::{auth, executor, input, llm, logging, orchestrators, terminal, utils};
 
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+/// Interval between background job completion checks.
+///
+/// Why 250ms: Balances responsiveness vs overhead. Users perceive <300ms as
+/// "instant", so job completion notifications feel immediate. This avoids
+/// acquiring write locks on every keystroke event.
+///
+/// Trade-offs: Higher values delay "Done" notifications. Lower values increase
+/// lock contention and CPU usage with many background jobs.
+const JOB_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
 use auth::{AuthConfig, Authenticator, HttpAuthenticator};
+use executor::{create_shared_job_manager, SharedJobManager};
 use input::{InputClassifier, InputType};
 use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
 use orchestrators::{
@@ -55,6 +66,8 @@ pub struct InfrawareTerminal {
     /// Watch channel sender for cancellation token - allows sharing current token with poller
     /// Main loop can send new token to reset, poller can read current token to cancel
     cancellation_token_tx: watch::Sender<CancellationToken>,
+    /// Shared job manager for background processes
+    job_manager: SharedJobManager,
 }
 
 impl std::fmt::Debug for InfrawareTerminal {
@@ -77,6 +90,7 @@ impl std::fmt::Debug for InfrawareTerminal {
                     self.cancellation_token_tx.borrow().is_cancelled()
                 ),
             )
+            .field("job_manager", &"<SharedJobManager>")
             .finish()
     }
 }
@@ -248,6 +262,8 @@ impl InfrawareTerminalBuilder {
             using_mock_llm: self.using_mock_llm,
             // Create watch channel for cancellation token sharing with poller
             cancellation_token_tx: watch::channel(CancellationToken::new()).0,
+            // Create shared job manager for background processes
+            job_manager: create_shared_job_manager(),
         })
     }
 }
@@ -395,6 +411,9 @@ impl InfrawareTerminal {
             }
         });
 
+        // Track last job check time for periodic checking (reduces lock contention)
+        let mut last_job_check = Instant::now();
+
         // Main event loop - receives events from background poller
         loop {
             // Wait for event with timeout
@@ -412,7 +431,12 @@ impl InfrawareTerminal {
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Timeout - continue polling
+                    // Timeout - check jobs periodically even without events
+                    if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
+                        self.check_completed_jobs();
+                        last_job_check = Instant::now();
+                        self.ui.render(&mut self.state)?;
+                    }
                     continue;
                 }
             };
@@ -420,6 +444,13 @@ impl InfrawareTerminal {
             // Handle the event
             if !self.handle_event(event).await? {
                 break; // Quit requested
+            }
+
+            // Check for completed background jobs periodically (not on every event)
+            // This reduces lock contention during rapid typing
+            if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
+                self.check_completed_jobs();
+                last_job_check = Instant::now();
             }
 
             // Re-render after handling event
@@ -482,6 +513,14 @@ impl InfrawareTerminal {
                 log::info!("Ctrl+C: Clearing input (mode={:?})", self.state.mode);
                 self.state.clear_input();
 
+                // Cancel multiline input if in multiline mode
+                if self.state.is_in_multiline_mode() {
+                    log::info!("Ctrl+C: Cancelling multiline input");
+                    self.state.cancel_multiline();
+                    self.state
+                        .add_output(MessageFormatter::info("Multiline input cancelled"));
+                }
+
                 // Reset token only if:
                 // 1. Token was cancelled (by poller)
                 // 2. We're NOT in WaitingLLM mode (avoid race with async operation checking token)
@@ -505,6 +544,8 @@ impl InfrawareTerminal {
     /// Handle input submission
     /// Returns false if the terminal should exit
     async fn handle_submit(&mut self) -> Result<bool> {
+        use crate::input::multiline::{is_incomplete, is_multiline_complete, join_lines};
+
         let input = self.state.submit_input();
 
         // Handle human-in-the-loop command approval mode (y/n)
@@ -532,6 +573,52 @@ impl InfrawareTerminal {
             return Ok(true);
         }
 
+        // Handle multiline input mode
+        if self.state.is_in_multiline_mode() {
+            // Add current line to multiline buffer
+            self.state.multiline_buffer.push(input.clone());
+
+            // Check if we're now complete
+            if let Some(reason) = is_multiline_complete(&self.state.multiline_buffer) {
+                // Still incomplete, update the reason and wait for more input
+                self.state.mode = TerminalMode::AwaitingMoreInput(reason);
+                return Ok(true);
+            }
+
+            // Complete! Join lines and process as single input
+            let full_input = join_lines(&self.state.multiline_buffer);
+            self.state.multiline_buffer.clear();
+            self.state.pending_heredoc = None;
+            self.state.mode = TerminalMode::Normal;
+
+            // Process the full multiline input (recursive call with joined input)
+            return self.handle_submit_with_input(full_input).await;
+        }
+
+        // Check if this single line is incomplete (needs more input)
+        if let Some(reason) = is_incomplete(&input, self.state.pending_heredoc.as_deref()) {
+            // Track heredoc delimiter if starting one
+            if let crate::input::IncompleteReason::HeredocPending { ref delimiter } = reason {
+                self.state.pending_heredoc = Some(delimiter.clone());
+            }
+
+            // Start multiline mode
+            self.state.multiline_buffer.push(input);
+            self.state.mode = TerminalMode::AwaitingMoreInput(reason);
+            return Ok(true);
+        }
+
+        if input.trim().is_empty() {
+            return Ok(true);
+        }
+
+        // Process complete single-line input
+        self.handle_submit_with_input(input).await
+    }
+
+    /// Handle input submission with a specific input string
+    /// This is used both for single-line and joined multiline input
+    async fn handle_submit_with_input(&mut self, input: String) -> Result<bool> {
         if input.trim().is_empty() {
             return Ok(true);
         }
@@ -632,7 +719,14 @@ impl InfrawareTerminal {
         }
 
         self.command_orchestrator
-            .handle_command(cmd, args, original_input, &mut self.state, &mut self.ui)
+            .handle_command(
+                cmd,
+                args,
+                original_input,
+                &mut self.state,
+                &mut self.ui,
+                &self.job_manager,
+            )
             .await
     }
 
@@ -717,6 +811,59 @@ impl InfrawareTerminal {
         Ok(())
     }
 
+    /// Check for completed background jobs and display notifications
+    ///
+    /// Called periodically (not on every event) to provide timely feedback
+    /// when background processes complete while minimizing lock contention.
+    fn check_completed_jobs(&mut self) {
+        // Fast path: check if there are any jobs with read lock first
+        let has_jobs = {
+            match self.job_manager.read() {
+                Ok(guard) => guard.has_running_jobs(),
+                Err(_poisoned) => {
+                    // Lock poisoning indicates previous panic violated invariants.
+                    // Log error and skip this check - don't recover with corrupted state.
+                    log::error!(
+                        "JobManager lock poisoned during check_completed_jobs (read). \
+                         Skipping job check to avoid potential state corruption."
+                    );
+                    return;
+                }
+            }
+        };
+
+        if !has_jobs {
+            return; // No jobs, skip expensive write lock
+        }
+
+        // Jobs exist, acquire write lock to check completion
+        let completed: Vec<executor::JobInfo> = {
+            let mut mgr = match self.job_manager.write() {
+                Ok(guard) => guard,
+                Err(_poisoned) => {
+                    // Lock poisoning indicates previous panic violated invariants.
+                    // Log error and skip - don't recover with corrupted state.
+                    log::error!(
+                        "JobManager lock poisoned during check_completed_jobs (write). \
+                         Skipping job check to avoid potential state corruption."
+                    );
+                    return;
+                }
+            };
+            mgr.check_completed()
+        };
+
+        for job in completed {
+            let exit_info = match job.status {
+                executor::JobStatus::Done(code) => format!("exit: {}", code),
+                executor::JobStatus::Terminated => "terminated".to_string(),
+                executor::JobStatus::Running => continue, // Should not happen
+            };
+            self.state
+                .add_output(format!("[{}] Done ({}) {}", job.id, exit_info, job.command));
+        }
+    }
+
     /// Handle command typo
     ///
     /// Auto-corrects the typo and executes the suggested command
@@ -748,7 +895,14 @@ impl InfrawareTerminal {
         match CommandParser::parse(&corrected_input) {
             Ok((command, args)) => {
                 self.command_orchestrator
-                    .handle_command(&command, &args, None, &mut self.state, &mut self.ui)
+                    .handle_command(
+                        &command,
+                        &args,
+                        None,
+                        &mut self.state,
+                        &mut self.ui,
+                        &self.job_manager,
+                    )
                     .await
             }
             Err(e) => {
