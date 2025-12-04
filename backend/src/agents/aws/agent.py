@@ -1,7 +1,9 @@
-from deepagents import create_deep_agent 
-from src.shared.models import model
+"""AWS agent configuration and initialization."""
+
+from deepagents import create_deep_agent
 
 from agents.aws.tools import mcp_tools
+from src.shared.models import model
 
 # System prompt to steer the agent to be an AWS cloud infrastructure expert
 aws_instructions = """You are an expert AWS cloud infrastructure engineer and architect. 
@@ -44,9 +46,5 @@ When providing solutions:
 
 
 aws_agent = create_deep_agent(
-    tools=[*mcp_tools],
-    model=model,
-    system_prompt=aws_instructions,
-    name="aws_agent"
+    tools=[*mcp_tools], model=model, system_prompt=aws_instructions, name="aws_agent"
 )
-

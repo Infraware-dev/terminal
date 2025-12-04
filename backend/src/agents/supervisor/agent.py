@@ -3,9 +3,8 @@
 from langgraph_supervisor import create_supervisor
 
 from agents.aws.agent import aws_agent
-from agents.gcp.agent import gcp_agent
 from agents.command_execution.agent import local_agent
-
+from agents.gcp.agent import gcp_agent
 from src.shared.models import model
 
 supervisor = create_supervisor(
