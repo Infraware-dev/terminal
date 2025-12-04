@@ -1,5 +1,5 @@
-@startuml "Main Application Architecture with Builder Pattern"
-title "Infraware Terminal - Main Application Structure"
+@startuml "Main Application Architecture with Builder Pattern and Background Processes"
+title "Infraware Terminal - Main Application Structure (with Background Process Support)"
 
 ' InfrawareTerminal main struct
 package "Main Application" {
@@ -12,9 +12,14 @@ package "Main Application" {
     - nl_orchestrator: NaturalLanguageOrchestrator
     - tab_completion_handler: TabCompletionHandler
     - history_arc: Arc<RwLock<Vec<String>>>
+    - authenticator: Option<Arc<dyn Authenticator>>
+    - using_mock_llm: bool
+    - cancellation_token_tx: watch::Sender<CancellationToken>
+    - job_manager: SharedJobManager
     --
     + builder(): InfrawareTerminalBuilder
     + run(): async Result<()>
+    + check_completed_jobs()
     - handle_event(event): async Result<bool>
     - handle_submit(): async Result<bool>
     - handle_command(): async Result<()>
@@ -32,12 +37,30 @@ package "Main Application" {
     - Routes events to orchestrators
     - Coordinates UI and state
     - Handles scrolling via TerminalState
+    - Monitors background jobs periodically
 
     **Event Handling**
     - ScrollUp/ScrollDown events
     - Calls state.scroll_up()/scroll_down()
     - TerminalState manages visible_lines
     - OutputBuffer uses visible_lines for bounds
+
+    **Background Process Support (Periodic)**
+    - Holds: SharedJobManager field
+    - Holds: last_job_check: Instant tracker
+    - Periodic check: every 250ms (JOB_CHECK_INTERVAL)
+    - Two-phase locking: read first, then write if needed
+    - Fail-fast on poisoning: log error, return early
+    - Displays completion notifications only on success
+    - Non-blocking try_wait() for status checks
+
+    **Job Checking Strategy**
+    - Read lock phase: check has_running_jobs()
+    - Fast path: return if no jobs exist
+    - Write lock phase: call check_completed()
+    - Poisoning handling: fail-fast (no recovery)
+    - Periodic: reduces lock contention by 25x
+      vs per-event checking
   end note
 }
 
@@ -77,6 +100,52 @@ package "Builder Pattern" {
 
 InfrawareTerminalBuilder --|> InfrawareTerminal : builds
 
+' Background job management (NEW)
+package "Background Process Management (NEW)" {
+  class SharedJobManager {
+    note as JobMgrNote
+      type SharedJobManager =
+        Arc<RwLock<JobManager>>
+
+      **Thread-Safe Shared Access**
+      - Arc: shared ownership across modules
+      - RwLock: reader-writer synchronization
+      - Multiple concurrent readers
+      - Exclusive writers
+    end note
+  }
+
+  class JobManager {
+    - jobs: HashMap<usize, JobEntry>
+    - next_id: usize
+    --
+    + new(): Self
+    + add_job(...): usize
+    + list_jobs(): Vec<JobInfo>
+    + job_count(): usize
+    + check_completed(): Vec<JobInfo>
+    + has_running_jobs(): bool
+  }
+
+  class JobInfo {
+    + id: usize
+    + pid: u32
+    + command: String
+    + status: JobStatus
+    + start_time: Instant
+  }
+
+  JobManager --> JobInfo : returns cloned
+
+  note bottom of JobManager
+    **Non-Blocking Job Tracking**
+    - try_wait() for status polling
+    - Automatic cleanup on completion
+    - 1-based job IDs (bash-style)
+    - Safe for event loop integration
+  end note
+}
+
 ' Core dependencies
 InfrawareTerminal --> TerminalUI : owns
 InfrawareTerminal --> TerminalState : owns
@@ -85,14 +154,19 @@ InfrawareTerminal --> EventHandler : owns
 InfrawareTerminal --> CommandOrchestrator : owns
 InfrawareTerminal --> NaturalLanguageOrchestrator : owns
 InfrawareTerminal --> TabCompletionHandler : owns
+InfrawareTerminal --> SharedJobManager : owns (NEW)
+
+' Orchestrator integration
+CommandOrchestrator --> SharedJobManager : manages background jobs (NEW)
 
 ' Event flow
 TerminalUI : Ratatui-based rendering
 EventHandler : Keyboard input polling
 InputClassifier : SCAN algorithm
 TerminalState : Buffer management + history
-CommandOrchestrator : Command execution workflow
+CommandOrchestrator : Command execution workflow + background jobs
 NaturalLanguageOrchestrator : LLM query workflow
 TabCompletionHandler : Tab completion
+SharedJobManager : Background process tracking
 
 @enduml

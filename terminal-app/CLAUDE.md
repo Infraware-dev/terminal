@@ -77,7 +77,7 @@ Chain of Responsibility with 11 handlers executing in strict order (<100μs aver
 | 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) |
 | 11 | DefaultHandler | Fallback to LLM |
 
-**Key optimizations**: Precompiled RegexSet, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
+**Key optimizations**: Precompiled RegexSet, thread-safe locks with fail-fast poisoning recovery, periodic job checking (250ms), fast paths first.
 
 ### Key Modules
 
@@ -147,7 +147,7 @@ Add new builtins to `src/input/application_builtins.rs`.
 
 ### Background Process Support
 
-Commands with `&` suffix run in background. `jobs` builtin lists all jobs. Implementation: `JobManager` (`src/executor/job_manager.rs`) with `Arc<RwLock>` for thread-safe access. Main event loop checks for completed jobs.
+Commands with `&` suffix run in background. `jobs` builtin lists all jobs. Implementation: `JobManager` (`src/executor/job_manager.rs`) with `Arc<RwLock>` for thread-safe access. Main event loop checks for completed jobs periodically (250ms interval) to minimize lock contention. Lock poisoning triggers fail-fast (bail/return early) per Microsoft Rust Guidelines.
 
 ### Multiline Command Support
 
@@ -215,6 +215,7 @@ HTTP operations use structured prefixes: `[HTTP-OUT]` (request), `[HTTP-IN]` (re
 
 - All public types implement `Debug` (custom impl for complex types to protect sensitive data)
 - Use `#[expect]` instead of `#[allow]` for lint overrides
+- Panic safety (M-PANIC-IS-STOP): Lock poisoning triggers fail-fast (bail/return early), not recovery with potentially corrupted state
 - Zero clippy warnings, all tests passing
 - See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines
 
@@ -288,6 +289,8 @@ Context is passed to handlers that need shared state (e.g., `KnownCommandHandler
 | Typo detection | <100μs (disabled by default) |
 | Natural language | <5μs |
 | PATH lookup (cache miss) | 1-5ms |
+| Background job check (read path) | <1μs (no jobs) |
+| Job polling interval | 250ms (balances responsiveness vs lock contention) |
 
 Run `cargo bench scan_` to verify. Use `cargo bench scan_individual_handlers` to measure each handler in isolation and identify bottlenecks.
 
