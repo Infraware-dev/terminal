@@ -19,5 +19,5 @@ local_agent = create_agent(
         "- Then, after you have fully answered, transfer back to the supervisor\n"
         "- Be conversational and helpful in your responses"
     ),
-    name="local_agent",
+    name="command_execution_agent",
 )

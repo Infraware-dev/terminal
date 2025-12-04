@@ -4,7 +4,7 @@ from langgraph_supervisor import create_supervisor
 
 from agents.aws.agent import aws_agent
 from agents.gcp.agent import gcp_agent
-from agents.local.agent import local_agent
+from agents.command_execution.agent import local_agent
 from agents.shared.models import model
 
 supervisor = create_supervisor(
@@ -14,6 +14,7 @@ supervisor = create_supervisor(
         "You are a supervisor managing two agents:\n"
         "- a gcp agent. Assign gcp-related tasks to this agent\n"
         "- a aws agent. Assign aws-related tasks to this agent\n"
+        "- a command execution agent. Assign command execution tasks to this agent\n\n"
         "Assign work to one agent at a time, do not call agents in parallel.\n"
         "Do not do any work yourself."
     ),
