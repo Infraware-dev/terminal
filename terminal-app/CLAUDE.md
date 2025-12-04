@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
 **Status**: M1 Complete + Backend Integration in Progress (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
-**Recent**: Chain of Responsibility refactoring complete (ClassifierContext DI, HandlerPosition enum, external language config)
+**Recent**: Background process support (`&` suffix), multiline command support (continuation `\`, heredocs `<<EOF`)
 **Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
@@ -69,9 +69,9 @@ Chain of Responsibility with 11 handlers executing in strict order (<100μs aver
 |---|---------|---------|
 | 1 | EmptyInputHandler | Fast path for empty/whitespace |
 | 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion |
-| 3 | ApplicationBuiltinHandler | App builtins (clear, exit, reload-aliases, reload-commands, auth-status) |
+| 3 | ApplicationBuiltinHandler | App builtins (clear, exit, jobs, reload-aliases, reload-commands, auth-status) |
 | 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export, eval, exec) |
-| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd |
+| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd, background suffix detection |
 | 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache |
 | 7 | PathDiscoveryHandler | Auto-discover newly installed commands |
 | 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects |
@@ -87,7 +87,7 @@ Chain of Responsibility with 11 handlers executing in strict order (<100μs aver
 |-----------|---------|-----------|
 | `terminal/` | TUI rendering and state | `tui.rs` (suspend/resume), `buffers.rs` (SRP buffers), `events.rs` (keyboard) |
 | `input/` | SCAN Algorithm | `classifier.rs` (coordinator), `handler.rs` (11-handler chain), `known_commands.rs` (command registry) |
-| `executor/` | Command execution | `command.rs` (async exec), `package_manager.rs` (Strategy pattern) |
+| `executor/` | Command execution | `command.rs` (async exec, background processes), `package_manager.rs` (Strategy pattern), `job_manager.rs` (background job tracking) |
 | `orchestrators/` | Workflow coordination | `command.rs`, `natural_language.rs`, `tab_completion.rs` |
 | `llm/` | LLM integration | `client.rs` (Mock/HTTP clients with HITL support), `renderer.rs` (syntax highlighting) |
 | `auth/` | Backend authentication | `authenticator.rs` (HTTP/Mock auth), `config.rs` (env config), `models.rs` (API types) |
@@ -135,6 +135,7 @@ Application-specific commands recognized by `ApplicationBuiltinHandler` (positio
 - `cd` - Change working directory (handled by parent process to affect shell state)
 - `clear` - Clear terminal output buffer
 - `exit` - Exit the terminal application
+- `jobs` - List background jobs (see Background Process Support below)
 - `reload-aliases` - Reload aliases from system/user config files
 - `reload-commands` - Clear command cache (use after installing new commands)
 - `auth-status` - Check backend authentication status
@@ -156,6 +157,29 @@ Commands that would freeze the terminal by producing infinite output are blocked
 - `ping` without `-c N` flag - infinite ping
 
 **Not blocked** (useful for DevOps, Ctrl+C works): `tail -f`, `docker logs -f`, `watch`
+
+### Background Process Support
+
+Commands can be executed in the background using the `&` suffix (similar to shell behavior):
+
+- **Syntax**: Type any command followed by `&` (e.g., `sleep 10 &`, `long-running-task &`)
+- **Job IDs**: Each background process is assigned a 1-based job ID (like Bash)
+- **Process IDs**: Both job ID and PID (process ID) are tracked
+- **Job listing**: Use `jobs` builtin command to display all background jobs with status
+- **Job status display**: Format is `[job_id] Status command` (e.g., `[1] Running sleep 10 &`)
+- **Completion notification**: When a job completes, terminal displays `[job_id] Done (exit: code) command`
+- **Non-blocking**: Background jobs run independently; the terminal remains responsive
+- **Implementation**: JobManager (`src/executor/job_manager.rs`) tracks jobs with `Arc<RwLock>` for thread-safe access
+- **Automatic checking**: Main event loop checks for completed jobs and displays notifications
+
+### Multiline Command Support
+
+The terminal supports multiline input for complex commands:
+
+- **Line continuation**: End a line with `\` to continue on the next line
+- **Heredocs**: Use `<<EOF` syntax for multi-line input (common in shell scripts)
+- **Brace expansion**: Bash-style brace expansion (e.g., `file{1..3}` → `file1 file2 file3`)
+- **Implementation**: Commands with incomplete syntax wait for additional input before execution
 
 ### Shell Builtins
 - 45+ recognized without PATH verification (., :, [, [[, export, eval, exec, etc.)
