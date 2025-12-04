@@ -595,10 +595,29 @@ async fn test_brace_expansion_reverse_range() {
     }
 }
 
+/// Helper to check if bash supports advanced brace expansion (Bash 4.0+ features)
+async fn bash_supports_advanced_brace_expansion() -> bool {
+    // Test if bash supports zero-padding and step in brace expansion
+    let output = CommandExecutor::execute("bash", &[], Some("bash -c 'echo {01..02}'"))
+        .await
+        .ok();
+
+    match output {
+        Some(out) => out.is_success() && out.stdout.trim() == "01 02",
+        None => false,
+    }
+}
+
 #[tokio::test]
 async fn test_brace_expansion_zero_padding() {
     use std::fs;
     use std::path::Path;
+
+    // Skip test if bash doesn't support advanced brace expansion (requires Bash 4.0+)
+    if !bash_supports_advanced_brace_expansion().await {
+        eprintln!("Skipping test: bash does not support zero-padded brace expansion");
+        return;
+    }
 
     let temp_dir = std::env::temp_dir();
     let base_name = format!("infraware_zero_pad_{}", std::process::id());
@@ -641,6 +660,12 @@ async fn test_brace_expansion_zero_padding() {
 async fn test_brace_expansion_step() {
     use std::fs;
     use std::path::Path;
+
+    // Skip test if bash doesn't support advanced brace expansion (requires Bash 4.0+)
+    if !bash_supports_advanced_brace_expansion().await {
+        eprintln!("Skipping test: bash does not support step brace expansion");
+        return;
+    }
 
     let temp_dir = std::env::temp_dir();
     let base_name = format!("infraware_step_{}", std::process::id());
