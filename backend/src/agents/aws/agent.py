@@ -1,5 +1,5 @@
 from deepagents import create_deep_agent 
-from agents.shared.models import model
+from src.shared.models import model
 
 from agents.aws.tools import mcp_tools
 

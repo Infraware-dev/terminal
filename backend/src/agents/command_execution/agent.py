@@ -3,10 +3,10 @@
 # Utils
 from langchain.agents import create_agent
 
-from agents.shared.models import model
+from src.shared.models import model
 
 # Tools
-from agents.shared.tools.shell_tool import shell_with_approval as shell_tool
+from src.shared.tools.shell_tool import shell_with_approval as shell_tool
 
 local_agent = create_agent(
     model=model,
