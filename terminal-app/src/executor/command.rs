@@ -177,6 +177,25 @@ fn is_infinite_ping(cmd: &str, args: &[String]) -> bool {
     !has_limit
 }
 
+/// Check if arguments contain glob patterns that need shell expansion
+///
+/// Detects patterns like:
+/// - `*` - match any characters (e.g., `file*`)
+/// - `?` - match single character (e.g., `file?.txt`)
+/// - `[...]` - character class (e.g., `file[123].txt`)
+/// - `{...}` - brace expansion (e.g., `file{1..3}`)
+///
+/// Returns true if any argument contains a glob pattern that requires shell expansion.
+fn has_glob_patterns(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        // Check for glob metacharacters
+        arg.contains('*')
+            || arg.contains('?')
+            || (arg.contains('[') && arg.contains(']'))
+            || (arg.contains('{') && arg.contains('}'))
+    })
+}
+
 /// Check if a shell command string contains references to infinite devices
 ///
 /// Used to detect bypasses via shell interpretation (e.g., `sh -c "cat /dev/zero"`)
@@ -491,7 +510,42 @@ impl CommandExecutor {
             });
         }
 
-        // Direct execution (no shell operators)
+        // Check if arguments contain glob patterns (*, ?, [...], {...})
+        // If so, execute through shell for proper expansion
+        if has_glob_patterns(args) {
+            log::debug!(
+                "Command '{}' has glob patterns, executing through shell",
+                cmd
+            );
+
+            // Reconstruct full command for shell execution
+            let full_command = if args.is_empty() {
+                cmd.to_string()
+            } else {
+                format!("{} {}", cmd, args.join(" "))
+            };
+
+            let (shell, shell_flag) = Self::get_platform_shell();
+            let execution = TokioCommand::new(shell)
+                .arg(shell_flag)
+                .arg(&full_command)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+
+            let output = timeout(Duration::from_secs(300), execution)
+                .await
+                .context("Command execution timed out after 5 minutes")??;
+
+            return Ok(CommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+            });
+        }
+
+        // Direct execution (no shell operators, no glob patterns)
         // Check if command exists
         if !Self::command_exists(cmd) {
             log::error!("Command not found: {}", cmd);
@@ -1187,5 +1241,57 @@ mod tests {
         assert!(CommandExecutor::is_background_command(
             "cat file | grep pattern &"
         ));
+    }
+
+    // ========== Glob Pattern Detection Tests ==========
+
+    #[test]
+    fn test_has_glob_patterns_asterisk() {
+        assert!(has_glob_patterns(&["file*".to_string(), "-rf".to_string()]));
+        assert!(has_glob_patterns(&["*.txt".to_string()]));
+        assert!(has_glob_patterns(&["file*.log".to_string()]));
+    }
+
+    #[test]
+    fn test_has_glob_patterns_question_mark() {
+        assert!(has_glob_patterns(&["file?.txt".to_string()]));
+        assert!(has_glob_patterns(&["test??.log".to_string()]));
+    }
+
+    #[test]
+    fn test_has_glob_patterns_brackets() {
+        assert!(has_glob_patterns(&["file[123].txt".to_string()]));
+        assert!(has_glob_patterns(&["test[a-z].log".to_string()]));
+    }
+
+    #[test]
+    fn test_has_glob_patterns_braces() {
+        assert!(has_glob_patterns(&["file{1..3}".to_string()]));
+        assert!(has_glob_patterns(&["test{a,b,c}.txt".to_string()]));
+    }
+
+    #[test]
+    fn test_has_glob_patterns_no_patterns() {
+        assert!(!has_glob_patterns(&["file.txt".to_string()]));
+        assert!(!has_glob_patterns(&[
+            "-rf".to_string(),
+            "directory".to_string()
+        ]));
+        assert!(!has_glob_patterns(&["test123.log".to_string()]));
+    }
+
+    #[test]
+    fn test_has_glob_patterns_empty() {
+        assert!(!has_glob_patterns(&[]));
+    }
+
+    #[test]
+    fn test_has_glob_patterns_mixed() {
+        // One arg with pattern, others without
+        assert!(has_glob_patterns(&[
+            "-rf".to_string(),
+            "file*".to_string(),
+            "other".to_string()
+        ]));
     }
 }
