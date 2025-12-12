@@ -14,6 +14,8 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
 use super::state::{TerminalMode, TerminalState};
@@ -21,6 +23,10 @@ use super::state::{TerminalMode, TerminalState};
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    /// Flag to pause event polling during interactive commands (vim, nano, etc.)
+    /// When true, the event polling thread should sleep instead of polling.
+    /// This prevents the poller from "stealing" keyboard input from vim/nano.
+    event_polling_paused: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for TerminalUI {
@@ -40,7 +46,19 @@ impl TerminalUI {
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            event_polling_paused: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Get a clone of the event polling pause flag.
+    ///
+    /// Pass this to the event polling thread so it can check whether to pause.
+    /// The polling thread should sleep instead of calling event::poll() when
+    /// this flag is true, to avoid stealing keyboard input from vim/nano/etc.
+    pub fn event_polling_pause_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.event_polling_paused)
     }
 
     /// Render the terminal UI
@@ -88,7 +106,16 @@ impl TerminalUI {
     ///
     /// Disables raw mode, leaves alternate screen, shows cursor.
     /// Terminal returns to normal state for interactive commands like vim, less, etc.
+    /// Also pauses event polling to prevent the poller from stealing keyboard input.
     pub fn suspend(&mut self) -> Result<()> {
+        // FIRST: Pause event polling to prevent poller from stealing keyboard input
+        // The poller checks this flag and sleeps instead of calling event::poll()
+        self.event_polling_paused.store(true, Ordering::SeqCst);
+
+        // Give poller time to notice the flag and exit its current poll() call
+        // event::poll() has a 50ms timeout, so 100ms is sufficient
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
         // Show cursor before leaving
         self.terminal.show_cursor()?;
 
@@ -111,6 +138,7 @@ impl TerminalUI {
     /// Resume TUI mode after interactive command completes
     ///
     /// Re-enables raw mode, enters alternate screen, clears screen.
+    /// Also resumes event polling.
     pub fn resume(&mut self) -> Result<()> {
         // Enable raw mode
         enable_raw_mode()?;
@@ -120,6 +148,9 @@ impl TerminalUI {
 
         // Clear screen to prevent artifacts
         self.terminal.clear()?;
+
+        // LAST: Resume event polling after TUI is fully restored
+        self.event_polling_paused.store(false, Ordering::SeqCst);
 
         Ok(())
     }

@@ -213,34 +213,39 @@ async fn test_execute_exit_codes() {
 }
 
 // =============================================================================
-// Infinite Output Command Blocking Tests
+// Infinite Output Command Truncation Tests
 // =============================================================================
 
 #[tokio::test]
-async fn test_yes_command_blocked() {
+async fn test_yes_command_truncated() {
+    // yes is NOT blocked - it's truncated at 1000 lines
     let output = CommandExecutor::execute("yes", &[], None).await.unwrap();
+    // Process was killed after reaching line limit
     assert!(!output.is_success());
-    assert_eq!(output.exit_code, 1);
+    // Output should contain many "y" lines
+    assert!(output.stdout.contains("y"));
+    // Output should show truncation message
     assert!(
-        output.stderr.contains("blocked")
-            || output.stderr.contains("not supported")
-            || output.stderr.contains("Interactive")
+        output.stdout.contains("[Output truncated at 1000 lines]"),
+        "Should show truncation message, got: {}",
+        &output.stdout[output.stdout.len().saturating_sub(100)..]
     );
 }
 
 #[tokio::test]
-async fn test_yes_command_error_message_helpful() {
+async fn test_yes_command_output_limited() {
     let output = CommandExecutor::execute("yes", &[], None).await.unwrap();
-    // Verify the error message provides some guidance
+    // Count actual output lines (excluding truncation message)
+    let lines: Vec<&str> = output.stdout.lines().collect();
+    // Should be around 1000 lines + truncation message
     assert!(
-        !output.stderr.is_empty(),
-        "Error message should not be empty"
+        lines.len() <= 1003,
+        "Output should be limited to ~1000 lines, got {}",
+        lines.len()
     );
     assert!(
-        output.stderr.contains("Suggestions")
-            || output.stderr.contains("Alternative")
-            || output.stderr.contains("not supported"),
-        "Error message should provide helpful suggestions"
+        lines.len() >= 1000,
+        "Output should have at least 1000 lines before truncation"
     );
 }
 
@@ -312,17 +317,11 @@ async fn test_dd_normal_usage_allowed() {
     );
 }
 
-#[tokio::test]
-async fn test_ping_without_count_blocked() {
-    let output = CommandExecutor::execute("ping", &["localhost".to_string()], None)
-        .await
-        .unwrap();
-    assert!(!output.is_success());
-    assert!(
-        output.stderr.contains("-c") || output.stderr.contains("count"),
-        "Error should suggest using -c flag"
-    );
-}
+// NOTE: ping without -c is no longer blocked. It runs until:
+// - 30 second timeout (LIMITED_COMMAND_TIMEOUT_SECS for non-whitelisted commands)
+// - or user presses Ctrl+C
+// This test is removed because it would take 30 seconds to complete.
+// The behavior is verified by the streaming implementation.
 
 #[tokio::test]
 async fn test_ping_with_count_allowed() {

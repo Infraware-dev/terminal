@@ -361,15 +361,26 @@ impl InfrawareTerminal {
         // This allows poller to always see the current token (even after resets)
         let cancel_token_rx = self.cancellation_token_tx.subscribe();
 
+        // Get pause flag for event polling (used during interactive commands like vim)
+        let pause_polling_flag = self.ui.event_polling_pause_flag();
+
         // Spawn background task for event polling
         // This task runs independently and can cancel async operations on Ctrl+C
         let poll_handle = tokio::task::spawn_blocking(move || {
+            use std::sync::atomic::Ordering;
             let event_handler = EventHandler::new();
             loop {
                 // Check if main loop has exited (receiver dropped)
                 if event_tx.is_closed() {
                     log::info!("Event poller: channel closed, stopping");
                     break;
+                }
+
+                // Check if polling is paused (during interactive commands like vim)
+                // When paused, sleep instead of polling to avoid stealing keyboard input
+                if pause_polling_flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
                 }
 
                 // Poll with short timeout

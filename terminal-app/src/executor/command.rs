@@ -2,8 +2,11 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::process::Stdio;
-use tokio::process::Command as TokioCommand;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command as TokioCommand};
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 
 use super::job_manager::SharedJobManager;
 
@@ -17,6 +20,53 @@ use super::job_manager::SharedJobManager;
 /// - Too low: Package managers (`apt install`, `cargo build`) may timeout prematurely
 /// - Too high: Hung processes won't be killed promptly, blocking user interaction
 const COMMAND_TIMEOUT_SECS: u64 = 300;
+
+/// Shorter timeout for non-whitelisted commands (30 seconds).
+///
+/// Commands not in UNLIMITED_OUTPUT_COMMANDS get this shorter timeout to prevent
+/// slow infinite commands (like `ping` without -c) from blocking for too long.
+const LIMITED_COMMAND_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum output lines for non-whitelisted commands.
+///
+/// Commands not in UNLIMITED_OUTPUT_COMMANDS will be terminated after this many lines.
+/// This protects against infinite output commands like `yes` or `seq 1 999999`.
+const MAX_OUTPUT_LINES: usize = 1000;
+
+/// Commands that are safe to have unlimited output.
+///
+/// These are standard Unix utilities that don't produce infinite output.
+/// Commands not in this list are limited to MAX_OUTPUT_LINES.
+const UNLIMITED_OUTPUT_COMMANDS: &[&str] = &[
+    // File listing
+    "ls", "dir", "find", "locate", "tree", // File reading
+    "cat", "head", "tail", "less", "more", // Text processing
+    "grep", "awk", "sed", "cut", "sort", "uniq", "wc", // System info
+    "ps", "top", "df", "du", "free", "uname", "whoami", "id", // Network
+    "ifconfig", "ip", "netstat", "ss", "curl", "wget", // Package managers
+    "apt", "apt-get", "yum", "dnf", "pacman", "brew", // Development
+    "git", "cargo", "npm", "pip", "docker", "kubectl", // Other common utilities
+    "echo", "printf", "date", "env", "which", "whereis", "file", "stat", "cp", "mv", "rm", "mkdir",
+    "touch", "chmod", "chown", "tar", "gzip", "gunzip", "zip", "unzip", "diff", "patch", "make",
+    "cmake", "man", "info", "help",
+];
+
+/// Check if a command is in the unlimited output whitelist
+fn is_unlimited_output_command(cmd: &str) -> bool {
+    UNLIMITED_OUTPUT_COMMANDS.contains(&cmd)
+}
+
+/// Commands that produce infinite output and should NOT be run in background.
+///
+/// These commands run forever and would consume CPU indefinitely.
+/// Block them from background execution entirely.
+const INFINITE_OUTPUT_COMMANDS: &[&str] = &["yes"];
+
+/// Check if a command produces infinite output
+fn is_infinite_output_command(cmd: &str) -> bool {
+    INFINITE_OUTPUT_COMMANDS.contains(&cmd)
+}
+
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
@@ -98,8 +148,6 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     "iotop",
     "iftop",
     "nethogs",
-    // Infinite output commands
-    "yes", // Produces infinite "y" output - would freeze terminal
 ];
 
 /// Commands with specific subcommands that are interactive (open browser, etc.)
@@ -161,33 +209,6 @@ fn targets_infinite_device(cmd: &str, args: &[String]) -> bool {
     false
 }
 
-/// Check if ping is missing a limiting flag (would run infinitely)
-///
-/// Supports multiple platforms:
-/// - `-c` count (Linux/macOS)
-/// - `-n` count (Windows)
-/// - `-w` deadline seconds (Linux)
-/// - `-W` timeout (macOS)
-fn is_infinite_ping(cmd: &str, args: &[String]) -> bool {
-    if cmd != "ping" {
-        return false;
-    }
-
-    // Check for any flag that limits ping duration
-    let has_limit = args.iter().any(|a| {
-        a == "-c"
-            || a.starts_with("-c")
-            || a == "-n"
-            || a.starts_with("-n")
-            || a == "-w"
-            || a.starts_with("-w")
-            || a == "-W"
-            || a.starts_with("-W")
-    });
-
-    !has_limit
-}
-
 /// Check if arguments contain glob patterns that need shell expansion
 ///
 /// Detects patterns like:
@@ -226,6 +247,140 @@ fn shell_command_has_infinite_device(shell_input: &str) -> bool {
         || shell_input.contains("count=");
 
     has_infinite_device && !has_output_limit
+}
+
+/// Execute a child process with output line limiting, cancellation, and optional streaming.
+///
+/// Reads stdout/stderr incrementally and terminates the process if it exceeds
+/// MAX_OUTPUT_LINES (for non-whitelisted commands) or if cancellation is requested.
+///
+/// # Arguments
+/// * `child` - The spawned child process
+/// * `unlimited` - If true, no line limit is applied (for whitelisted commands)
+/// * `line_tx` - Optional channel sender for streaming output lines in real-time
+/// * `cancel_token` - Optional cancellation token to interrupt execution
+///
+/// # Returns
+/// `CommandOutput` with stdout, stderr, and exit code. If truncated or cancelled,
+/// stdout includes an appropriate message.
+async fn execute_with_limit(
+    mut child: Child,
+    unlimited: bool,
+    line_tx: Option<mpsc::UnboundedSender<String>>,
+    cancel_token: Option<CancellationToken>,
+) -> Result<CommandOutput> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let mut stdout_lines: Vec<String> = Vec::new();
+    let mut stderr_lines: Vec<String> = Vec::new();
+    let mut truncated = false;
+    let mut cancelled = false;
+
+    // Read stdout with optional line limit and cancellation check
+    if let Some(out) = stdout {
+        let reader = BufReader::new(out);
+        let mut lines = reader.lines();
+
+        loop {
+            // Check for cancellation before reading next line
+            if let Some(ref token) = cancel_token {
+                if token.is_cancelled() {
+                    cancelled = true;
+                    child.kill().await.ok();
+                    break;
+                }
+            }
+
+            // Use select to check both line reading and cancellation
+            let line_result = if let Some(ref token) = cancel_token {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        cancelled = true;
+                        child.kill().await.ok();
+                        break;
+                    }
+                    result = lines.next_line() => result,
+                }
+            } else {
+                lines.next_line().await
+            };
+
+            match line_result {
+                Ok(Some(line)) => {
+                    // Stream line in real-time if sender provided
+                    if let Some(ref tx) = line_tx {
+                        // Ignore send errors (receiver may have been dropped)
+                        let _ = tx.send(line.clone());
+                    }
+
+                    stdout_lines.push(line);
+
+                    // Check limit only for non-whitelisted commands
+                    if !unlimited && stdout_lines.len() >= MAX_OUTPUT_LINES {
+                        truncated = true;
+                        // Kill the process to stop infinite output
+                        child.kill().await.ok();
+                        break;
+                    }
+                }
+                Ok(None) => break, // EOF
+                Err(_) => break,   // Error reading
+            }
+        }
+    }
+
+    // Read stderr (always with reasonable limit to catch errors)
+    // Skip if cancelled to return quickly
+    if !cancelled {
+        if let Some(err) = stderr {
+            let reader = BufReader::new(err);
+            let mut lines = reader.lines();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Stream stderr lines too (prefixed to distinguish)
+                if let Some(ref tx) = line_tx {
+                    let _ = tx.send(format!("[stderr] {}", line));
+                }
+
+                stderr_lines.push(line);
+                // Limit stderr too to prevent memory issues
+                if stderr_lines.len() > MAX_OUTPUT_LINES {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Wait for process to finish (may already be dead if killed)
+    let exit_code = match child.wait().await {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(_) => -1, // Process was killed
+    };
+
+    let mut stdout_output = stdout_lines.join("\n");
+
+    if cancelled {
+        let cancel_msg = "\n\n[Interrupted by Ctrl+C]".to_string();
+        stdout_output.push_str(&cancel_msg);
+        if let Some(ref tx) = line_tx {
+            let _ = tx.send(cancel_msg);
+        }
+    } else if truncated {
+        let truncation_msg = format!("\n\n[Output truncated at {} lines]", MAX_OUTPUT_LINES);
+        stdout_output.push_str(&truncation_msg);
+        // Also stream the truncation message
+        if let Some(ref tx) = line_tx {
+            let _ = tx.send(truncation_msg);
+        }
+    }
+
+    Ok(CommandOutput {
+        stdout: stdout_output,
+        stderr: stderr_lines.join("\n"),
+        exit_code,
+    })
 }
 
 /// Command executor for running shell commands
@@ -340,23 +495,32 @@ impl CommandExecutor {
     /// Helper function to reduce code duplication across shell execution paths.
     async fn execute_via_shell(command: &str) -> Result<CommandOutput> {
         let (shell, shell_flag) = Self::get_platform_shell();
-        let execution = TokioCommand::new(shell)
+
+        // Extract first command for whitelist check
+        let first_cmd = command.split_whitespace().next().unwrap_or("");
+        let unlimited = is_unlimited_output_command(first_cmd);
+
+        // Use shorter timeout for non-whitelisted commands (30s vs 5min)
+        let timeout_secs = if unlimited {
+            COMMAND_TIMEOUT_SECS
+        } else {
+            LIMITED_COMMAND_TIMEOUT_SECS
+        };
+
+        let child = TokioCommand::new(shell)
             .arg(shell_flag)
             .arg(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output();
+            .spawn()
+            .context("Failed to spawn shell command")?;
 
-        let output = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), execution)
+        let execution = execute_with_limit(child, unlimited, None, None);
+
+        timeout(Duration::from_secs(timeout_secs), execution)
             .await
-            .context("Command execution timed out after 5 minutes")??;
-
-        Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            exit_code: output.status.code().unwrap_or(-1),
-        })
+            .context(format!("Command timed out after {} seconds", timeout_secs))?
     }
 
     /// Execute a command asynchronously with a 5-minute timeout
@@ -421,37 +585,37 @@ impl CommandExecutor {
         }
 
         // Block commands targeting infinite devices (e.g., cat /dev/zero)
+        // BUT allow if piped to a limiting command (e.g., cat /dev/zero | head -c 100)
         if targets_infinite_device(cmd, args) {
-            log::warn!("Blocked infinite device command: {} {:?}", cmd, args);
-            return Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: format!(
-                    "Command '{} {}' is blocked.\n\n\
-                     Reason: Reading from infinite device would freeze the terminal.\n\n\
-                     Suggestion: Use 'head' to limit output, e.g., '{} {} | head -c 1000'",
-                    cmd,
-                    args.join(" "),
-                    cmd,
-                    args.join(" ")
-                ),
-                exit_code: 1,
+            // Check if original_input has a pipe to a limiting command
+            let has_pipe_limit = original_input.is_some_and(|input| {
+                input.contains("| head")
+                    || input.contains("|head")
+                    || input.contains("| tail")
+                    || input.contains("|tail")
             });
+
+            if !has_pipe_limit {
+                log::warn!("Blocked infinite device command: {} {:?}", cmd, args);
+                return Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!(
+                        "Command '{} {}' is blocked.\n\n\
+                         Reason: Reading from infinite device would freeze the terminal.\n\n\
+                         Suggestion: Use 'head' to limit output, e.g., '{} {} | head -c 1000'",
+                        cmd,
+                        args.join(" "),
+                        cmd,
+                        args.join(" ")
+                    ),
+                    exit_code: 1,
+                });
+            }
+            // Has pipe limit - will be executed via shell path below
         }
 
-        // Block ping without count flag (would run infinitely)
-        if is_infinite_ping(cmd, args) {
-            log::warn!("Blocked infinite ping: {} {:?}", cmd, args);
-            return Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: format!(
-                    "Command 'ping' without count limit is blocked.\n\n\
-                     Reason: Infinite ping would freeze the terminal.\n\n\
-                     Suggestion: Use '-c N' to limit, e.g., 'ping -c 4 {}'",
-                    args.first().map_or("host", String::as_str)
-                ),
-                exit_code: 1,
-            });
-        }
+        // Note: ping without -c is no longer blocked - it will be truncated at 1000 lines
+        // by execute_with_limit(), which is a better user experience than blocking entirely.
 
         // If command is a shell builtin, execute through shell
         // Builtins like '.', ':', '[[', 'source', 'export' don't exist as standalone executables
@@ -566,23 +730,115 @@ impl CommandExecutor {
             anyhow::bail!("Command '{cmd}' not found");
         }
 
-        // Execute the command with timeout
-        let execution = TokioCommand::new(cmd)
+        // Check if command is in unlimited output whitelist
+        let unlimited = is_unlimited_output_command(cmd);
+
+        // Execute the command with streaming and output limit
+        let child = TokioCommand::new(cmd)
             .args(args)
             .stdin(Stdio::null()) // Prevent interactive programs from blocking
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output();
+            .spawn()
+            .context("Failed to spawn command")?;
 
-        let output = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), execution)
+        // Use shorter timeout for non-whitelisted commands
+        let timeout_secs = if unlimited {
+            COMMAND_TIMEOUT_SECS
+        } else {
+            LIMITED_COMMAND_TIMEOUT_SECS
+        };
+
+        let execution = execute_with_limit(child, unlimited, None, None);
+
+        timeout(Duration::from_secs(timeout_secs), execution)
             .await
-            .context("Command execution timed out after 5 minutes")??;
+            .context(format!("Command timed out after {} seconds", timeout_secs))?
+    }
 
-        Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            exit_code: output.status.code().unwrap_or(-1),
-        })
+    /// Execute a command with streaming output and cancellation support.
+    ///
+    /// Returns a channel receiver that receives output lines in real-time,
+    /// plus a JoinHandle that resolves to the final CommandOutput when complete.
+    ///
+    /// # Arguments
+    /// * `cmd` - The command name
+    /// * `args` - The command arguments
+    /// * `original_input` - Optional original input string for shell execution
+    /// * `cancel_token` - Cancellation token to interrupt execution on Ctrl+C
+    ///
+    /// # Returns
+    /// Tuple of (receiver for streaming lines, handle for final result)
+    pub fn execute_streaming(
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+        cancel_token: CancellationToken,
+    ) -> (
+        mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<Result<CommandOutput>>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let cmd = cmd.to_string();
+        let args = args.to_vec();
+        let original_input = original_input.map(String::from);
+
+        let handle = tokio::spawn(async move {
+            Self::execute_with_streaming(&cmd, &args, original_input.as_deref(), tx, cancel_token)
+                .await
+        });
+
+        (rx, handle)
+    }
+
+    /// Internal helper for streaming execution
+    async fn execute_with_streaming(
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+        line_tx: mpsc::UnboundedSender<String>,
+        cancel_token: CancellationToken,
+    ) -> Result<CommandOutput> {
+        // Check whitelist
+        let unlimited = is_unlimited_output_command(cmd);
+
+        // Use shorter timeout for non-whitelisted commands
+        let timeout_secs = if unlimited {
+            COMMAND_TIMEOUT_SECS
+        } else {
+            LIMITED_COMMAND_TIMEOUT_SECS
+        };
+
+        let (shell, shell_flag) = Self::get_platform_shell();
+
+        // Determine execution path
+        let child = if let Some(shell_input) = original_input {
+            // Shell execution with original input
+            TokioCommand::new(shell)
+                .arg(shell_flag)
+                .arg(shell_input)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("Failed to spawn shell command")?
+        } else {
+            // Direct execution
+            TokioCommand::new(cmd)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("Failed to spawn command")?
+        };
+
+        let execution = execute_with_limit(child, unlimited, Some(line_tx), Some(cancel_token));
+
+        timeout(Duration::from_secs(timeout_secs), execution)
+            .await
+            .context(format!("Command timed out after {} seconds", timeout_secs))?
     }
 
     /// Execute interactive command with TUI suspension
@@ -644,8 +900,15 @@ impl CommandExecutor {
             let args = args.to_vec();
 
             // Run blocking command on dedicated thread pool
+            // IMPORTANT: Explicitly inherit stdin/stdout/stderr so vim/nano/etc
+            // get full terminal access. Without this, input can be lost or delayed.
             let result = tokio::task::spawn_blocking(move || {
-                std::process::Command::new(&cmd).args(&args).status()
+                std::process::Command::new(&cmd)
+                    .args(&args)
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .status()
             })
             .await
             .context("Interactive command task panicked")?;
@@ -787,6 +1050,28 @@ impl CommandExecutor {
         // If we pass "sleep 10 &" to bash, bash will fork internally and exit immediately,
         // making it impossible to track the actual sleep process.
         let command_without_amp = command.trim().trim_end_matches('&').trim();
+
+        // Block infinite output commands from running in background
+        // They would run forever and consume CPU indefinitely
+        let first_cmd = command_without_amp.split_whitespace().next().unwrap_or("");
+        if is_infinite_output_command(first_cmd) {
+            anyhow::bail!(
+                "Command '{}' produces infinite output and cannot be run in background.\n\
+                 Use it in foreground with output limit, or pipe to a limiting command:\n\
+                 Example: {} | head -n 100",
+                first_cmd,
+                first_cmd
+            );
+        }
+
+        // Block commands targeting infinite devices (e.g., cat /dev/zero &)
+        if shell_command_has_infinite_device(command_without_amp) {
+            anyhow::bail!(
+                "Command contains reference to infinite device (/dev/zero, /dev/urandom, /dev/random).\n\
+                 Cannot run in background - would consume resources indefinitely.\n\
+                 Use with output limit: cat /dev/urandom | head -c 1000 &"
+            );
+        }
 
         log::info!(
             "Spawning background command: {} (original: {})",
@@ -1308,5 +1593,68 @@ mod tests {
             "file*".to_string(),
             "other".to_string()
         ]));
+    }
+
+    // ========== Output Truncation Tests ==========
+
+    #[test]
+    fn test_is_unlimited_output_command() {
+        // Whitelisted commands
+        assert!(is_unlimited_output_command("ls"));
+        assert!(is_unlimited_output_command("cat"));
+        assert!(is_unlimited_output_command("grep"));
+        assert!(is_unlimited_output_command("git"));
+        assert!(is_unlimited_output_command("docker"));
+        assert!(is_unlimited_output_command("echo"));
+
+        // Non-whitelisted commands (should be limited)
+        assert!(!is_unlimited_output_command("yes"));
+        assert!(!is_unlimited_output_command("seq"));
+        assert!(!is_unlimited_output_command("unknown_command"));
+    }
+
+    #[tokio::test]
+    async fn test_yes_truncated_at_limit() {
+        // yes produces infinite output, should be truncated
+        let output = CommandExecutor::execute("yes", &[], None).await.unwrap();
+        assert!(output.stdout.contains("[Output truncated"));
+        let line_count = output.stdout.lines().count();
+        // Should have MAX_OUTPUT_LINES + truncation message (2 lines)
+        assert!(line_count <= MAX_OUTPUT_LINES + 3);
+    }
+
+    #[tokio::test]
+    async fn test_seq_truncated_when_exceeds_limit() {
+        // seq is NOT whitelisted, so it should be truncated
+        let output = CommandExecutor::execute("seq", &["1".to_string(), "2000".to_string()], None)
+            .await
+            .unwrap();
+        assert!(output.stdout.contains("[Output truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_not_truncated() {
+        // ls IS whitelisted - should not be truncated for normal directories
+        let output = CommandExecutor::execute("ls", &["-la".to_string()], None)
+            .await
+            .unwrap();
+        assert!(!output.stdout.contains("[Output truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_echo_not_truncated() {
+        // echo IS whitelisted
+        let output = CommandExecutor::execute("echo", &["hello".to_string()], None)
+            .await
+            .unwrap();
+        assert!(!output.stdout.contains("[Output truncated"));
+        assert!(output.stdout.contains("hello"));
+    }
+
+    #[test]
+    fn test_is_infinite_output_command() {
+        assert!(is_infinite_output_command("yes"));
+        assert!(!is_infinite_output_command("echo"));
+        assert!(!is_infinite_output_command("ls"));
     }
 }

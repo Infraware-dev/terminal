@@ -75,6 +75,7 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 | Add terminal event | `src/terminal/events.rs` → `TerminalEvent` enum |
 | Modify TUI rendering | `src/terminal/tui.rs` |
 | Add package manager | `src/executor/package_manager.rs` |
+| Add shell confirmation | `src/orchestrators/command.rs` → `ConfirmationType` enum |
 | Language patterns | `config/language.toml` |
 | Precompiled regex | `src/input/patterns.rs` |
 
@@ -82,12 +83,14 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 
 | Directory | Purpose |
 |-----------|---------|
-| `terminal/` | TUI: `tui.rs` (suspend/resume), `buffers.rs` (SRP), `events.rs` (keyboard) |
+| `terminal/` | TUI: `tui.rs` (rendering/suspend/resume), `buffers.rs` (SRP), `events.rs` (keyboard), `state.rs` (modes/root/animation) |
 | `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex) |
 | `executor/` | Execution: `command.rs` (async batch), `job_manager.rs` (background `&`) |
 | `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs` |
 | `llm/` | LLM: `client.rs` (Mock/HTTP with HITL), `renderer.rs` (syntax highlighting) |
 | `auth/` | Auth: `authenticator.rs`, `config.rs`, `models.rs` |
+| `config/` | Config: `language.rs` (multilingual patterns from TOML) |
+| `logging.rs` | Log4rs setup with size rotation |
 
 ### Design Patterns
 - **Chain of Responsibility**: `input/handler.rs` (position-enforced)
@@ -107,6 +110,14 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 ### Testing with Shared State
 Use `#[serial_test::serial]` for tests modifying `CommandCache` or aliases to prevent flaky tests.
 
+### Test Organization
+Tests are in `tests/` directory:
+- `classifier_tests.rs` - SCAN algorithm and handler tests
+- `executor_tests.rs` - Command execution tests
+- `integration_tests.rs` - End-to-end workflows
+- `interactive_command_test.rs` - TUI suspend/resume tests
+- `terminal_state_tests.rs` - State management tests
+
 ### History Expansion
 `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args). Thread-safe via `Arc<RwLock<Vec<String>>>`. Uses get-second-to-last semantics (current input already in history when classified).
 
@@ -116,11 +127,27 @@ System files loaded first, then user files (`~/.bashrc`, `~/.bash_aliases`, `~/.
 ### Interactive Commands
 28 commands suspend TUI (vim, nano, less, etc.), 31 blocked with suggestions (ssh, tmux, python REPL). Implementation: `TerminalUI::suspend()` → run → `resume()` with RAII `TuiGuard` for panic safety. Unix only.
 
+### Shell Command Confirmations
+Matches native shell behavior for interactive flags (`-i`, `-I`):
+- `rm -i`: Per-file confirmation ("rm: remove 'file'?")
+- `rm -I`: Bulk confirmation (>3 files or recursive)
+- `rm` on write-protected files: Automatic prompt (matches native rm)
+- `cp -i`, `mv -i`, `ln -i`: Overwrite/replace confirmation
+
+Implementation in `orchestrators/command.rs`. Uses `ConfirmationType` enum and `AwaitingCommandApproval` terminal mode. `y`/`n` response handling with proper file iteration for multi-file operations.
+
+### Root Mode
+Terminal detects `sudo su`, `su`, `su -` commands and enters root mode:
+- Prompt symbol changes from `$` to `#`
+- Tracks `is_root_mode` state in `TerminalState`
+- `enter_root_mode()` / `exit_root_mode()` methods
+- Also checks actual root user via UID=0
+
 ### Background Processes
 `&` suffix → `JobManager` with `Arc<RwLock>`. 250ms polling interval. Lock poisoning triggers fail-fast per Microsoft guidelines.
 
 ### LLM Integration (HITL)
-`HttpLLMClient` with SSE streaming. `LLMQueryResult` enum: `Complete`, `CommandApproval`, `Question`. Resume via `resume_run()` or `resume_with_answer()`.
+`HttpLLMClient` with SSE streaming. `LLMQueryResult` enum: `Complete`, `CommandApproval`, `Question`. Resume via `resume_run()` or `resume_with_answer()`. Animated blinking cursor (█) during LLM wait state via `animation_elapsed()` in `TerminalState`.
 
 ### Error Handling
 Use `anyhow::Result`. Display user-friendly messages, never crash.
@@ -136,7 +163,10 @@ Use `anyhow::Result`. Display user-friendly messages, never crash.
 - Multi-platform: Ubuntu, Windows, macOS
 
 ### Git Commits
-- **NO Co-Authored-By** in commit messages
+- Use conventional commit format: `<type>: <description>`
+- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `style`
+- Maximum 50 characters for subject line, imperative mood ("Add" not "Added")
+- **NO** Co-Authored-By, emojis, or AI attribution
 - Run `cargo fmt` before committing
 
 ### Code Style
@@ -171,6 +201,9 @@ See `.claude/skills/microsoft-rust-guidelines.md` for full details.
 
 ### InputType Enum
 `Command { command, args, original_input }`, `NaturalLanguage(String)`, `Empty`, `CommandTypo { input, suggestion, distance }`
+
+### TerminalMode Enum
+`Normal` (default), `AwaitingCommandApproval` (shell confirmations like `rm -i`), `AwaitingLLMApproval` (LLM command execution), `AwaitingLLMQuestion` (LLM clarification), `AwaitingInput` (multiline heredoc).
 
 ### ClassifierContext (Dependency Injection)
 Provides `Arc<RwLock<CommandCache>>`, `Arc<CompiledPatterns>`, and language patterns to handlers. Enables testability and avoids global state.
