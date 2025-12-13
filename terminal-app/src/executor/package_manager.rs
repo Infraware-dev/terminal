@@ -181,9 +181,14 @@ impl PackageManager for BrewPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        let output =
-            CommandExecutor::execute("brew", &["install".to_string(), package.to_string()], None)
-                .await?;
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = CommandExecutor::execute(
+            "brew",
+            &["install".to_string(), package.to_string()],
+            None,
+            cancel_token,
+        );
+        let output = handle.wait().await?;
         check_install_result(&output)
     }
 
@@ -207,12 +212,14 @@ impl PackageManager for ChocoPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        let output = CommandExecutor::execute(
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = CommandExecutor::execute(
             "choco",
             &["install".to_string(), "-y".to_string(), package.to_string()],
             None,
-        )
-        .await?;
+            cancel_token,
+        );
+        let output = handle.wait().await?;
         check_install_result(&output)
     }
 
@@ -236,12 +243,14 @@ impl PackageManager for WingetPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        let output = CommandExecutor::execute(
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = CommandExecutor::execute(
             "winget",
             &["install".to_string(), package.to_string()],
             None,
-        )
-        .await?;
+            cancel_token,
+        );
+        let output = handle.wait().await?;
         check_install_result(&output)
     }
 
