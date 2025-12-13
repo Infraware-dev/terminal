@@ -178,23 +178,9 @@ fn render_unified_content(
 ) {
     let mut lines = Vec::new();
 
-    // 1. Add historical output from OutputBuffer
-    for line in state.output.lines() {
-        // Parse ANSI codes and convert to ratatui Line with proper styling
-        use ansi_to_tui::IntoText;
-        match line.into_text() {
-            Ok(text) => {
-                // Get the first line from parsed text, or fallback to raw
-                let parsed_line = text
-                    .lines
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| Line::from(line.clone()));
-                lines.push(parsed_line);
-            }
-            Err(_) => lines.push(Line::from(line.clone())),
-        }
-    }
+    // 1. Add historical output from OutputBuffer (pre-parsed, O(N) not O(N²))
+    // ANSI codes were parsed once when added to buffer, not on every render
+    lines.extend(state.output.parsed_lines().iter().cloned());
 
     // 2. Add approval flow inline if pending
     if let Some(interaction) = &state.pending_interaction {

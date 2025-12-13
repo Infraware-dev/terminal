@@ -40,16 +40,25 @@
 //! assert_eq!(command, "ls");
 //! ```
 
+use ratatui::text::Line;
+
 /// Maximum number of lines to keep in output buffer before trimming
 const MAX_OUTPUT_LINES: usize = 10_000;
 /// Number of lines to remove when buffer exceeds MAX_OUTPUT_LINES
 /// This prevents frequent trimming by providing headroom
 const TRIM_LINES: usize = 1_000;
 
-/// Manages the output display buffer with scrolling support
+/// Manages the output display buffer with scrolling support.
+///
+/// Stores both raw strings (for serialization/debugging) and pre-parsed
+/// ratatui Lines (for O(1) rendering without ANSI re-parsing).
 #[derive(Debug, Clone)]
 pub struct OutputBuffer {
+    /// Raw string buffer (kept for backward compatibility and debugging)
     buffer: Vec<String>,
+    /// Pre-parsed lines with ANSI codes converted to ratatui styles.
+    /// This eliminates O(N²) ANSI parsing on every render.
+    parsed_buffer: Vec<Line<'static>>,
     scroll_position: usize,
     /// Number of visible lines in the viewport (for scroll calculations)
     visible_lines: usize,
@@ -57,31 +66,58 @@ pub struct OutputBuffer {
 
 impl OutputBuffer {
     /// Create a new empty output buffer
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             buffer: Vec::new(),
+            parsed_buffer: Vec::new(),
             scroll_position: 0,
             visible_lines: 20, // Default, updated by TUI
         }
     }
 
-    /// Add a single line to the output buffer
+    /// Parse a raw string with ANSI codes into a ratatui Line.
+    /// This is done once when adding, not on every render.
+    fn parse_ansi(line: &str) -> Line<'static> {
+        use ansi_to_tui::IntoText;
+        match line.into_text() {
+            Ok(text) => text
+                .lines
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Line::from(line.to_string())),
+            Err(_) => Line::from(line.to_string()),
+        }
+    }
+
+    /// Add a single line to the output buffer.
+    /// Parses ANSI codes once and caches the result.
     pub fn add_line(&mut self, line: String) {
+        let parsed = Self::parse_ansi(&line);
+        self.parsed_buffer.push(parsed);
         self.buffer.push(line);
         self.trim_if_needed();
         self.auto_scroll_to_bottom();
     }
 
-    /// Add multiple lines to the output buffer
+    /// Add multiple lines to the output buffer.
+    /// Parses ANSI codes once per line and caches the results.
     pub fn add_lines(&mut self, lines: Vec<String>) {
+        for line in &lines {
+            self.parsed_buffer.push(Self::parse_ansi(line));
+        }
         self.buffer.extend(lines);
         self.trim_if_needed();
         self.auto_scroll_to_bottom();
     }
 
-    /// Get a reference to the buffer contents
+    /// Get a reference to the raw buffer contents (for backward compatibility)
     pub fn lines(&self) -> &[String] {
         &self.buffer
+    }
+
+    /// Get pre-parsed lines ready for rendering (no ANSI parsing needed)
+    pub fn parsed_lines(&self) -> &[Line<'static>] {
+        &self.parsed_buffer
     }
 
     /// Get the current scroll position
@@ -120,6 +156,7 @@ impl OutputBuffer {
         if self.buffer.len() > MAX_OUTPUT_LINES {
             let lines_to_remove = self.buffer.len() - MAX_OUTPUT_LINES + TRIM_LINES;
             self.buffer.drain(0..lines_to_remove);
+            self.parsed_buffer.drain(0..lines_to_remove);
             self.scroll_position = self.scroll_position.saturating_sub(lines_to_remove);
         }
     }
@@ -134,6 +171,7 @@ impl OutputBuffer {
 
     /// Remove the last line from the buffer (used for removing temporary messages)
     pub fn pop(&mut self) -> Option<String> {
+        self.parsed_buffer.pop();
         let result = self.buffer.pop();
         // Adjust scroll position if needed
         if self.scroll_position >= self.buffer.len() {
@@ -145,6 +183,7 @@ impl OutputBuffer {
     /// Clear all lines from the buffer
     pub fn clear(&mut self) {
         self.buffer.clear();
+        self.parsed_buffer.clear();
         self.scroll_position = 0;
     }
 }
