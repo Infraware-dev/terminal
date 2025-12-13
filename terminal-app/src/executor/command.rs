@@ -134,6 +134,7 @@ impl CommandOutput {
 /// let handle = CommandExecutor::execute(cmd, args, input, cancel_token);
 /// let result = handle.wait().await?;
 /// ```
+#[must_use = "ExecutionHandle must be consumed via wait() or lines() to collect command output"]
 #[derive(Debug)]
 pub struct ExecutionHandle {
     lines_rx: mpsc::UnboundedReceiver<String>,

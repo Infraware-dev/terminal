@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Request to the LLM backend (legacy - kept for backward compatibility)
 #[derive(Debug, Serialize)]
-#[allow(dead_code)] // Legacy API for M2/M3
 pub struct LLMRequest {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -17,7 +16,6 @@ pub struct LLMRequest {
 
 /// Response from the LLM backend
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Legacy API for M2/M3
 pub struct LLMResponse {
     pub text: String,
     #[serde(default)]
@@ -249,7 +247,6 @@ impl HttpLLMClient {
     }
 
     /// Create a new HTTP LLM client with custom timeout
-    #[allow(dead_code)] // Constructor with custom timeout for testing
     pub fn with_timeout(base_url: String, api_key: String, timeout_secs: u64) -> Result<Self> {
         Ok(Self {
             base_url,

@@ -22,7 +22,8 @@ pub struct AuthResponse {
 #[derive(Debug, Deserialize)]
 pub struct AuthStatus {
     pub authenticated: bool,
-    #[allow(dead_code)] // Deserialized from API, may be used in M2/M3
+    /// Whether the backend has an API key configured
+    #[expect(dead_code, reason = "Deserialized from API response, available for M2/M3")]
     pub has_api_key: bool,
 }
 
