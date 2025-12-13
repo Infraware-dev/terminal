@@ -17,8 +17,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build and Run
-cargo build --release && cargo run   # Production build
+cargo run                            # Development (debug build)
+cargo build --release                # Production build
 cargo check                          # Fast type check
+LOG_LEVEL=debug cargo run            # With debug logging
 
 # Testing
 cargo test                           # All tests
@@ -126,6 +128,13 @@ System files loaded first, then user files (`~/.bashrc`, `~/.bash_aliases`, `~/.
 
 ### Interactive Commands
 28 commands suspend TUI (vim, nano, less, etc.), 31 blocked with suggestions (ssh, tmux, python REPL). Implementation: `TerminalUI::suspend()` → run → `resume()` with RAII `TuiGuard` for panic safety. Unix only.
+
+**Event polling**: Paused during interactive command execution to prevent input lag in editors like vim/nano.
+
+### Command Execution & Cancellation
+- **SIGINT handling**: Ctrl+C propagates to child processes via cancellation token
+- **Output timeout**: 500ms timeout after SIGINT prevents blocking on process output
+- **Graceful shutdown**: Commands receive SIGINT before forced termination
 
 ### Shell Command Confirmations
 Matches native shell behavior for interactive flags (`-i`, `-I`):
