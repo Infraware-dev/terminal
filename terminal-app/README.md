@@ -55,6 +55,7 @@ The codebase is feature-complete for M1 with 224 tests passing and zero clippy w
 - ✅ **Syntax Highlighting**: Code blocks with syntax highlighting (Rust, Python, Bash, JSON)
 - ✅ **Tab Completion**: Basic command and file path completion
 - ✅ **Command History**: Navigate previous commands with arrow keys
+- ✅ **Output Scrolling**: Full scrollbar with mouse wheel and click/drag support, smart auto-scroll to keep prompt visible on user input
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
 - ✅ **Unicode Support**: Full Unicode support for international users (CJK, emoji, etc.) with character-count based cursor positioning
@@ -117,10 +118,11 @@ infraware-terminal/
 │   ├── main.rs                    # Entry point + event loop
 │   ├── lib.rs                     # Library exports
 │   ├── terminal/                  # TUI rendering and state
-│   │   ├── tui.rs                # ratatui rendering logic
-│   │   ├── state.rs              # Terminal state management
-│   │   ├── buffers.rs            # Buffer components (SRP) - Unicode-safe
-│   │   └── events.rs             # Keyboard event handling
+│   │   ├── tui.rs                # ratatui rendering logic with scrollbar
+│   │   ├── state.rs              # Terminal state management (modes, scrollbar info)
+│   │   ├── buffers.rs            # Buffer components (SRP) - scrollable output, Unicode-safe
+│   │   ├── events.rs             # Keyboard and mouse event handling
+│   │   └── throbber.rs           # Animated loading indicator
 │   ├── input/                     # SCAN Algorithm
 │   │   ├── classifier.rs         # InputClassifier coordinator
 │   │   ├── handler.rs            # 11-handler Chain of Responsibility
@@ -244,6 +246,10 @@ Once running, you can:
 8. **View history**: Type `history` to show all commands, or `history N` to show last N commands
 9. **Navigate history**: Use ↑/↓ arrow keys
 10. **Scroll output**: Navigate previous command output when it exceeds the visible area
+    - **Mouse wheel**: Scroll up/down with scroll wheel
+    - **Scrollbar clicks**: Click scrollbar track to jump, drag thumb to navigate, click arrows for line-by-line scroll
+    - **Keyboard**: Ctrl+Home/End to jump to start/end of output, Page Up/Down to scroll (if implemented)
+    - **Auto-scroll**: When you reach the bottom of output, typing a new command automatically scrolls to show the prompt
 11. **Tab completion**: Press Tab to complete commands/paths
 12. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
 13. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
