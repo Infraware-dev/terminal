@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -10,7 +11,7 @@ use ratatui::{
     backend::CrosstermBackend,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame, Terminal,
 };
 use std::io;
@@ -18,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
-use super::state::{TerminalMode, TerminalState};
+use super::state::{ScrollbarInfo, TerminalMode, TerminalState};
 
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
@@ -42,7 +43,8 @@ impl TerminalUI {
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        // Enable mouse capture for scroll wheel support
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
@@ -62,15 +64,7 @@ impl TerminalUI {
     }
 
     /// Render the terminal UI
-    /// Updates state.visible_lines based on actual terminal size
     pub fn render(&mut self, state: &mut TerminalState) -> Result<()> {
-        // Calculate visible lines from terminal size before rendering
-        let size = self.terminal.size()?;
-
-        // Full screen for content (no header bar)
-        let visible_lines = size.height as usize;
-        state.set_visible_lines(visible_lines);
-
         self.terminal.draw(|frame| {
             render_frame(frame, state);
         })?;
@@ -91,7 +85,12 @@ impl TerminalUI {
     /// Clean up the terminal on exit
     pub fn cleanup(&mut self) -> Result<()> {
         disable_raw_mode()?;
-        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+        // Disable mouse capture before leaving alternate screen
+        execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        )?;
         self.terminal.show_cursor()?;
         Ok(())
     }
@@ -170,43 +169,42 @@ fn render_frame(frame: &mut Frame, state: &mut TerminalState) {
     render_unified_content(frame, size, state);
 }
 
-/// Render unified content area with inline prompt
+/// Render unified content area with inline prompt and optional scrollbar
+///
+/// Architecture: Linux shell style - output and prompt in SAME scrollable area
+/// - Prompt is the last line of content (not a separate fixed area)
+/// - After clear, prompt appears at TOP (not bottom)
+/// - Content starts at top, grows downward
+/// - Scrollbar only when content exceeds viewport
 fn render_unified_content(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
     state: &mut TerminalState,
 ) {
-    let mut lines = Vec::new();
+    // === BUILD ALL CONTENT LINES (output + interaction + prompt) ===
+    let mut all_lines: Vec<Line> = state.output.parsed_lines().to_vec();
+    let output_line_count = all_lines.len();
 
-    // 1. Add historical output from OutputBuffer (pre-parsed, O(N) not O(N²))
-    // ANSI codes were parsed once when added to buffer, not on every render
-    lines.extend(state.output.parsed_lines().iter().cloned());
-
-    // 2. Add approval flow inline if pending
+    // Add approval flow lines if pending
     if let Some(interaction) = &state.pending_interaction {
         match interaction {
             crate::terminal::PendingInteraction::CommandApproval {
                 command, message, ..
             } => {
-                // Show message if present
                 if !message.is_empty() {
-                    lines.push(Line::from(message.clone()));
+                    all_lines.push(Line::from(message.clone()));
                 }
-                // Show command to execute
-                lines.push(Line::from(Span::styled(
+                all_lines.push(Line::from(Span::styled(
                     format!("command: {}", command),
                     Style::default().fg(Color::Yellow),
                 )));
             }
             crate::terminal::PendingInteraction::Question { question, options } => {
-                // Don't show question text for password prompts (it's in the input prompt)
                 if !question.contains("[sudo] password") {
-                    // Show question
-                    lines.push(Line::from(question.clone()));
-                    // Show options if present
+                    all_lines.push(Line::from(question.clone()));
                     if let Some(opts) = options {
                         for opt in opts {
-                            lines.push(Line::from(format!("  - {}", opt)));
+                            all_lines.push(Line::from(format!("  - {}", opt)));
                         }
                     }
                 }
@@ -214,7 +212,7 @@ fn render_unified_content(
         }
     }
 
-    // Check if we're in password input mode (sudo password prompt)
+    // Check if we're in password input mode
     let is_password_mode =
         if let Some(crate::terminal::PendingInteraction::Question { question, .. }) =
             &state.pending_interaction
@@ -224,9 +222,8 @@ fn render_unified_content(
             false
         };
 
-    // 2b. Add current prompt + input inline (with mode-based color)
+    // Build prompt text
     let prompt = if state.pending_interaction.is_some() {
-        // Use simple approval prompt when pending interaction
         match state.mode {
             TerminalMode::AwaitingCommandApproval => {
                 "Do you want to execute this command (y/n)? ".to_string()
@@ -241,21 +238,17 @@ fn render_unified_content(
             _ => state.get_prompt(),
         }
     } else if matches!(state.mode, TerminalMode::AwaitingMoreInput(_)) {
-        // Use continuation prompt for multiline input
         "> ".to_string()
     } else {
-        // Normal prompt with dynamic throbber prefix for waiting states
         let base_prompt = state.get_prompt();
         let prefix = state.get_prompt_prefix();
-        // Replace static |~| with dynamic prefix (throbber when animating)
         if base_prompt.starts_with("|~|") {
-            format!("{}{}", prefix, &base_prompt[5..]) // Skip "|~| " (5 chars including space)
+            format!("{}{}", prefix, &base_prompt[5..])
         } else {
             base_prompt
         }
     };
 
-    // Hide input if in password mode, show asterisks instead
     let input = if is_password_mode {
         "*".repeat(state.input.text().len())
     } else {
@@ -263,7 +256,9 @@ fn render_unified_content(
     };
 
     let prompt_color = get_prompt_color(&state.mode);
-    let current_line = Line::from(vec![
+
+    // Prompt is the LAST line of all_lines (part of scrollable content)
+    let prompt_line = Line::from(vec![
         Span::styled(
             prompt.clone(),
             Style::default()
@@ -272,55 +267,110 @@ fn render_unified_content(
         ),
         Span::raw(input.clone()),
     ]);
-    lines.push(current_line);
+    all_lines.push(prompt_line);
 
-    // Note: Loading animation is now shown via throbber in the prompt prefix
-    // (|~| becomes |⠘| etc. when throbber is active)
+    // === CALCULATE SCROLL ===
+    let total_lines = all_lines.len();
+    let visible_height = area.height as usize;
 
-    // 3. Calculate visible window (auto-scroll to bottom)
-    let visible_lines = area.height as usize;
-    let start = lines.len().saturating_sub(visible_lines);
-    let visible_window: Vec<Line> = lines[start..].to_vec();
+    // Calculate extra lines (everything added after output: interaction + prompt)
+    let extra_lines = total_lines.saturating_sub(output_line_count);
 
-    // 4. Render paragraph WITHOUT borders
-    let paragraph = Paragraph::new(visible_window.clone());
-    frame.render_widget(paragraph, area);
+    // Update OutputBuffer for scroll calculations
+    state.output.set_extra_lines(extra_lines);
+    state.output.set_visible_lines(visible_height);
 
-    // 5. Position cursor at end of current prompt line
-    // The prompt is always the last line in visible_window
-    let prompt_line_y = visible_window.len().saturating_sub(1) as u16;
+    // Calculate scroll position
+    // Linux shell behavior: content starts at top, scrolls when exceeds viewport
+    let scroll_position = state.output.scroll_position();
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let effective_scroll = scroll_position.min(max_scroll);
 
-    // Use Unicode-aware width calculation for proper cursor positioning
-    // with emoji and wide characters
-    let prompt_width = prompt.width();
+    // Sync clamped scroll position back to buffer
+    // This is needed because scroll_to_end() sets usize::MAX
+    // Use set_scroll_position_exact to avoid double-clamping
+    if scroll_position != effective_scroll {
+        state.output.set_scroll_position_exact(effective_scroll);
+    }
 
-    // Calculate visual width of input text up to cursor position
-    // cursor_position() returns character index, but we need visual width
-    // Example: "😀中a" at cursor position 2 = visual width 4 (emoji=2, CJK=2)
-    // In password mode, each character is displayed as '*' (width 1)
-    let char_idx = state.input.cursor_position();
-    let input_width = if is_password_mode {
-        // In password mode, each char is shown as '*' which has width 1
-        char_idx
+    let needs_scrollbar = total_lines > visible_height;
+
+    // === RENDER CONTENT WITH SCROLL ===
+    let content_paragraph = Paragraph::new(all_lines.clone())
+        .scroll((effective_scroll as u16, 0));
+
+    frame.render_widget(content_paragraph, area);
+
+    // === RENDER SCROLLBAR ===
+    if needs_scrollbar {
+        // DEBUG: Log scrollbar values
+        log::debug!(
+            "SCROLLBAR: total_lines={}, visible_height={}, scroll_position={}, max_scroll={}, effective_scroll={}",
+            total_lines, visible_height, scroll_position, max_scroll, effective_scroll
+        );
+
+        state.scrollbar_info = Some(ScrollbarInfo {
+            column: area.x + area.width.saturating_sub(1),
+            height: area.height,
+            total_lines,
+            visible_lines: visible_height,
+        });
+
+        // ScrollbarState configuration:
+        // Ratatui calculates thumb position as: position / content_length
+        // To get correct behavior (thumb at bottom when scrolled to end):
+        // - content_length = max_scroll + 1 (total scrollable positions: 0..=max_scroll)
+        // - position = effective_scroll
+        // This ensures: when effective_scroll == max_scroll, position/content_length ≈ 100%
+        //
+        // For thumb SIZE, we use viewport_content_length relative to total content
+        // But since content_length is now max_scroll+1, we calculate thumb size separately
+        let scrollbar_content_length = max_scroll.max(1); // Avoid division by zero
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(scrollbar_content_length)
+            .position(effective_scroll);
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     } else {
-        let text_before_cursor = state
-            .input
-            .text()
-            .chars()
-            .take(char_idx)
-            .collect::<String>();
-        text_before_cursor.width()
-    };
+        state.scrollbar_info = None;
+    }
 
-    let total_width = prompt_width + input_width;
+    // === POSITION CURSOR ===
+    // Cursor is on the prompt line (last line of content)
+    // Need to calculate where prompt line appears on screen
 
-    // Ensure cursor stays within terminal bounds
-    let max_x = area.width.saturating_sub(1) as usize;
-    let safe_x = total_width.min(max_x);
-    let cursor_x = area.x.saturating_add(safe_x as u16);
-    let cursor_y = area.y + prompt_line_y;
+    let prompt_line_index = total_lines.saturating_sub(1); // 0-indexed
+    let prompt_screen_row = prompt_line_index.saturating_sub(effective_scroll);
 
-    frame.set_cursor_position((cursor_x, cursor_y));
+    // Only show cursor if prompt is visible
+    if prompt_screen_row < visible_height {
+        let prompt_width = prompt.width();
+        let char_idx = state.input.cursor_position();
+        let input_width = if is_password_mode {
+            char_idx
+        } else {
+            state
+                .input
+                .text()
+                .chars()
+                .take(char_idx)
+                .collect::<String>()
+                .width()
+        };
+
+        let total_width = prompt_width + input_width;
+        let max_x = area.width.saturating_sub(1) as usize;
+        let safe_x = total_width.min(max_x);
+
+        let cursor_x = area.x.saturating_add(safe_x as u16);
+        let cursor_y = area.y.saturating_add(prompt_screen_row as u16);
+
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 /// Get prompt color based on terminal mode

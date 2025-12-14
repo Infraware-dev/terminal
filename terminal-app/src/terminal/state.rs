@@ -75,6 +75,55 @@ pub enum PendingInteraction {
     },
 }
 
+/// Scrollbar position info for mouse interaction
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrollbarInfo {
+    /// Column where scrollbar is rendered (rightmost column)
+    pub column: u16,
+    /// Total height of the scrollbar area
+    pub height: u16,
+    /// Total lines in the output buffer (for position calculation)
+    pub total_lines: usize,
+    /// Visible lines in the output area (for position calculation)
+    pub visible_lines: usize,
+}
+
+impl ScrollbarInfo {
+    /// Check if a mouse position is on the scrollbar column
+    pub fn is_on_scrollbar(&self, column: u16) -> bool {
+        column == self.column
+    }
+
+    /// Calculate scroll position from mouse row (0 = top arrow, height-1 = bottom arrow)
+    /// Returns the target scroll_position for the output buffer
+    pub fn row_to_scroll_position(&self, row: u16) -> usize {
+        if self.total_lines <= self.visible_lines {
+            return 0;
+        }
+
+        let max_scroll = self.total_lines.saturating_sub(self.visible_lines);
+
+        // Top arrow (row 0) -> scroll to top
+        if row == 0 {
+            return 0;
+        }
+        // Bottom arrow (row height-1) -> scroll to bottom
+        if row >= self.height.saturating_sub(1) {
+            return max_scroll;
+        }
+
+        // Track area: rows 1 to height-2
+        let track_height = self.height.saturating_sub(2) as usize;
+        if track_height == 0 {
+            return 0;
+        }
+
+        let track_row = (row - 1) as usize; // 0-based position in track
+        let position = (track_row * max_scroll) / track_height;
+        position.min(max_scroll)
+    }
+}
+
 /// Main terminal state structure
 /// Refactored to follow Single Responsibility Principle with separated buffers
 #[derive(Debug)]
@@ -101,6 +150,8 @@ pub struct TerminalState {
     throbber: ThrobberAnimator,
     /// Whether terminal is in elevated (root) mode via sudo su
     is_root_mode: bool,
+    /// Scrollbar position info for mouse interaction (updated during render)
+    pub scrollbar_info: Option<ScrollbarInfo>,
 }
 
 impl TerminalState {
@@ -118,6 +169,7 @@ impl TerminalState {
             cached_prompt: String::new(), // Will be set below
             throbber: ThrobberAnimator::new(),
             is_root_mode: false,
+            scrollbar_info: None,
         };
         state.cached_prompt = state.build_prompt();
         state
@@ -321,6 +373,12 @@ impl TerminalState {
     /// Scroll output down
     pub fn scroll_down(&mut self) {
         self.output.scroll_down();
+    }
+
+    /// Scroll to end of content (where prompt is)
+    /// Call this when user types to bring prompt back into view
+    pub fn scroll_to_end(&mut self) {
+        self.output.scroll_to_end();
     }
 
     /// Check if terminal is in a Human-in-the-Loop (HITL) waiting state

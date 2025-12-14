@@ -472,21 +472,27 @@ impl InfrawareTerminal {
                 return Ok(false);
             }
             TerminalEvent::InputChar(c) => {
+                self.state.scroll_to_end(); // Bring prompt into view
                 self.state.insert_char(c);
             }
             TerminalEvent::DeleteChar => {
+                self.state.scroll_to_end();
                 self.state.delete_char();
             }
             TerminalEvent::MoveCursorLeft => {
+                self.state.scroll_to_end();
                 self.state.move_cursor_left();
             }
             TerminalEvent::MoveCursorRight => {
+                self.state.scroll_to_end();
                 self.state.move_cursor_right();
             }
             TerminalEvent::HistoryPrevious => {
+                self.state.scroll_to_end();
                 self.state.history_previous();
             }
             TerminalEvent::HistoryNext => {
+                self.state.scroll_to_end();
                 self.state.history_next();
             }
             TerminalEvent::ScrollUp => {
@@ -496,17 +502,21 @@ impl InfrawareTerminal {
                 self.state.scroll_down();
             }
             TerminalEvent::Submit => {
+                self.state.scroll_to_end();
                 if !self.handle_submit().await? {
                     return Ok(false); // Exit requested
                 }
             }
             TerminalEvent::TabComplete => {
+                self.state.scroll_to_end();
                 self.handle_tab_completion();
             }
             TerminalEvent::ClearScreen => {
                 self.state.output.clear();
+                self.state.scroll_to_end();
             }
             TerminalEvent::CtrlC => {
+                self.state.scroll_to_end();
                 // Poller already cancelled the token (for async interruption)
                 // Here we just clear input and conditionally reset token
                 log::info!("Ctrl+C: Clearing input (mode={:?})", self.state.mode);
@@ -533,6 +543,38 @@ impl InfrawareTerminal {
             }
             TerminalEvent::Resize(_, _) => {
                 // Terminal resized - re-render will handle it
+            }
+            TerminalEvent::MouseDown { column, row } => {
+                // Handle click on scrollbar (arrows or track)
+                if let Some(info) = &self.state.scrollbar_info {
+                    if info.is_on_scrollbar(column) {
+                        // Click on up arrow (row 0)
+                        if row == 0 {
+                            self.state.scroll_up();
+                        }
+                        // Click on down arrow (last row)
+                        else if row >= info.height.saturating_sub(1) {
+                            self.state.scroll_down();
+                        }
+                        // Click on track - jump to position
+                        else {
+                            let target = info.row_to_scroll_position(row);
+                            self.state.output.set_scroll_position(target);
+                        }
+                    }
+                }
+            }
+            TerminalEvent::MouseDrag { column, row } => {
+                // Handle drag on scrollbar (scroll to position)
+                if let Some(info) = &self.state.scrollbar_info {
+                    if info.is_on_scrollbar(column) {
+                        let target = info.row_to_scroll_position(row);
+                        self.state.output.set_scroll_position(target);
+                    }
+                }
+            }
+            TerminalEvent::MouseUp => {
+                // Mouse released - nothing special needed
             }
             TerminalEvent::Unknown => {}
         }
