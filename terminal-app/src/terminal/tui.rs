@@ -181,9 +181,39 @@ fn render_unified_content(
     area: ratatui::layout::Rect,
     state: &mut TerminalState,
 ) {
-    // === BUILD ALL CONTENT LINES (output + interaction + prompt) ===
-    let mut all_lines: Vec<Line> = state.output.parsed_lines().to_vec();
-    let output_line_count = all_lines.len();
+    let visible_height = area.height as usize;
+
+    // === PRE-CALCULATE SCROLL (before building lines) ===
+    // Count interaction lines that will be added
+    let interaction_line_count = count_interaction_lines(&state.pending_interaction);
+    let prompt_lines = 1; // Prompt is always 1 line
+    let extra_lines = interaction_line_count + prompt_lines;
+
+    // Update OutputBuffer with layout info for scroll calculations
+    let output_line_count = state.output.total_lines();
+    state.output.set_extra_lines(extra_lines);
+    state.output.set_visible_lines(visible_height);
+
+    // Calculate total content and scroll
+    let total_lines = output_line_count + extra_lines;
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll_position = state.output.scroll_position();
+    let effective_scroll = scroll_position.min(max_scroll);
+
+    // Sync clamped scroll position back to buffer
+    if scroll_position != effective_scroll {
+        state.output.set_scroll_position_exact(effective_scroll);
+    }
+
+    // === BUILD ONLY VISIBLE LINES (optimization: no full clone) ===
+    // Calculate which output lines are visible after scroll
+    let output_start = effective_scroll.min(output_line_count);
+    let output_end = (effective_scroll + visible_height).min(output_line_count);
+
+    // Clone only the visible output lines (not the entire buffer!)
+    let mut all_lines: Vec<Line> = state.output.parsed_lines()
+        [output_start..output_end]
+        .to_vec();
 
     // Add approval flow lines if pending
     if let Some(interaction) = &state.pending_interaction {
@@ -285,36 +315,10 @@ fn render_unified_content(
     ]);
     all_lines.push(prompt_line);
 
-    // === CALCULATE SCROLL ===
-    let total_lines = all_lines.len();
-    let visible_height = area.height as usize;
-
-    // Calculate extra lines (everything added after output: interaction + prompt)
-    let extra_lines = total_lines.saturating_sub(output_line_count);
-
-    // Update OutputBuffer for scroll calculations
-    state.output.set_extra_lines(extra_lines);
-    state.output.set_visible_lines(visible_height);
-
-    // Calculate scroll position
-    // Linux shell behavior: content starts at top, scrolls when exceeds viewport
-    let scroll_position = state.output.scroll_position();
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let effective_scroll = scroll_position.min(max_scroll);
-
-    // Sync clamped scroll position back to buffer
-    // This is needed because scroll_to_end() sets usize::MAX
-    // Use set_scroll_position_exact to avoid double-clamping
-    if scroll_position != effective_scroll {
-        state.output.set_scroll_position_exact(effective_scroll);
-    }
-
     let needs_scrollbar = total_lines > visible_height;
 
-    // === RENDER CONTENT WITH SCROLL ===
-    let content_paragraph = Paragraph::new(all_lines)
-        .scroll((effective_scroll as u16, 0));
-
+    // === RENDER CONTENT (no scroll needed - already sliced) ===
+    let content_paragraph = Paragraph::new(all_lines);
     frame.render_widget(content_paragraph, area);
 
     // === RENDER SCROLLBAR ===
@@ -350,15 +354,19 @@ fn render_unified_content(
     }
 
     // === POSITION CURSOR ===
-    // Cursor is on the prompt line (last line of content)
-    // Need to calculate where prompt line appears on screen
+    // Cursor is on the prompt line (last line of visible content)
+    // With pre-slicing, prompt position is relative to all_lines (not total content)
 
-    let prompt_line_index = total_lines.saturating_sub(1); // 0-indexed
-    let prompt_screen_row = prompt_line_index.saturating_sub(effective_scroll);
+    // Prompt is visible only if it's within our visible slice
+    // Calculate where prompt would be in the full content
+    let prompt_position_in_total = total_lines.saturating_sub(1);
+    let prompt_is_visible = prompt_position_in_total >= effective_scroll
+        && prompt_position_in_total < effective_scroll + visible_height;
 
-    // Only show cursor if prompt is visible
-    // (prompt_width and input_width pre-calculated above to avoid cloning)
-    if prompt_screen_row < visible_height {
+    if prompt_is_visible {
+        // Prompt is the last line we rendered
+        let prompt_screen_row = prompt_position_in_total - effective_scroll;
+
         let total_width = prompt_width + input_width;
         let max_x = area.width.saturating_sub(1) as usize;
         let safe_x = total_width.min(max_x);
@@ -380,5 +388,29 @@ fn get_prompt_color(mode: &TerminalMode) -> Color {
         TerminalMode::AwaitingCommandApproval => Color::Cyan,
         TerminalMode::AwaitingAnswer => Color::Cyan,
         TerminalMode::AwaitingMoreInput(_) => Color::Magenta,
+    }
+}
+
+/// Count how many lines the interaction display will take
+fn count_interaction_lines(
+    pending_interaction: &Option<crate::terminal::PendingInteraction>,
+) -> usize {
+    match pending_interaction {
+        None => 0,
+        Some(crate::terminal::PendingInteraction::CommandApproval {
+            message, ..
+        }) => {
+            // message line (if not empty) + command line
+            if message.is_empty() { 1 } else { 2 }
+        }
+        Some(crate::terminal::PendingInteraction::Question { question, options }) => {
+            // Skip display for password prompts
+            if question.contains("[sudo] password") {
+                return 0;
+            }
+            // question line + option lines
+            let option_count = options.as_ref().map_or(0, |opts| opts.len());
+            1 + option_count
+        }
     }
 }

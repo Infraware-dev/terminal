@@ -419,9 +419,8 @@ impl InfrawareTerminal {
         // 4. Loop back to render
         loop {
             // === STEP 1: RENDER current state (Elm pattern: view first) ===
-            // Use block_in_place to not block the tokio executor during sync render
-            // (follows Alice Ryhl's async best practices)
-            tokio::task::block_in_place(|| self.ui.render(&mut self.state))?;
+            // TUI render is fast enough (<1ms) to not need block_in_place
+            self.ui.render(&mut self.state)?;
 
             // Check for completed background jobs periodically
             if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
