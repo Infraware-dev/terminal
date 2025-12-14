@@ -157,6 +157,7 @@ fn test_terminal_state_scroll() {
 
     // Set visible lines first (simulating terminal size)
     state.set_visible_lines(20);
+    state.output.set_extra_lines(0); // No prompt in unit test
 
     // Add many lines
     for i in 0..100 {

@@ -383,8 +383,8 @@ impl InfrawareTerminal {
                     continue;
                 }
 
-                // Poll with short timeout
-                match event_handler.poll_event(Duration::from_millis(50)) {
+                // Poll with minimal timeout for responsive typing (1ms)
+                match event_handler.poll_event(Duration::from_millis(1)) {
                     Ok(Some(event)) => {
                         // For CtrlC, cancel the current token immediately
                         // This interrupts any ongoing async operation (e.g., LLM query)
@@ -412,9 +412,24 @@ impl InfrawareTerminal {
         // Track last job check time for periodic checking (reduces lock contention)
         let mut last_job_check = Instant::now();
 
-        // Main event loop - receives events from background poller
+        // Main event loop - follows Elm Architecture pattern (ratatui best practice):
+        // 1. RENDER current state first
+        // 2. Wait for events
+        // 3. Handle events (update state)
+        // 4. Loop back to render
         loop {
-            // Wait for event with timeout
+            // === STEP 1: RENDER current state (Elm pattern: view first) ===
+            // Use block_in_place to not block the tokio executor during sync render
+            // (follows Alice Ryhl's async best practices)
+            tokio::task::block_in_place(|| self.ui.render(&mut self.state))?;
+
+            // Check for completed background jobs periodically
+            if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
+                self.check_completed_jobs();
+                last_job_check = Instant::now();
+            }
+
+            // === STEP 2: WAIT for events ===
             // Note: We don't check cancellation_token here because it's used
             // to cancel async operations (LLM queries), not to exit the app.
             // App exit is handled by the Quit event handler returning Ok(false).
@@ -429,31 +444,33 @@ impl InfrawareTerminal {
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(16)) => {
-                    // Timeout - render at ~60 FPS for smooth throbber animation
-                    // (throbber animation runs in background thread)
-                    if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
-                        self.check_completed_jobs();
-                        last_job_check = Instant::now();
-                    }
-                    self.ui.render(&mut self.state)?;
+                    // Idle timeout - loop back to render for throbber animation (~60 FPS)
                     continue;
                 }
             };
 
-            // Handle the event
+            // === STEP 3: HANDLE events (update state) ===
+            // Process first event
             if !self.handle_event(event).await? {
                 break; // Quit requested
             }
 
-            // Check for completed background jobs periodically (not on every event)
-            // This reduces lock contention during rapid typing
-            if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
-                self.check_completed_jobs();
-                last_job_check = Instant::now();
+            // Drain ALL pending events (non-blocking) for responsive typing
+            let mut event_count = 1usize;
+            while let Ok(event) = event_rx.try_recv() {
+                if !self.handle_event(event).await? {
+                    break;
+                }
+                event_count += 1;
+
+                // Yield every 10 events to not starve the tokio executor
+                // (follows Alice Ryhl's async best practices)
+                if event_count.is_multiple_of(10) {
+                    tokio::task::yield_now().await;
+                }
             }
 
-            // Re-render (throbber animation runs in background thread)
-            self.ui.render(&mut self.state)?;
+            // Loop back to STEP 1 (render updated state)
         }
 
         // Clean up polling task

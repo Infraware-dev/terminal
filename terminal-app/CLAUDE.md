@@ -83,6 +83,9 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 | Modify LLM render loop | `src/orchestrators/natural_language.rs` (change `RENDER_INTERVAL_MS` constant) |
 | Add package manager | `src/executor/package_manager.rs` |
 | Add shell confirmation | `src/orchestrators/command.rs` → `ConfirmationType` enum |
+| Handle multiline input (heredoc) | `src/input/multiline.rs` |
+| Modify splash screen | `src/terminal/splash.rs` |
+| HITL (Human-in-the-Loop) orchestration | `src/orchestrators/hitl.rs` |
 | Language patterns | `config/language.toml` |
 | Precompiled regex | `src/input/patterns.rs` |
 
@@ -90,10 +93,10 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 
 | Directory | Purpose |
 |-----------|---------|
-| `terminal/` | TUI: `tui.rs` (rendering/suspend/resume), `buffers.rs` (output buffer with scrolling), `events.rs` (keyboard/mouse), `state.rs` (modes/root/scrollbar), `throbber.rs` (animation thread) |
-| `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex) |
+| `terminal/` | TUI: `tui.rs` (rendering/suspend/resume), `buffers.rs` (output buffer with scrolling), `events.rs` (keyboard/mouse), `state.rs` (modes/root/scrollbar), `throbber.rs` (animation thread), `splash.rs` (startup splash) |
+| `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex), `multiline.rs` (heredoc) |
 | `executor/` | Execution: `command.rs` (async batch), `job_manager.rs` (background `&`) |
-| `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs` |
+| `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs`, `hitl.rs` (human-in-the-loop) |
 | `llm/` | LLM: `client.rs` (Mock/HTTP with HITL), `renderer.rs` (syntax highlighting) |
 | `auth/` | Auth: `authenticator.rs`, `config.rs`, `models.rs` |
 | `config/` | Config: `language.rs` (multilingual patterns from TOML) |
@@ -290,7 +293,10 @@ Agents in `.claude/agents/` are invoked automatically when appropriate:
 | `code-metrics-analyzer` | LOC, complexity metrics |
 | `docs-updater` | Update CLAUDE.md/README.md |
 | `git-committer` | Create commits (no emojis, no Co-Author) |
+| `uml-diagram-generator` | Generate PlantUML diagrams for code structure |
 
 ## Platform Notes
 
 **Windows**: Filter `KeyEventKind::Press` only in `events.rs`. Use `cmd /C` for shell execution. Interactive commands not supported.
+- tieni conto dei concetti ratatui quando scrivi codice UI: https://ratatui.rs/concepts/
+- tieni conto dei concetti su async di alice qui:https://ryhl.io/blog/async-what-is-blocking/

@@ -450,17 +450,21 @@ impl CommandOrchestrator {
             // Throttle renders to 60fps max to prevent UI lag on fast output
             // This reduces renders from 5000 to ~300 for apt list
             if last_render.elapsed() >= RENDER_INTERVAL {
-                if let Err(e) = ui.render(state) {
-                    log::warn!("Failed to render during streaming: {}", e);
-                }
+                tokio::task::block_in_place(|| {
+                    if let Err(e) = ui.render(state) {
+                        log::warn!("Failed to render during streaming: {}", e);
+                    }
+                });
                 last_render = std::time::Instant::now();
             }
         }
 
         // Final render to show any remaining lines that weren't rendered
-        if let Err(e) = ui.render(state) {
-            log::warn!("Failed to render final output: {}", e);
-        }
+        tokio::task::block_in_place(|| {
+            if let Err(e) = ui.render(state) {
+                log::warn!("Failed to render final output: {}", e);
+            }
+        });
 
         // Wait for the command to complete and get final result
         match handle.wait().await {

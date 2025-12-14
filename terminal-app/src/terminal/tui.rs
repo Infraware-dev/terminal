@@ -192,7 +192,7 @@ fn render_unified_content(
                 command, message, ..
             } => {
                 if !message.is_empty() {
-                    all_lines.push(Line::from(message.clone()));
+                    all_lines.push(Line::from(message.as_str()));
                 }
                 all_lines.push(Line::from(Span::styled(
                     format!("command: {}", command),
@@ -201,7 +201,7 @@ fn render_unified_content(
             }
             crate::terminal::PendingInteraction::Question { question, options } => {
                 if !question.contains("[sudo] password") {
-                    all_lines.push(Line::from(question.clone()));
+                    all_lines.push(Line::from(question.as_str()));
                     if let Some(opts) = options {
                         for opt in opts {
                             all_lines.push(Line::from(format!("  - {}", opt)));
@@ -257,15 +257,24 @@ fn render_unified_content(
 
     let prompt_color = get_prompt_color(&state.mode);
 
+    // Pre-calculate widths for cursor positioning (avoids cloning prompt/input)
+    let prompt_width = prompt.width();
+    let char_idx = state.input.cursor_position();
+    let input_width = if is_password_mode {
+        char_idx
+    } else {
+        input.chars().take(char_idx).collect::<String>().width()
+    };
+
     // Prompt is the LAST line of all_lines (part of scrollable content)
     let prompt_line = Line::from(vec![
         Span::styled(
-            prompt.clone(),
+            prompt,
             Style::default()
                 .fg(prompt_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(input.clone()),
+        Span::raw(input),
     ]);
     all_lines.push(prompt_line);
 
@@ -296,19 +305,13 @@ fn render_unified_content(
     let needs_scrollbar = total_lines > visible_height;
 
     // === RENDER CONTENT WITH SCROLL ===
-    let content_paragraph = Paragraph::new(all_lines.clone())
+    let content_paragraph = Paragraph::new(all_lines)
         .scroll((effective_scroll as u16, 0));
 
     frame.render_widget(content_paragraph, area);
 
     // === RENDER SCROLLBAR ===
     if needs_scrollbar {
-        // DEBUG: Log scrollbar values
-        log::debug!(
-            "SCROLLBAR: total_lines={}, visible_height={}, scroll_position={}, max_scroll={}, effective_scroll={}",
-            total_lines, visible_height, scroll_position, max_scroll, effective_scroll
-        );
-
         state.scrollbar_info = Some(ScrollbarInfo {
             column: area.x + area.width.saturating_sub(1),
             height: area.height,
@@ -347,21 +350,8 @@ fn render_unified_content(
     let prompt_screen_row = prompt_line_index.saturating_sub(effective_scroll);
 
     // Only show cursor if prompt is visible
+    // (prompt_width and input_width pre-calculated above to avoid cloning)
     if prompt_screen_row < visible_height {
-        let prompt_width = prompt.width();
-        let char_idx = state.input.cursor_position();
-        let input_width = if is_password_mode {
-            char_idx
-        } else {
-            state
-                .input
-                .text()
-                .chars()
-                .take(char_idx)
-                .collect::<String>()
-                .width()
-        };
-
         let total_width = prompt_width + input_width;
         let max_x = area.width.saturating_sub(1) as usize;
         let safe_x = total_width.min(max_x);
