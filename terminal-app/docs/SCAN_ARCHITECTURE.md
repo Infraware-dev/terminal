@@ -1427,9 +1427,9 @@ Both English and non-English queries end up as `InputType::NaturalLanguage` and 
 
 ### Documentation
 
-- **Project Brief**: `infraware_terminal_project_brief.md`
 - **Development Guide**: `CLAUDE.md`
-- **Implementation Plan**: `docs/SCAN_IMPLEMENTATION_PLAN.md`
+- **Documentation Index**: `docs/INDEX.md`
+- **Scrolling Architecture**: `docs/SCROLLING_ARCHITECTURE.md`
 
 ---
 

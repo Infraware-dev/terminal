@@ -7,26 +7,24 @@ docs/
 ├── INDEX.md                              # This file - navigation guide
 ├── SUPPORTED_COMMANDS.md                 # All commands with test references
 ├── SCAN_ARCHITECTURE.md                  # SCAN algorithm deep dive
-├── SCAN_IMPLEMENTATION_PLAN.md           # Implementation phases
 ├── INTERACTIVE_COMMANDS_ARCHITECTURE.md  # Interactive command handling
-├── INTERACTIVE_COMMANDS_PLAN.md          # Interactive commands planning
 ├── SCROLLING_ARCHITECTURE.md             # Output scrolling implementation
-├── QUICK_REFERENCE_SCROLLING.md          # Scrolling quick reference
-├── design-patterns.md                    # Design patterns deep dive
-├── design-patterns/                      # Design pattern examples
-│   └── chain-of-responsibility.md
+├── design-patterns/                      # Design pattern documentation
+│   ├── design-patterns.md                # Design patterns deep dive
+│   └── chain-of-responsibility.md        # CoR pattern example
 └── uml/                                  # All UML diagrams
-    ├── README.md                         # UML documentation index
+    ├── TERMINAL_MODULE_DIAGRAMS.md       # Terminal module documentation
+    ├── THROBBER_ANIMATION_DIAGRAMS.md    # Throbber animation documentation
+    ├── BACKGROUND_PROCESSES_DIAGRAMS.md  # Background processes documentation
     └── *.puml                            # PlantUML diagram files
 ```
 
 ## Quick Navigation
 
 ### Understanding the System
-1. Start with `uml/DIAGRAM_QUICK_REFERENCE.md`
-2. View `uml/00-main-application-architecture.puml`
-3. View `uml/07-data-flow-pipeline.puml`
-4. Choose a module diagram
+1. View `uml/00-main-application-architecture.puml`
+2. View `uml/07-data-flow-pipeline.puml`
+3. Choose a module diagram
 
 ### Core Documentation
 
@@ -35,15 +33,16 @@ docs/
 | [SUPPORTED_COMMANDS.md](SUPPORTED_COMMANDS.md) | All supported commands with test references |
 | [SCAN_ARCHITECTURE.md](SCAN_ARCHITECTURE.md) | Complete SCAN algorithm explanation |
 | [INTERACTIVE_COMMANDS_ARCHITECTURE.md](INTERACTIVE_COMMANDS_ARCHITECTURE.md) | TUI suspend/resume for interactive commands |
-| [SCROLLING_ARCHITECTURE.md](SCROLLING_ARCHITECTURE.md) | Output buffer scrolling implementation |
-| [design-patterns.md](design-patterns.md) | Design patterns used in the codebase |
+| [SCROLLING_ARCHITECTURE.md](SCROLLING_ARCHITECTURE.md) | Output buffer scrolling with visual scrollbar |
+| [design-patterns.md](design-patterns/design-patterns.md) | Design patterns used in the codebase |
 
-### UML Diagrams
+### UML Documentation
 
-All PlantUML diagrams are in the `uml/` subdirectory. See [uml/README.md](uml/README.md) for:
-- Complete diagram index
-- How to view diagrams
-- Task-based diagram selection
+| Document | Description |
+|----------|-------------|
+| [TERMINAL_MODULE_DIAGRAMS.md](uml/TERMINAL_MODULE_DIAGRAMS.md) | Terminal module architecture diagrams |
+| [THROBBER_ANIMATION_DIAGRAMS.md](uml/THROBBER_ANIMATION_DIAGRAMS.md) | Throbber animation system diagrams |
+| [BACKGROUND_PROCESSES_DIAGRAMS.md](uml/BACKGROUND_PROCESSES_DIAGRAMS.md) | Background process support diagrams |
 
 ### Key Diagrams
 
@@ -55,6 +54,7 @@ All PlantUML diagrams are in the `uml/` subdirectory. See [uml/README.md](uml/RE
 | `uml/04-terminal-state-and-buffers.puml` | TUI state management |
 | `uml/05-orchestrators.puml` | Workflow coordination |
 | `uml/06-complete-class-diagram.puml` | Full class diagram |
+| `uml/terminal-module-overview.puml` | Terminal module components |
 
 ## How to View Diagrams
 
@@ -96,16 +96,23 @@ plantuml -tsvg docs/uml/00-main-application-architecture.puml
 3. Study `src/terminal/tui.rs` (suspend/resume)
 
 ### Background Processes
-1. View `uml/08-job-manager-class-diagram.puml`
-2. View `uml/09-background-command-execution-sequence.puml`
-3. Study `src/executor/job_manager.rs`
+1. Read `uml/BACKGROUND_PROCESSES_DIAGRAMS.md`
+2. View `uml/08-job-manager-class-diagram.puml`
+3. View `uml/09-background-command-execution-sequence.puml`
+4. Study `src/executor/job_manager.rs`
 
-### UI State Management
-1. View `uml/04-terminal-state-and-buffers.puml`
-2. Read `SCROLLING_ARCHITECTURE.md`
-3. Study `src/terminal/buffers.rs`
+### Terminal UI & Scrolling
+1. Read `SCROLLING_ARCHITECTURE.md`
+2. Read `uml/TERMINAL_MODULE_DIAGRAMS.md`
+3. View `uml/terminal-module-overview.puml`
+4. Study `src/terminal/buffers.rs`
+
+### Throbber Animation
+1. Read `uml/THROBBER_ANIMATION_DIAGRAMS.md`
+2. View `uml/throbber-animator-class-diagram.puml`
+3. Study `src/terminal/throbber.rs`
 
 ### Design Patterns
-1. Read `design-patterns.md`
+1. Read `design-patterns/design-patterns.md`
 2. View `uml/design_patterns.puml`
 3. See `design-patterns/chain-of-responsibility.md`

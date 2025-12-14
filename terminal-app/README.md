@@ -157,8 +157,11 @@ infraware-terminal/
 ├── benches/                       # Performance benchmarks
 │   └── scan_benchmark.rs         # SCAN algorithm benchmarks
 └── docs/                          # Documentation
+    ├── INDEX.md                  # Documentation index
     ├── SCAN_ARCHITECTURE.md      # SCAN algorithm details
-    └── SCAN_IMPLEMENTATION_PLAN.md
+    ├── SCROLLING_ARCHITECTURE.md # Scrollbar implementation
+    ├── INTERACTIVE_COMMANDS_ARCHITECTURE.md
+    └── uml/                      # PlantUML diagrams
 ```
 
 ## 🚀 Getting Started
@@ -525,8 +528,8 @@ Planned configuration options:
 
 This is a 3-month contractor project. For questions or issues:
 
-1. Check the [project brief](infraware_terminal_project_brief.md)
-2. Review the architecture documentation
+1. Review `CLAUDE.md` for development guidelines
+2. Check `docs/INDEX.md` for architecture documentation
 3. Run tests to ensure your changes work
 4. Follow Rust best practices and conventions
 
