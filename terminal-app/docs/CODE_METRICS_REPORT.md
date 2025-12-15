@@ -626,6 +626,21 @@ Based on project evolution:
      - `check_contractions()` - "'t", "'re", "'ve", etc.
    - **Refactored**: December 15, 2025 (commit 44e18f8)
 
+3. **`handle_sse_event_v2()` - CCN 16 → 5** (llm/client.rs) ✅ COMPLETED
+   - **Before**: 186 lines, CCN 16 (HIGH)
+   - **After**: 12 lines main + 180 lines helpers, CCN 5 (GOOD)
+   - **Extracted 9 helper methods**:
+     - `is_ai_message()` - validates message source (type="ai" OR role="assistant")
+     - `extract_message_content()` - handles string and array content formats
+     - `is_valid_ai_content()` - filters out handoff messages
+     - `parse_interrupt_value()` - determines interrupt type (CommandApproval vs Question)
+     - `handle_metadata_event()` - processes metadata SSE events
+     - `handle_messages_event()` - processes message stream events
+     - `handle_updates_event()` - processes HITL interrupt events
+     - `handle_values_event()` - processes value state events
+     - `handle_error_event()` - error handling for SSE stream
+   - **Refactored**: December 15, 2025 (commit 909cb8b)
+
 ---
 
 ## Conclusion
@@ -641,6 +656,7 @@ The Infraware Terminal codebase demonstrates **excellent code quality** with a m
 **Recent Improvements** (December 15, 2025):
 1. **`run()`**: CCN 43 → 6 (86% reduction) - extracted 8 async helpers
 2. **`is_likely_natural_language()`**: CCN 27 → 2 (93% reduction) - extracted 8 heuristic methods
+3. **`handle_sse_event_v2()`**: CCN 16 → 5 (69% reduction) - extracted 9 SSE event handlers
 
 These refactorings eliminated all critical complexity hotspots while preserving clean architecture patterns (Elm Architecture, guard clauses, short-circuit evaluation).
 
