@@ -144,15 +144,8 @@ impl NaturalLanguageOrchestrator {
                 state.mode = TerminalMode::Normal;
             }
             LLMQueryResult::CommandApproval { command, message } => {
-                // Human-in-the-loop: show command approval request
-                state.add_output(String::new());
-                state.add_output(MessageFormatter::info("Command approval required:"));
-                state.add_output(format!("  Command: {}", command));
-                if !message.is_empty() {
-                    state.add_output(format!("  Reason: {}", message));
-                }
-                state.add_output(String::new());
-                state.add_output("Type 'y' to approve, 'n' to reject:".to_string());
+                // Human-in-the-loop: show command for approval
+                // The prompt "Do you want to execute this command (y/n)?" is shown by tui.rs
 
                 // Save pending interaction and change mode
                 // confirmation_type is None for LLM-originated approvals
@@ -209,7 +202,6 @@ impl NaturalLanguageOrchestrator {
                 log::info!("User approved command: {}", command);
             }
 
-            state.add_output(MessageFormatter::info("Approved! Resuming execution..."));
             ui.render(state)?;
 
             // Resume the LLM run
@@ -226,7 +218,6 @@ impl NaturalLanguageOrchestrator {
             if let Some(PendingInteraction::CommandApproval { ref command, .. }) = pending {
                 log::info!("User rejected command: {}", command);
             }
-            state.add_output(MessageFormatter::info("Command rejected by user."));
             state.mode = TerminalMode::Normal;
         }
 

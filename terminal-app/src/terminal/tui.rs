@@ -223,15 +223,10 @@ fn render_unified_content(
     // Clone only the visible output lines (not the entire buffer!)
     let mut all_lines: Vec<Line> = state.output.parsed_lines()[output_start..output_end].to_vec();
 
-    // Add approval flow lines if pending
+    // Add approval flow lines if pending (only show command, not message)
     if let Some(interaction) = &state.pending_interaction {
         match interaction {
-            crate::terminal::PendingInteraction::CommandApproval {
-                command, message, ..
-            } => {
-                if !message.is_empty() {
-                    all_lines.push(Line::from(message.as_str()));
-                }
+            crate::terminal::PendingInteraction::CommandApproval { command, .. } => {
                 all_lines.push(Line::from(Span::styled(
                     format!("command: {}", command),
                     Style::default().fg(Color::Yellow),
@@ -454,13 +449,9 @@ fn count_interaction_lines(
 ) -> usize {
     match pending_interaction {
         None => 0,
-        Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) => {
-            // message line (if not empty) + command line
-            if message.is_empty() {
-                1
-            } else {
-                2
-            }
+        Some(crate::terminal::PendingInteraction::CommandApproval { .. }) => {
+            // Only command line (message is not displayed)
+            1
         }
         Some(crate::terminal::PendingInteraction::Question { question, options }) => {
             // Skip display for password prompts
