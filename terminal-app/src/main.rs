@@ -791,6 +791,8 @@ impl InfrawareTerminal {
         }
 
         if input.trim().is_empty() {
+            // Reprint prompt (like bash does on Enter with empty input)
+            self.state.add_output(self.state.get_prompt());
             return Ok(true);
         }
 
