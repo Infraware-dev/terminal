@@ -298,5 +298,7 @@ Agents in `.claude/agents/` are invoked automatically when appropriate:
 ## Platform Notes
 
 **Windows**: Filter `KeyEventKind::Press` only in `events.rs`. Use `cmd /C` for shell execution. Interactive commands not supported.
-- tieni conto dei concetti ratatui quando scrivi codice UI: https://ratatui.rs/concepts/
-- tieni conto dei concetti su async di alice qui:https://ryhl.io/blog/async-what-is-blocking/
+
+**Resources**:
+- Ratatui concepts for TUI code: https://ratatui.rs/concepts/
+- Async/blocking concepts (Alice Ryhl): https://ryhl.io/blog/async-what-is-blocking/

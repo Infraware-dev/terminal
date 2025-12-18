@@ -704,7 +704,8 @@ impl InfrawareTerminal {
         // Handle human-in-the-loop command approval mode (y/n)
         if self.state.mode == TerminalMode::AwaitingCommandApproval {
             let approved = HitlOrchestrator::parse_approval(&input);
-            self.state.add_output(MessageFormatter::command(&input));
+            // Echo just the response (prompt was already shown)
+            self.state.add_output(input.clone());
 
             // Check if this is a shell confirmation (rm on write-protected files, etc.)
             if CommandOrchestrator::is_shell_confirmation(&self.state) {
@@ -745,7 +746,8 @@ impl InfrawareTerminal {
                 return Ok(true);
             }
 
-            self.state.add_output(MessageFormatter::command(&input));
+            // Echo just the response (prompt was already shown)
+            self.state.add_output(input.clone());
 
             // Delegate to orchestrator for answer handling
             self.nl_orchestrator
@@ -841,20 +843,26 @@ impl InfrawareTerminal {
 
                 // Handle cd builtin - must be handled by parent process
                 if command == "cd" {
-                    self.state.add_output(MessageFormatter::command(&input));
+                    // Echo prompt + command (like bash)
+                    self.state
+                        .add_output(format!("{}{}", self.state.get_prompt(), input));
                     self.handle_cd_command(&args);
                     return Ok(true);
                 }
 
                 // Don't echo input for clear command (it clears the output)
                 if command != "clear" {
-                    self.state.add_output(MessageFormatter::command(&input));
+                    // Echo prompt + command (like bash)
+                    self.state
+                        .add_output(format!("{}{}", self.state.get_prompt(), input));
                 }
                 self.handle_command(&command, &args, original_input.as_deref())
                     .await?;
             }
             InputType::NaturalLanguage(query) => {
-                self.state.add_output(MessageFormatter::command(&input));
+                // Echo prompt + query (like bash)
+                self.state
+                    .add_output(format!("{}{}", self.state.get_prompt(), input));
 
                 // Set mode BEFORE awaiting to prevent race condition with Ctrl+C
                 // If mode is set inside handle_natural_language, Ctrl+C pressed immediately
@@ -878,7 +886,9 @@ impl InfrawareTerminal {
                 suggestion,
                 distance,
             } => {
-                self.state.add_output(MessageFormatter::command(&input));
+                // Echo prompt + command (like bash)
+                self.state
+                    .add_output(format!("{}{}", self.state.get_prompt(), input));
                 self.handle_command_typo(&typo_input, &suggestion, distance)
                     .await?;
             }
