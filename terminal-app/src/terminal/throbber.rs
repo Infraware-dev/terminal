@@ -204,13 +204,14 @@ mod tests {
         let animator = ThrobberAnimator::new();
         animator.start();
         let initial = animator.frame_index();
-        // Wait for 350ms - should get at least 3 frames at 100ms interval
-        thread::sleep(Duration::from_millis(350));
+        // Wait for 500ms - should get at least 3 frames at 100ms interval
+        // (extra buffer for CI timing variability, especially on macOS)
+        thread::sleep(Duration::from_millis(500));
         let after = animator.frame_index();
-        // At 100ms per frame, 350ms should give us at least 3 frames
+        // At 100ms per frame, 500ms should give us at least 3 frames
         assert!(
             after >= initial + 3,
-            "Expected at least 3 frames in 350ms at 10fps, got {}",
+            "Expected at least 3 frames in 500ms at 10fps, got {}",
             after - initial
         );
         animator.stop();

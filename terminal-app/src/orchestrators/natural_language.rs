@@ -469,31 +469,20 @@ mod tests {
         };
         orchestrator.handle_query_result(result, &mut state);
 
-        // Should show command approval request
-        assert!(state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("Command approval required")));
-        assert!(state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("rm -rf /tmp/test")));
-        assert!(state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("Delete test files")));
-
-        // Mode should change
+        // Mode should change to await approval
         assert_eq!(state.mode, TerminalMode::AwaitingCommandApproval);
 
-        // Pending interaction should be set
-        assert!(matches!(
-            state.pending_interaction,
-            Some(PendingInteraction::CommandApproval { .. })
-        ));
+        // Pending interaction should be set with correct command and message
+        // (The actual display is handled by TUI rendering, not output buffer)
+        match &state.pending_interaction {
+            Some(PendingInteraction::CommandApproval {
+                command, message, ..
+            }) => {
+                assert_eq!(command, "rm -rf /tmp/test");
+                assert_eq!(message, "Delete test files");
+            }
+            _ => panic!("Expected CommandApproval pending interaction"),
+        }
     }
 
     #[test]

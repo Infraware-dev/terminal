@@ -1576,9 +1576,11 @@ mod tests {
             CommandOrchestrator::get_file_type_description("/nonexistent/path"),
             "file"
         );
-        // For existing directory
+        // For existing directory - use temp_dir() for cross-platform compatibility
+        // (on macOS /tmp is a symlink to /private/tmp)
+        let temp_dir = std::env::temp_dir();
         assert_eq!(
-            CommandOrchestrator::get_file_type_description("/tmp"),
+            CommandOrchestrator::get_file_type_description(temp_dir.to_str().unwrap()),
             "directory"
         );
     }

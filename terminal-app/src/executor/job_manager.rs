@@ -522,7 +522,8 @@ mod tests {
         }
 
         // Wait and check completed
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        // Use 400ms to allow for CI timing variability (especially on macOS)
+        tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
         {
             let mut mgr = shared.write().unwrap();
             let completed = mgr.check_completed();
