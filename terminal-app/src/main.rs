@@ -972,12 +972,7 @@ impl InfrawareTerminal {
 
         match std::env::set_current_dir(&path) {
             Ok(()) => {
-                // Show the new directory
-                if let Ok(cwd) = std::env::current_dir() {
-                    self.state
-                        .add_output(MessageFormatter::success(cwd.display().to_string()));
-                }
-                // Update prompt cache and window title
+                // Update prompt cache and window title (prompt shows new directory)
                 self.state.refresh_prompt();
                 let title = self.state.get_window_title();
                 let _ = self.ui.set_window_title(&title);
