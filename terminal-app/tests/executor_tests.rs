@@ -1139,6 +1139,12 @@ async fn test_flood_shell_command_cancellable() {
 
 #[tokio::test]
 async fn test_apt_list_exit_code_zero() {
+    // Skip on non-Linux systems where apt is not available
+    if which::which("apt").is_err() {
+        eprintln!("Skipping test: apt not available on this platform");
+        return;
+    }
+
     // apt list should exit with code 0, not -1
     // This tests the SIGPIPE handling fix
     let cancel = CancellationToken::new();

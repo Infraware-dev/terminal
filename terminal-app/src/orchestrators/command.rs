@@ -1964,4 +1964,482 @@ mod tests {
             _ => panic!("Expected CommandApproval"),
         }
     }
+
+    // ==================== Confirmation Handler Tests ====================
+
+    #[test]
+    fn test_handle_rm_interactive_empty_files() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let result = orchestrator.handle_rm_interactive(vec![], None, &[], &mut state);
+        assert!(result.is_ok());
+        assert!(state.pending_interaction.is_none());
+    }
+
+    #[test]
+    fn test_handle_rm_interactive_with_files() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let files = vec!["file1.txt".to_string(), "file2.txt".to_string()];
+        let args = vec![
+            "-i".to_string(),
+            "file1.txt".to_string(),
+            "file2.txt".to_string(),
+        ];
+
+        let result = orchestrator.handle_rm_interactive(files, None, &args, &mut state);
+        assert!(result.is_ok());
+        assert!(state.pending_interaction.is_some());
+        assert_eq!(
+            state.mode,
+            crate::terminal::TerminalMode::AwaitingCommandApproval
+        );
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) =
+            &state.pending_interaction
+        {
+            assert!(message.contains("file1.txt"));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_rm_bulk() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec![
+            "-I".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+
+        let result = orchestrator.handle_rm_bulk(4, false, None, &args, &mut state);
+        assert!(result.is_ok());
+        assert!(state.pending_interaction.is_some());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) =
+            &state.pending_interaction
+        {
+            assert!(message.contains("4 arguments"));
+            assert!(!message.contains("recursively"));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_rm_bulk_recursive() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec!["-rI".to_string(), "dir".to_string()];
+
+        let result = orchestrator.handle_rm_bulk(1, true, None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) =
+            &state.pending_interaction
+        {
+            assert!(message.contains("recursively"));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_cp_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec![
+            "-i".to_string(),
+            "src.txt".to_string(),
+            "dest.txt".to_string(),
+        ];
+
+        let result =
+            orchestrator.handle_cp_confirmation("dest.txt".to_string(), None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("overwrite"));
+            assert!(message.contains("dest.txt"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::CpInteractive { .. })
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_mv_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec![
+            "-i".to_string(),
+            "src.txt".to_string(),
+            "dest.txt".to_string(),
+        ];
+
+        let result =
+            orchestrator.handle_mv_confirmation("dest.txt".to_string(), None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("overwrite"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::MvInteractive { .. })
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_ln_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec!["-i".to_string(), "src".to_string(), "link".to_string()];
+
+        let result =
+            orchestrator.handle_ln_confirmation("link".to_string(), None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("replace"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::LnInteractive { .. })
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_rm_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let protected = vec!["protected.txt".to_string()];
+        let args = vec!["protected.txt".to_string()];
+
+        let result = orchestrator.handle_rm_confirmation(protected, None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("write-protected"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::RmWriteProtected)
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_success() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("echo hello", &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert!(!state.output.lines().is_empty());
+        assert!(state.output.lines().iter().any(|l| l.contains("hello")));
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_with_stderr() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("echo warning >&2", &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert!(state.output.lines().iter().any(|l| l.contains("warning")));
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_failure() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("exit 1", &mut state)
+            .await;
+        assert!(result.is_ok()); // Method doesn't fail, just reports error
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_not_found() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("nonexistentcommand12345", &mut state)
+            .await;
+        assert!(result.is_ok()); // Method doesn't fail, just reports error
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|l| l.contains("not found") || l.contains("command")));
+    }
+
+    #[tokio::test]
+    async fn test_handle_shell_confirmation_cancelled() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Set up a pending confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm file.txt".to_string(),
+            message: "Remove?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmWriteProtected),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        let result = orchestrator
+            .handle_shell_confirmation(false, &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(state.mode, crate::terminal::TerminalMode::Normal);
+        assert!(state.output.lines().iter().any(|l| l.contains("Cancelled")));
+    }
+
+    #[tokio::test]
+    async fn test_handle_shell_confirmation_rm_interactive_skip() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Set up rm -i with multiple files
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -i file1.txt file2.txt".to_string(),
+            message: "rm: remove regular file 'file1.txt'?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractive {
+                files: vec!["file1.txt".to_string(), "file2.txt".to_string()],
+                current_index: 0,
+                command: "rm -i file1.txt file2.txt".to_string(),
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        // User says 'n' - should skip to next file
+        let result = orchestrator
+            .handle_shell_confirmation(false, &mut state)
+            .await;
+        assert!(result.is_ok());
+
+        // Should still be in approval mode for next file
+        assert_eq!(
+            state.mode,
+            crate::terminal::TerminalMode::AwaitingCommandApproval
+        );
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("file2.txt"));
+            if let Some(crate::terminal::ConfirmationType::RmInteractive {
+                current_index, ..
+            }) = confirmation_type
+            {
+                assert_eq!(*current_index, 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_shell_confirmation_rm_interactive_last_file_skip() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Set up rm -i with single file (last/only)
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -i file1.txt".to_string(),
+            message: "rm: remove regular file 'file1.txt'?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractive {
+                files: vec!["file1.txt".to_string()],
+                current_index: 0,
+                command: "rm -i file1.txt".to_string(),
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        // User says 'n' - no more files, should go back to normal
+        let result = orchestrator
+            .handle_shell_confirmation(false, &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(state.mode, crate::terminal::TerminalMode::Normal);
+        assert!(state.pending_interaction.is_none());
+    }
+
+    // ==================== File Type Description Tests ====================
+
+    #[test]
+    fn test_get_file_type_description_symlink() {
+        // Create a temp symlink to test
+        let temp_dir = std::env::temp_dir();
+        let target = temp_dir.join("test_target_for_symlink");
+        let link = temp_dir.join("test_symlink_for_type");
+
+        // Clean up any existing test files
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+
+        // Create target file and symlink
+        std::fs::write(&target, "test").ok();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).ok();
+
+        #[cfg(unix)]
+        {
+            let desc = CommandOrchestrator::get_file_type_description(link.to_str().unwrap());
+            assert_eq!(desc, "symbolic link");
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn test_get_file_type_description_regular_file() {
+        let temp_dir = std::env::temp_dir();
+        let file = temp_dir.join("test_regular_file_for_type");
+        std::fs::write(&file, "test content").ok();
+
+        let desc = CommandOrchestrator::get_file_type_description(file.to_str().unwrap());
+        assert_eq!(desc, "regular file");
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    // ==================== needs_cp_mv_confirmation edge cases ====================
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_dest_exists() {
+        // Create a temp file to act as existing destination
+        let temp_dir = std::env::temp_dir();
+        let dest = temp_dir.join("test_cp_dest_exists");
+        std::fs::write(&dest, "existing").ok();
+
+        let args = vec![
+            "-i".to_string(),
+            "src.txt".to_string(),
+            dest.to_str().unwrap().to_string(),
+        ];
+
+        let result = CommandOrchestrator::needs_cp_mv_confirmation(&args);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), dest.to_str().unwrap());
+
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_multi_source_to_dir() {
+        // Multiple sources to directory with existing target
+        let temp_dir = std::env::temp_dir();
+        let dest_dir = temp_dir.join("test_cp_dest_dir");
+        let _ = std::fs::create_dir(&dest_dir);
+
+        // Create an existing file in dest_dir
+        let existing = dest_dir.join("src1.txt");
+        std::fs::write(&existing, "existing").ok();
+
+        let args = vec![
+            "-i".to_string(),
+            "src1.txt".to_string(),
+            "src2.txt".to_string(),
+            dest_dir.to_str().unwrap().to_string(),
+        ];
+
+        let result = CommandOrchestrator::needs_cp_mv_confirmation(&args);
+        assert!(result.is_some());
+
+        let _ = std::fs::remove_dir_all(&dest_dir);
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_existing_dest() {
+        let temp_dir = std::env::temp_dir();
+        let dest = temp_dir.join("test_ln_dest_exists");
+        std::fs::write(&dest, "existing").ok();
+
+        let args = vec![
+            "-i".to_string(),
+            "/tmp".to_string(),
+            dest.to_str().unwrap().to_string(),
+        ];
+
+        let result = CommandOrchestrator::needs_ln_confirmation(&args);
+        assert!(result.is_some());
+
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    // ==================== needs_rm_confirmation Tests ====================
+
+    #[test]
+    #[cfg(unix)]
+    fn test_needs_rm_confirmation_write_protected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip if running as root
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir();
+        let protected = temp_dir.join("test_rm_protected_file");
+        std::fs::write(&protected, "protected").ok();
+
+        // Make file read-only
+        let mut perms = std::fs::metadata(&protected).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&protected, perms).ok();
+
+        let args = vec![protected.to_str().unwrap().to_string()];
+        let result = CommandOrchestrator::needs_rm_confirmation(&args);
+
+        // Should detect protected file
+        assert!(result.is_some());
+
+        // Cleanup: restore write permission and delete
+        let mut perms = std::fs::metadata(&protected).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&protected, perms).ok();
+        let _ = std::fs::remove_file(&protected);
+    }
 }
