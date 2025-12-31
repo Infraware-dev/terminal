@@ -405,9 +405,21 @@ clear
             let mut run_start: Option<(usize, Color32)> = None;
 
             // SINGLE PASS: iterate cells once, collect all render data
+            // PERFORMANCE: row_len is bounded by cols, and column_x_coords has cols entries
             let row_len = row.len().min(cols as usize);
+            let cols_usize = cols as usize;
+
+            // PERFORMANCE: Direct indexing helper - all indices in loop are < row_len <= cols
+            let col_x = |idx: usize| -> f32 {
+                if idx < cols_usize {
+                    self.column_x_coords[idx]
+                } else {
+                    idx as f32 * self.char_width
+                }
+            };
+
             for (col_idx, cell) in row.iter().take(row_len).enumerate() {
-                let x = self.column_x_coords.get(col_idx).copied().unwrap_or(col_idx as f32 * self.char_width);
+                let x = col_x(col_idx);
 
                 // --- Background batching ---
                 let bg = if cell.attrs.reverse {
@@ -423,9 +435,8 @@ clear
                         }
                         Some((start, color)) => {
                             // Flush previous background run
-                            let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
                             let width = (col_idx - start) as f32 * self.char_width;
-                            self.render_bg_rects.push((start_x, width, color));
+                            self.render_bg_rects.push((col_x(start), width, color));
                             bg_start = Some((col_idx, bg));
                         }
                         None => {
@@ -433,17 +444,15 @@ clear
                         }
                     }
                 } else if let Some((start, color)) = bg_start.take() {
-                    let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
                     let width = (col_idx - start) as f32 * self.char_width;
-                    self.render_bg_rects.push((start_x, width, color));
+                    self.render_bg_rects.push((col_x(start), width, color));
                 }
 
                 // --- Text batching ---
                 if cell.ch == ' ' || cell.attrs.hidden {
                     if let Some((start, color)) = run_start.take() {
                         if !text_run.is_empty() {
-                            let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
-                            self.render_text_runs.push((start_x, std::mem::take(&mut text_run), color));
+                            self.render_text_runs.push((col_x(start), std::mem::take(&mut text_run), color));
                         }
                     }
                 } else {
@@ -463,8 +472,7 @@ clear
                         }
                         Some((start, color)) => {
                             if !text_run.is_empty() {
-                                let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
-                                self.render_text_runs.push((start_x, std::mem::take(&mut text_run), color));
+                                self.render_text_runs.push((col_x(start), std::mem::take(&mut text_run), color));
                             }
                             run_start = Some((col_idx, fg));
                             text_run.push(cell.ch);
@@ -489,16 +497,14 @@ clear
 
             // Flush remaining background
             if let Some((start, color)) = bg_start {
-                let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
                 let width = (row_len - start) as f32 * self.char_width;
-                self.render_bg_rects.push((start_x, width, color));
+                self.render_bg_rects.push((col_x(start), width, color));
             }
 
             // Flush remaining text (use std::mem::take to avoid clone)
             if let Some((start, color)) = run_start {
                 if !text_run.is_empty() {
-                    let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
-                    self.render_text_runs.push((start_x, std::mem::take(&mut text_run), color));
+                    self.render_text_runs.push((col_x(start), std::mem::take(&mut text_run), color));
                 }
             }
 
@@ -510,7 +516,13 @@ clear
 
         // Draw cursor (only when at bottom/live view, after shell init, with blink, and focused)
         if cursor_visible && self.shell_initialized && self.cursor_blink_visible && scroll_offset == 0 && has_focus {
-            let cursor_x = rect.left() + self.column_x_coords.get(cursor_col as usize).copied().unwrap_or(cursor_col as f32 * self.char_width);
+            // Direct indexing with bounds check (cursor_col comes from grid, should be < cols)
+            let cursor_col_idx = cursor_col as usize;
+            let cursor_x = rect.left() + if cursor_col_idx < self.column_x_coords.len() {
+                self.column_x_coords[cursor_col_idx]
+            } else {
+                cursor_col as f32 * self.char_width
+            };
             let cursor_y = rect.top() + cursor_row as f32 * self.char_height;
             render_cursor(&painter, cursor_x, cursor_y, self.char_height, self.theme.cursor);
         }
@@ -553,15 +565,20 @@ impl eframe::App for InfrawareApp {
             return;
         }
 
-        // Update cursor blink only when window has focus (530ms interval)
-        if has_focus {
+        // PERFORMANCE: Check if window is minimized (skip heavy work)
+        let is_minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+
+        // Update cursor blink only when window has focus AND not minimized (530ms interval)
+        if has_focus && !is_minimized {
             if self.last_cursor_blink.elapsed() > timing::CURSOR_BLINK_INTERVAL {
                 self.cursor_blink_visible = !self.cursor_blink_visible;
                 self.last_cursor_blink = Instant::now();
             }
         } else {
-            // When unfocused, keep cursor visible but static (will render as hollow)
+            // When unfocused or minimized, keep cursor visible but static
+            // Reset timer so blink starts fresh when focus returns
             self.cursor_blink_visible = true;
+            self.last_cursor_blink = Instant::now();
         }
 
         // Check for SIGINT (Ctrl+C) from system signal handler
@@ -595,7 +612,10 @@ impl eframe::App for InfrawareApp {
 
         // REACTIVE REPAINT: Only request repaint when something actually changed
         // This dramatically reduces CPU usage when idle (from ~50% to <5%)
-        if has_focus {
+        if is_minimized {
+            // PERFORMANCE: Window minimized - very rare repaint (just check PTY)
+            ctx.request_repaint_after(timing::BACKGROUND_REPAINT * 2);
+        } else if has_focus {
             // Check if there was any user interaction (keyboard/mouse)
             let had_user_input = ctx.input(|i| {
                 !i.events.is_empty() || i.pointer.any_down() || i.pointer.any_released()
