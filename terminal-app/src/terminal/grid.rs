@@ -7,10 +7,15 @@ use std::collections::VecDeque;
 const MAX_SCROLLBACK: usize = 10_000;
 
 /// Terminal grid containing cells, cursor position, and state.
+/// Uses a ring buffer for O(1) scrolling operations.
 #[derive(Debug)]
 pub struct TerminalGrid {
     /// Grid of cells [row][col] - visible screen only.
+    /// Accessed via ring buffer with cells_offset for O(1) scroll.
     cells: Vec<Vec<Cell>>,
+    /// Ring buffer offset - physical index of logical row 0.
+    /// Used to avoid O(n) remove/insert during scroll.
+    cells_offset: usize,
     /// Scrollback buffer - lines that scrolled off the top.
     /// Uses VecDeque for O(1) pop_front when trimming.
     scrollback: VecDeque<Vec<Cell>>,
@@ -81,6 +86,7 @@ impl TerminalGrid {
 
         Self {
             cells,
+            cells_offset: 0,
             scrollback: VecDeque::new(),
             scroll_offset: 0,
             cursor_row: 0,
@@ -133,8 +139,31 @@ impl TerminalGrid {
     }
 
     /// Get cells for rendering (current screen only).
+    /// Note: Returns physical array order, use visible_rows() for logical order.
     pub fn cells(&self) -> &[Vec<Cell>] {
         &self.cells
+    }
+
+    // ========== Ring Buffer Helpers ==========
+
+    /// Convert logical row index to physical index in the ring buffer.
+    #[inline]
+    fn physical_row(&self, logical_row: usize) -> usize {
+        (self.cells_offset + logical_row) % self.cells.len()
+    }
+
+    /// Get mutable reference to a row by logical index.
+    #[inline]
+    fn row_mut(&mut self, logical_row: usize) -> Option<&mut Vec<Cell>> {
+        let physical = self.physical_row(logical_row);
+        self.cells.get_mut(physical)
+    }
+
+    /// Get reference to a row by logical index.
+    #[inline]
+    fn row(&self, logical_row: usize) -> Option<&Vec<Cell>> {
+        let physical = self.physical_row(logical_row);
+        self.cells.get(physical)
     }
 
     /// Get scrollback buffer.
@@ -179,6 +208,7 @@ impl TerminalGrid {
 
     /// Get visible rows for rendering, combining scrollback and current screen.
     /// Returns rows from (scrollback + cells) based on scroll_offset.
+    /// Uses ring buffer for correct logical row ordering.
     pub fn visible_rows(&self) -> Vec<&[Cell]> {
         let total = self.scrollback.len() + self.cells.len();
         let visible_count = self.rows as usize;
@@ -193,9 +223,10 @@ impl TerminalGrid {
             if i < self.scrollback.len() {
                 result.push(self.scrollback[i].as_slice());
             } else {
-                let screen_idx = i - self.scrollback.len();
-                if screen_idx < self.cells.len() {
-                    result.push(self.cells[screen_idx].as_slice());
+                // Access cells via ring buffer (logical to physical mapping)
+                let logical_idx = i - self.scrollback.len();
+                if let Some(row) = self.row(logical_idx) {
+                    result.push(row.as_slice());
                 }
             }
         }
@@ -220,13 +251,19 @@ impl TerminalGrid {
             self.linefeed();
         }
 
-        // Put character at cursor position
-        if let Some(row) = self.cells.get_mut(self.cursor_row as usize) {
-            if let Some(cell) = row.get_mut(self.cursor_col as usize) {
+        // Put character at cursor position (via ring buffer)
+        // Copy values before mutable borrow to satisfy borrow checker
+        let cursor_row = self.cursor_row as usize;
+        let cursor_col = self.cursor_col as usize;
+        let fg = self.current_fg;
+        let bg = self.current_bg;
+        let attrs = self.current_attrs;
+        if let Some(row) = self.row_mut(cursor_row) {
+            if let Some(cell) = row.get_mut(cursor_col) {
                 cell.ch = c;
-                cell.fg = self.current_fg;
-                cell.bg = self.current_bg;
-                cell.attrs = self.current_attrs;
+                cell.fg = fg;
+                cell.bg = bg;
+                cell.attrs = attrs;
             }
         }
 
@@ -352,41 +389,101 @@ impl TerminalGrid {
     // ========== Scrolling ==========
 
     /// Scroll the scroll region up by n lines.
+    /// Uses O(1) ring buffer rotation for full-screen scroll.
     pub fn scroll_up(&mut self, n: u16) {
         let top = self.scroll_top as usize;
         let bottom = self.scroll_bottom as usize;
+        let is_full_screen = top == 0 && bottom == self.rows.saturating_sub(1) as usize;
 
         for _ in 0..n {
-            if top < bottom && bottom < self.cells.len() {
-                // Save the line going off the top to scrollback (only if scroll region is full screen)
-                if top == 0 {
-                    let removed_line = self.cells.remove(top);
-                    self.scrollback.push_back(removed_line);
-                    // Trim scrollback if too large - O(1) with VecDeque
-                    if self.scrollback.len() > MAX_SCROLLBACK {
-                        self.scrollback.pop_front();
-                    }
-                } else {
-                    self.cells.remove(top);
+            if top >= bottom || bottom >= self.cells.len() {
+                continue;
+            }
+
+            if is_full_screen {
+                // O(1) ring buffer rotation for full-screen scroll
+                let physical_top = self.cells_offset;
+                let cols = self.cols;
+
+                // Move top line to scrollback
+                let empty_row: Vec<Cell> = (0..cols).map(|_| Cell::default()).collect();
+                let top_row = std::mem::replace(&mut self.cells[physical_top], empty_row);
+                self.scrollback.push_back(top_row);
+
+                // Trim scrollback if too large - O(1) with VecDeque
+                if self.scrollback.len() > MAX_SCROLLBACK {
+                    self.scrollback.pop_front();
                 }
-                let new_row = (0..self.cols).map(|_| Cell::default()).collect();
-                self.cells.insert(bottom, new_row);
+
+                // Rotate the ring buffer - O(1)!
+                self.cells_offset = (self.cells_offset + 1) % self.cells.len();
+            } else {
+                // Partial scroll region (vim, less, etc.) - O(region_size)
+                // Shift rows within the region
+                for row in top..bottom {
+                    let src_physical = self.physical_row(row + 1);
+                    let dst_physical = self.physical_row(row);
+                    // Swap to avoid clone, then clear the source
+                    self.cells.swap(src_physical, dst_physical);
+                }
+                // Clear the bottom row of the region
+                if let Some(row) = self.row_mut(bottom) {
+                    for cell in row.iter_mut() {
+                        cell.reset();
+                    }
+                }
             }
         }
     }
 
     /// Scroll the scroll region down by n lines.
+    /// Uses O(1) ring buffer rotation for full-screen scroll.
     pub fn scroll_down(&mut self, n: u16) {
         let top = self.scroll_top as usize;
         let bottom = self.scroll_bottom as usize;
+        let is_full_screen = top == 0 && bottom == self.rows.saturating_sub(1) as usize;
 
         for _ in 0..n {
-            if top < bottom && bottom < self.cells.len() {
-                self.cells.remove(bottom);
-                let new_row = (0..self.cols).map(|_| Cell::default()).collect();
-                self.cells.insert(top, new_row);
+            if top >= bottom || bottom >= self.cells.len() {
+                continue;
+            }
+
+            if is_full_screen {
+                // O(1) ring buffer rotation for full-screen scroll down
+                // Decrement offset (wrapping around)
+                self.cells_offset = if self.cells_offset == 0 {
+                    self.cells.len() - 1
+                } else {
+                    self.cells_offset - 1
+                };
+
+                // Clear the new top row
+                let physical_top = self.cells_offset;
+                for cell in self.cells[physical_top].iter_mut() {
+                    cell.reset();
+                }
+            } else {
+                // Partial scroll region - O(region_size)
+                // Shift rows within the region (from bottom to top)
+                for row in (top + 1..=bottom).rev() {
+                    let src_physical = self.physical_row(row - 1);
+                    let dst_physical = self.physical_row(row);
+                    self.cells.swap(src_physical, dst_physical);
+                }
+                // Clear the top row of the region
+                if let Some(row) = self.row_mut(top) {
+                    for cell in row.iter_mut() {
+                        cell.reset();
+                    }
+                }
             }
         }
+    }
+
+    /// Create an empty row with default cells.
+    #[inline]
+    fn create_empty_row(&self) -> Vec<Cell> {
+        (0..self.cols).map(|_| Cell::default()).collect()
     }
 
     /// Set scroll region (1-indexed).
@@ -415,10 +512,10 @@ impl TerminalGrid {
     pub fn erase_display(&mut self, mode: u16) {
         match mode {
             0 => {
-                // Erase from cursor to end
+                // Erase from cursor to end (via ring buffer)
                 self.erase_line(0);
                 for row in (self.cursor_row + 1) as usize..self.rows as usize {
-                    if let Some(r) = self.cells.get_mut(row) {
+                    if let Some(r) = self.row_mut(row) {
                         for cell in r.iter_mut() {
                             cell.reset();
                         }
@@ -426,9 +523,9 @@ impl TerminalGrid {
                 }
             }
             1 => {
-                // Erase from start to cursor
+                // Erase from start to cursor (via ring buffer)
                 for row in 0..self.cursor_row as usize {
-                    if let Some(r) = self.cells.get_mut(row) {
+                    if let Some(r) = self.row_mut(row) {
                         for cell in r.iter_mut() {
                             cell.reset();
                         }
@@ -440,6 +537,7 @@ impl TerminalGrid {
                 // Erase entire screen and scrollback
                 // Mode 2: erase screen (we also clear scrollback for better UX)
                 // Mode 3: erase screen + scrollback (xterm extension)
+                // Direct iteration is fine since we're clearing all cells
                 for row in &mut self.cells {
                     for cell in row.iter_mut() {
                         cell.reset();
@@ -447,6 +545,7 @@ impl TerminalGrid {
                 }
                 self.scrollback.clear();
                 self.scroll_offset = 0;
+                self.cells_offset = 0; // Reset ring buffer offset
             }
             _ => {}
         }
@@ -455,14 +554,18 @@ impl TerminalGrid {
     /// Erase line (EL).
     /// mode: 0 = cursor to end, 1 = start to cursor, 2 = entire line
     pub fn erase_line(&mut self, mode: u16) {
-        if let Some(row) = self.cells.get_mut(self.cursor_row as usize) {
-            let (start, end) = match mode {
-                0 => (self.cursor_col as usize, self.cols as usize),
-                1 => (0, self.cursor_col as usize + 1),
-                2 => (0, self.cols as usize),
-                _ => return,
-            };
+        // Copy values before mutable borrow
+        let cursor_row = self.cursor_row as usize;
+        let cursor_col = self.cursor_col as usize;
+        let cols = self.cols as usize;
+        let (start, end) = match mode {
+            0 => (cursor_col, cols),
+            1 => (0, cursor_col + 1),
+            2 => (0, cols),
+            _ => return,
+        };
 
+        if let Some(row) = self.row_mut(cursor_row) {
             for col in start..end.min(row.len()) {
                 if let Some(cell) = row.get_mut(col) {
                     cell.reset();
@@ -473,10 +576,12 @@ impl TerminalGrid {
 
     /// Erase characters at cursor (ECH).
     pub fn erase_chars(&mut self, n: u16) {
-        if let Some(row) = self.cells.get_mut(self.cursor_row as usize) {
-            let start = self.cursor_col as usize;
-            let end = (start + n as usize).min(self.cols as usize);
+        // Copy values before mutable borrow
+        let cursor_row = self.cursor_row as usize;
+        let start = self.cursor_col as usize;
+        let end = (start + n as usize).min(self.cols as usize);
 
+        if let Some(row) = self.row_mut(cursor_row) {
             for col in start..end {
                 if let Some(cell) = row.get_mut(col) {
                     cell.reset();
@@ -487,10 +592,12 @@ impl TerminalGrid {
 
     /// Delete characters at cursor, shift rest left (DCH).
     pub fn delete_chars(&mut self, n: u16) {
-        if let Some(row) = self.cells.get_mut(self.cursor_row as usize) {
-            let col = self.cursor_col as usize;
-            let n = n as usize;
+        // Copy values before mutable borrow
+        let cursor_row = self.cursor_row as usize;
+        let col = self.cursor_col as usize;
+        let n = n as usize;
 
+        if let Some(row) = self.row_mut(cursor_row) {
             for _ in 0..n.min(row.len().saturating_sub(col)) {
                 if col < row.len() {
                     row.remove(col);
@@ -502,10 +609,13 @@ impl TerminalGrid {
 
     /// Insert blank characters at cursor, shift rest right (ICH).
     pub fn insert_chars(&mut self, n: u16) {
-        if let Some(row) = self.cells.get_mut(self.cursor_row as usize) {
-            let col = self.cursor_col as usize;
+        // Copy values before mutable borrow
+        let cursor_row = self.cursor_row as usize;
+        let col = self.cursor_col as usize;
+        let max_insert = self.cols;
 
-            for _ in 0..n.min(self.cols) {
+        if let Some(row) = self.row_mut(cursor_row) {
+            for _ in 0..n.min(max_insert) {
                 if col < row.len() {
                     row.insert(col, Cell::default());
                     row.pop();
@@ -515,36 +625,52 @@ impl TerminalGrid {
     }
 
     /// Insert lines at cursor, shift rest down (IL).
+    /// Uses ring buffer-aware swapping instead of remove/insert.
     pub fn insert_lines(&mut self, n: u16) {
-        let row = self.cursor_row as usize;
+        let cursor = self.cursor_row as usize;
         let bottom = self.scroll_bottom as usize;
 
-        if row <= bottom {
-            for _ in 0..n.min(self.rows) {
-                if bottom < self.cells.len() {
-                    self.cells.remove(bottom);
+        if cursor > bottom {
+            return;
+        }
+
+        for _ in 0..n.min(self.rows) {
+            // Shift rows down within region (from bottom towards cursor)
+            for r in (cursor + 1..=bottom).rev() {
+                let src_physical = self.physical_row(r - 1);
+                let dst_physical = self.physical_row(r);
+                self.cells.swap(src_physical, dst_physical);
+            }
+            // Clear the row at cursor position
+            if let Some(row) = self.row_mut(cursor) {
+                for cell in row.iter_mut() {
+                    cell.reset();
                 }
-                let new_row = (0..self.cols).map(|_| Cell::default()).collect();
-                self.cells.insert(row, new_row);
             }
         }
     }
 
     /// Delete lines at cursor, shift rest up (DL).
+    /// Uses ring buffer-aware swapping instead of remove/insert.
     pub fn delete_lines(&mut self, n: u16) {
-        let row = self.cursor_row as usize;
+        let cursor = self.cursor_row as usize;
         let bottom = self.scroll_bottom as usize;
 
-        if row <= bottom {
-            for _ in 0..n.min(self.rows) {
-                if row < self.cells.len() {
-                    self.cells.remove(row);
-                }
-                let new_row = (0..self.cols).map(|_| Cell::default()).collect();
-                if bottom <= self.cells.len() {
-                    self.cells.insert(bottom, new_row);
-                } else {
-                    self.cells.push(new_row);
+        if cursor > bottom {
+            return;
+        }
+
+        for _ in 0..n.min(self.rows) {
+            // Shift rows up within region (from cursor towards bottom)
+            for r in cursor..bottom {
+                let src_physical = self.physical_row(r + 1);
+                let dst_physical = self.physical_row(r);
+                self.cells.swap(src_physical, dst_physical);
+            }
+            // Clear the bottom row
+            if let Some(row) = self.row_mut(bottom) {
+                for cell in row.iter_mut() {
+                    cell.reset();
                 }
             }
         }
@@ -694,20 +820,20 @@ impl TerminalGrid {
         // Create new grid
         let mut new_cells = Self::create_empty_grid(rows, cols);
 
-        // Copy existing content
-        for (r, row) in self.cells.iter().enumerate() {
-            if r >= rows as usize {
-                break;
-            }
-            for (c, cell) in row.iter().enumerate() {
-                if c >= cols as usize {
-                    break;
+        // Copy existing content in logical order (via ring buffer)
+        // We need the index r for both self.row(r) and new_cells[r]
+        let old_rows = self.rows as usize;
+        let copy_rows = old_rows.min(rows as usize);
+        for (r, new_row) in new_cells.iter_mut().take(copy_rows).enumerate() {
+            if let Some(src_row) = self.row(r) {
+                for (c, cell) in src_row.iter().enumerate().take(cols as usize) {
+                    new_row[c] = cell.clone();
                 }
-                new_cells[r][c] = cell.clone();
             }
         }
 
         self.cells = new_cells;
+        self.cells_offset = 0; // Reset ring buffer offset
         self.rows = rows;
         self.cols = cols;
 
