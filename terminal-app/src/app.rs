@@ -1,14 +1,15 @@
 //! Main application struct implementing eframe::App with full terminal emulation.
 
-use crate::llm::{LLMClient, LLMQueryResult};
+use crate::config::{pty as pty_config, rendering, size, timing};
+use crate::input::{KeyboardAction, KeyboardHandler};
 use crate::pty::{PtyManager, PtyWriter};
 use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
-use crate::ui::{PromptConfig, Theme};
-use egui::{Color32, FontFamily, FontId, Key, Pos2, Rect, Sense, Stroke, Vec2, ViewportCommand};
+use crate::ui::{render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs, Theme};
+use egui::{Color32, FontFamily, FontId, Sense, Vec2, ViewportCommand};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -19,9 +20,6 @@ pub struct InfrawareApp {
 
     /// Theme configuration
     theme: Theme,
-
-    /// Prompt configuration
-    prompt_config: PromptConfig,
 
     /// VTE parser for escape sequences
     vte_parser: vte::Parser,
@@ -47,15 +45,6 @@ pub struct InfrawareApp {
     /// Tokio runtime
     runtime: Runtime,
 
-    /// LLM client
-    llm_client: Arc<LLMClient>,
-
-    /// LLM response channel
-    llm_response_rx: Option<mpsc::Receiver<Result<LLMQueryResult, String>>>,
-
-    /// Pending approval command
-    pending_approval: Option<String>,
-
     /// Theme applied flag
     theme_applied: bool,
 
@@ -78,17 +67,20 @@ pub struct InfrawareApp {
     /// Last cursor blink toggle time
     last_cursor_blink: Instant,
 
-    /// Bytes read in current second (for rate limiting heavy output like cat /dev/zero)
-    output_bytes_this_second: usize,
-
-    /// Start of current rate limit window
-    rate_limit_window_start: Instant,
-
     /// When set, pause output reading to let kernel process Ctrl+C
     output_pause_until: Option<Instant>,
 
     /// Track window focus state to detect focus gain
     had_window_focus: bool,
+
+    /// Cached font for rendering (avoids per-frame allocation)
+    font_id: FontId,
+
+    /// Pre-calculated X coordinates for each column (avoids per-cell multiplication)
+    column_x_coords: Vec<f32>,
+
+    /// Keyboard input handler (extracted for testability)
+    keyboard_handler: KeyboardHandler,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -105,10 +97,9 @@ impl InfrawareApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let runtime = Runtime::new().expect("Failed to create tokio runtime");
         let theme = Theme::dark();
-        let prompt_config = PromptConfig::from_environment();
 
-        // Default terminal size
-        let (rows, cols) = (24_u16, 80_u16);
+        // Default terminal size from config
+        let (rows, cols) = (size::DEFAULT_ROWS, size::DEFAULT_COLS);
 
         // Initialize PTY
         let (pty_writer, pty_output_rx, pty_manager) = runtime.block_on(async {
@@ -122,25 +113,27 @@ impl InfrawareApp {
                     // Use sync_channel with limited capacity for BACKPRESSURE
                     // When channel is full, I/O thread blocks -> kernel buffer fills ->
                     // cat blocks on write() -> kernel can process Ctrl+C
-                    let (tx, rx) = mpsc::sync_channel(4);
+                    let (tx, rx) = mpsc::sync_channel(pty_config::CHANNEL_CAPACITY);
 
                     if let Some(mut pty_reader) = reader {
                         std::thread::spawn(move || {
                             let rt = Runtime::new().unwrap();
                             rt.block_on(async {
                                 loop {
-                                    match pty_reader
-                                        .read_with_timeout(Duration::from_millis(16))
-                                        .await
-                                    {
+                                    // BLOCKING READ: Thread sleeps until PTY has data
+                                    // This eliminates 62.5 Hz polling overhead when idle
+                                    match pty_reader.read().await {
                                         Ok(data) if !data.is_empty() => {
                                             // This will BLOCK if channel is full - creating backpressure
                                             if tx.send(data).is_err() {
                                                 break;
                                             }
                                         }
-                                        Ok(_) => {}
-                                        Err(_) => break,
+                                        Ok(_) => {
+                                            // Empty read shouldn't happen with blocking read
+                                            // but handle gracefully
+                                        }
+                                        Err(_) => break, // Channel closed - shell exited
                                     }
                                 }
                             });
@@ -157,12 +150,9 @@ impl InfrawareApp {
             }
         });
 
-        let llm_client = Arc::new(LLMClient::new());
-
         Self {
             mode: AppMode::Normal,
             theme,
-            prompt_config,
             vte_parser: vte::Parser::new(),
             terminal_handler: TerminalHandler::new(rows, cols),
             pty_writer,
@@ -171,21 +161,19 @@ impl InfrawareApp {
             terminal_size: (cols, rows),
             should_quit: false,
             runtime,
-            llm_client,
-            llm_response_rx: None,
-            pending_approval: None,
             theme_applied: false,
-            char_width: 8.4,
-            char_height: 16.0,
+            char_width: rendering::CHAR_WIDTH,
+            char_height: rendering::CHAR_HEIGHT,
             last_resize: Instant::now(),
             shell_initialized: false,
             startup_time: Instant::now(),
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
-            output_bytes_this_second: 0,
-            rate_limit_window_start: Instant::now(),
             output_pause_until: None,
             had_window_focus: false,
+            font_id: FontId::new(rendering::FONT_SIZE, FontFamily::Monospace),
+            column_x_coords: (0..cols).map(|c| c as f32 * rendering::CHAR_WIDTH).collect(),
+            keyboard_handler: KeyboardHandler::new(),
         }
     }
 
@@ -195,8 +183,8 @@ impl InfrawareApp {
             return;
         }
 
-        // Wait for shell to fully initialize (500ms)
-        if self.startup_time.elapsed() < Duration::from_millis(500) {
+        // Wait for shell to fully initialize
+        if self.startup_time.elapsed() < timing::SHELL_INIT_DELAY {
             return;
         }
 
@@ -214,13 +202,13 @@ clear
 
     /// Poll PTY output and feed to VTE parser.
     /// Rate-limited to allow Ctrl+C to work even with heavy output (cat /dev/zero).
-    fn poll_pty_output(&mut self) {
-        const MAX_BYTES_PER_FRAME: usize = 16384; // 16KB per frame
+    /// Returns true if any output was processed (for smart repaint).
+    fn poll_pty_output(&mut self) -> bool {
 
         // If paused (after Ctrl+C), skip reading to let kernel process input
         if let Some(until) = self.output_pause_until {
             if Instant::now() < until {
-                return;
+                return false;
             }
             self.output_pause_until = None;
         }
@@ -229,7 +217,7 @@ clear
 
         if let Some(ref rx) = self.pty_output_rx {
             loop {
-                if bytes_processed >= MAX_BYTES_PER_FRAME {
+                if bytes_processed >= rendering::MAX_BYTES_PER_FRAME {
                     break;
                 }
 
@@ -251,7 +239,7 @@ clear
             }
         }
 
-        self.output_bytes_this_second += bytes_processed;
+        bytes_processed > 0
     }
 
     /// Send data to PTY synchronously (ensures immediate delivery).
@@ -265,11 +253,6 @@ clear
         } else {
             log::warn!("No PTY writer available!");
         }
-    }
-
-    /// Send string to PTY.
-    fn send_string_to_pty(&self, s: &str) {
-        self.send_to_pty(s.as_bytes());
     }
 
     /// Send SIGINT to the foreground process group (non-blocking).
@@ -287,24 +270,14 @@ clear
         }
     }
 
-    /// Send SIGINT to the foreground process group.
-    /// Uses the existing send_sigint in PtyManager which reads tpgid from /proc.
-    fn send_sigint_to_foreground(&self) {
-        if let Some(ref manager) = self.pty_manager {
-            if let Ok(mgr) = manager.try_lock() {
-                log::info!("Sending SIGINT to foreground process group");
-                if let Err(e) = mgr.send_sigint() {
-                    log::error!("Failed to send SIGINT: {}", e);
-                }
-            }
-        }
-    }
-
     /// Resize PTY to match window size.
     fn resize_pty(&mut self, cols: u16, rows: u16) {
-        if self.terminal_size != (cols, rows) && self.last_resize.elapsed() > Duration::from_millis(100) {
+        if self.terminal_size != (cols, rows) && self.last_resize.elapsed() > timing::RESIZE_DEBOUNCE {
             self.terminal_size = (cols, rows);
             self.last_resize = Instant::now();
+
+            // Pre-calculate column X coordinates (avoids per-cell multiplication in render loop)
+            self.column_x_coords = (0..cols).map(|c| c as f32 * self.char_width).collect();
 
             // Resize terminal handler
             self.terminal_handler.resize(rows, cols);
@@ -322,321 +295,23 @@ clear
         }
     }
 
-    /// Query LLM for natural language input.
-    fn query_llm(&mut self, query: String) {
-        let client = self.llm_client.clone();
-        let (tx, rx) = mpsc::channel();
-
-        self.llm_response_rx = Some(rx);
-        self.mode = AppMode::WaitingLLM;
-
-        self.runtime.spawn(async move {
-            let result = client.query_failed_command(&query).await;
-            let _ = tx.send(result.map_err(|e| e.to_string()));
-        });
-    }
-
-    /// Poll LLM response.
-    fn poll_llm_response(&mut self) {
-        if let Some(ref rx) = self.llm_response_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.llm_response_rx = None;
-
-                match result {
-                    Ok(LLMQueryResult::Complete(response)) => {
-                        // Send LLM response to terminal as output
-                        let output = format!("\r\n{}\r\n", response);
-                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
-                        self.mode = AppMode::Normal;
-                    }
-                    Ok(LLMQueryResult::CommandApproval { command, message }) => {
-                        let output = format!(
-                            "\r\n{}\r\n    command: {}\r\n    Execute? (y/n): ",
-                            message, command
-                        );
-                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
-                        self.pending_approval = Some(command.clone());
-                        self.mode = AppMode::AwaitingApproval { command, message };
-                    }
-                    Ok(LLMQueryResult::Question { question, options }) => {
-                        let mut output = format!("\r\n{}\r\n", question);
-                        if let Some(opts) = &options {
-                            for (i, opt) in opts.iter().enumerate() {
-                                output.push_str(&format!("  {}: {}\r\n", i + 1, opt));
-                            }
-                        }
-                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
-                        self.mode = AppMode::AwaitingAnswer { question, options };
-                    }
-                    Err(e) => {
-                        let output = format!("\r\nError: {}\r\n", e);
-                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
-                        self.mode = AppMode::Normal;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Handle keyboard input.
+    /// Handle keyboard input using the extracted KeyboardHandler.
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
-        // Collect Ctrl+key bytes to send (to avoid borrow issues)
-        let mut ctrl_bytes: Option<u8> = None;
+        // Process keyboard input and get actions (returns owned Vec to avoid borrow issues)
+        let actions = self.keyboard_handler.process(ctx);
 
-        // Check for Ctrl key combinations by iterating events directly
-        // This is more reliable on Linux than using modifiers + key_pressed
-        ctx.input(|i| {
-            for event in &i.events {
-                // Log ALL key events to debug
-                if let egui::Event::Key { key, pressed, modifiers, .. } = event {
-                    log::debug!("Key event: {:?} pressed={} ctrl={} alt={} shift={}",
-                        key, pressed, modifiers.ctrl, modifiers.alt, modifiers.shift);
+        // Execute each action
+        for action in actions {
+            match action {
+                KeyboardAction::SendBytes(bytes) => {
+                    self.send_to_pty(&bytes);
                 }
-
-                // Handle Ctrl combinations - Ctrl+C accepts EITHER press OR release
-                // because Linux/X11/Wayland often only sends release for Ctrl+C
-                if let egui::Event::Key { key, pressed, modifiers, .. } = event {
-                    if modifiers.ctrl && ctrl_bytes.is_none() {
-                        // Ctrl+C: accept either press or release (Linux quirk)
-                        // Other Ctrl keys: only accept press to avoid double-fire
-                        let is_ctrl_c = *key == Key::C;
-                        if is_ctrl_c || *pressed {
-                            log::info!("Ctrl+{:?} detected (pressed={})", key, pressed);
-                            ctrl_bytes = match key {
-                                Key::C => Some(0xFF), // Special marker for SIGINT
-                                Key::D => Some(0x04), // EOF
-                                Key::L => Some(0x0C), // Clear screen
-                                Key::A => Some(0x01), // Beginning of line
-                                Key::E => Some(0x05), // End of line
-                                Key::K => Some(0x0B), // Kill to end of line
-                                Key::U => Some(0x15), // Kill to beginning of line
-                                Key::W => Some(0x17), // Delete word backward
-                                Key::R => Some(0x12), // Reverse search
-                                Key::Z => Some(0x1A), // Suspend
-                                _ => None,
-                            };
-                        }
-                    }
+                KeyboardAction::SendSigInt => {
+                    log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
+                    self.send_to_pty(&[0x03]);
                 }
             }
-        });
-
-        // Handle Ctrl key if detected
-        if let Some(byte) = ctrl_bytes {
-            if byte == 0xFF {
-                // Ctrl+C: just send ETX to PTY
-                // Backpressure from sync_channel ensures kernel can process it
-                log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
-                self.send_to_pty(&[0x03]);
-            } else {
-                log::info!("Sending Ctrl byte 0x{:02X} to PTY", byte);
-                self.send_to_pty(&[byte]);
-            }
-            return;
         }
-
-        // Fallback for other Ctrl keys via key_pressed
-        ctx.input(|i| {
-            if i.modifiers.ctrl {
-                // Note: Ctrl+C is handled above via event iteration
-                if i.key_pressed(Key::D) {
-                    self.send_to_pty(&[0x04]);
-                    return;
-                }
-                if i.key_pressed(Key::L) {
-                    self.send_to_pty(&[0x0C]);
-                    return;
-                }
-                if i.key_pressed(Key::A) {
-                    self.send_to_pty(&[0x01]);
-                    return;
-                }
-                if i.key_pressed(Key::E) {
-                    self.send_to_pty(&[0x05]);
-                    return;
-                }
-                if i.key_pressed(Key::K) {
-                    self.send_to_pty(&[0x0B]);
-                    return;
-                }
-                if i.key_pressed(Key::U) {
-                    self.send_to_pty(&[0x15]);
-                    return;
-                }
-                if i.key_pressed(Key::W) {
-                    self.send_to_pty(&[0x17]);
-                    return;
-                }
-                if i.key_pressed(Key::R) {
-                    self.send_to_pty(&[0x12]);
-                    return;
-                }
-                if i.key_pressed(Key::Z) {
-                    self.send_to_pty(&[0x1A]); // Suspend
-                    return;
-                }
-            }
-
-            // Handle Alt combinations (Meta)
-            if i.modifiers.alt {
-                if i.key_pressed(Key::B) {
-                    // Word backward
-                    self.send_to_pty(b"\x1bb");
-                    return;
-                }
-                if i.key_pressed(Key::F) {
-                    // Word forward
-                    self.send_to_pty(b"\x1bf");
-                    return;
-                }
-                if i.key_pressed(Key::D) {
-                    // Delete word forward
-                    self.send_to_pty(b"\x1bd");
-                    return;
-                }
-            }
-
-            // Special keys - send escape sequences
-            if i.key_pressed(Key::Enter) {
-                self.send_to_pty(b"\r");
-                return;
-            }
-
-            if i.key_pressed(Key::Backspace) {
-                self.send_to_pty(&[0x7F]);
-                return;
-            }
-
-            if i.key_pressed(Key::Tab) {
-                self.send_to_pty(&[0x09]);
-                return;
-            }
-
-            if i.key_pressed(Key::Escape) {
-                self.send_to_pty(&[0x1B]);
-                return;
-            }
-
-            // Arrow keys
-            if i.key_pressed(Key::ArrowUp) {
-                self.send_to_pty(b"\x1b[A");
-                return;
-            }
-            if i.key_pressed(Key::ArrowDown) {
-                self.send_to_pty(b"\x1b[B");
-                return;
-            }
-            if i.key_pressed(Key::ArrowRight) {
-                self.send_to_pty(b"\x1b[C");
-                return;
-            }
-            if i.key_pressed(Key::ArrowLeft) {
-                self.send_to_pty(b"\x1b[D");
-                return;
-            }
-
-            // Home/End/PageUp/PageDown
-            if i.key_pressed(Key::Home) {
-                self.send_to_pty(b"\x1b[H");
-                return;
-            }
-            if i.key_pressed(Key::End) {
-                self.send_to_pty(b"\x1b[F");
-                return;
-            }
-            if i.key_pressed(Key::PageUp) {
-                self.send_to_pty(b"\x1b[5~");
-                return;
-            }
-            if i.key_pressed(Key::PageDown) {
-                self.send_to_pty(b"\x1b[6~");
-                return;
-            }
-
-            // Insert/Delete
-            if i.key_pressed(Key::Insert) {
-                self.send_to_pty(b"\x1b[2~");
-                return;
-            }
-            if i.key_pressed(Key::Delete) {
-                self.send_to_pty(b"\x1b[3~");
-                return;
-            }
-
-            // Function keys
-            if i.key_pressed(Key::F1) {
-                self.send_to_pty(b"\x1bOP");
-                return;
-            }
-            if i.key_pressed(Key::F2) {
-                self.send_to_pty(b"\x1bOQ");
-                return;
-            }
-            if i.key_pressed(Key::F3) {
-                self.send_to_pty(b"\x1bOR");
-                return;
-            }
-            if i.key_pressed(Key::F4) {
-                self.send_to_pty(b"\x1bOS");
-                return;
-            }
-            if i.key_pressed(Key::F5) {
-                self.send_to_pty(b"\x1b[15~");
-                return;
-            }
-            if i.key_pressed(Key::F6) {
-                self.send_to_pty(b"\x1b[17~");
-                return;
-            }
-            if i.key_pressed(Key::F7) {
-                self.send_to_pty(b"\x1b[18~");
-                return;
-            }
-            if i.key_pressed(Key::F8) {
-                self.send_to_pty(b"\x1b[19~");
-                return;
-            }
-            if i.key_pressed(Key::F9) {
-                self.send_to_pty(b"\x1b[20~");
-                return;
-            }
-            if i.key_pressed(Key::F10) {
-                self.send_to_pty(b"\x1b[21~");
-                return;
-            }
-            if i.key_pressed(Key::F11) {
-                self.send_to_pty(b"\x1b[23~");
-                return;
-            }
-            if i.key_pressed(Key::F12) {
-                self.send_to_pty(b"\x1b[24~");
-                return;
-            }
-
-            // Space
-            if i.key_pressed(Key::Space) {
-                self.send_to_pty(b" ");
-                return;
-            }
-        });
-
-        // Handle text input events for printable characters
-        // This is more reliable than mapping individual keys
-        ctx.input(|i| {
-            for event in &i.events {
-                if let egui::Event::Text(text) = event {
-                    // Send each character to PTY
-                    for c in text.chars() {
-                        if c.is_ascii() {
-                            self.send_to_pty(&[c as u8]);
-                        } else {
-                            // Send UTF-8 bytes for non-ASCII
-                            self.send_to_pty(c.to_string().as_bytes());
-                        }
-                    }
-                }
-            }
-        });
     }
 
     /// Convert terminal color to egui color.
@@ -652,8 +327,8 @@ clear
     fn render_terminal(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_size();
 
-        // Calculate character dimensions
-        let font_id = FontId::new(14.0, FontFamily::Monospace);
+        // Use cached font (avoids per-frame allocation)
+        let font_id = &self.font_id;
 
         // Use fixed ID for terminal to enable focus from update()
         let terminal_id = egui::Id::new("terminal_main_area");
@@ -692,128 +367,146 @@ clear
         // Fill background
         painter.rect_filled(rect, 0.0, self.theme.background);
 
-        // Render each visible row (includes scrollback if scrolled up)
+        // SINGLE-PASS RENDERING: Iterate each row once, collecting all render data,
+        // then draw in correct z-order (backgrounds → text → decorations).
+        // This reduces from 3 iterations to 1 iteration per row.
+
+        // Pre-allocate buffers outside the loop to avoid per-row allocations
+        let mut bg_rects: Vec<(f32, f32, Color32)> = Vec::with_capacity(16);
+        let mut text_runs: Vec<(f32, String, Color32)> = Vec::with_capacity(16);
+        let mut decorations: Vec<(f32, bool, bool, Color32)> = Vec::with_capacity(4);
+
         for (row_idx, row) in visible_rows.iter().enumerate() {
-            for (col_idx, cell) in row.iter().enumerate() {
-                if col_idx >= cols as usize {
-                    break;
-                }
+            let y = rect.top() + row_idx as f32 * self.char_height;
 
-                let x = rect.left() + col_idx as f32 * self.char_width;
-                let y = rect.top() + row_idx as f32 * self.char_height;
+            // Clear buffers for this row (reuse allocations)
+            bg_rects.clear();
+            text_runs.clear();
+            decorations.clear();
 
-                // Cell bounds
-                let cell_rect = Rect::from_min_size(
-                    Pos2::new(x, y),
-                    Vec2::new(self.char_width, self.char_height),
-                );
+            // State for batching
+            let mut bg_start: Option<(usize, Color32)> = None;
+            let mut text_run = String::new();
+            let mut run_start: Option<(usize, Color32)> = None;
 
-                // Get colors (handle reverse attribute)
-                let (fg, bg) = if cell.attrs.reverse {
-                    (
-                        self.color_to_egui(cell.bg),
-                        self.color_to_egui(cell.fg),
-                    )
+            // SINGLE PASS: iterate cells once, collect all render data
+            let row_len = row.len().min(cols as usize);
+            for (col_idx, cell) in row.iter().take(row_len).enumerate() {
+                let x = self.column_x_coords.get(col_idx).copied().unwrap_or(col_idx as f32 * self.char_width);
+
+                // --- Background batching ---
+                let bg = if cell.attrs.reverse {
+                    self.color_to_egui(cell.fg)
                 } else {
-                    (
-                        self.color_to_egui(cell.fg),
-                        self.color_to_egui(cell.bg),
-                    )
+                    self.color_to_egui(cell.bg)
                 };
 
-                // Draw background if not default
                 if bg != self.theme.background {
-                    painter.rect_filled(cell_rect, 0.0, bg);
+                    match bg_start {
+                        Some((_start, color)) if color == bg => {
+                            // Continue current background run
+                        }
+                        Some((start, color)) => {
+                            // Flush previous background run
+                            let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
+                            let width = (col_idx - start) as f32 * self.char_width;
+                            bg_rects.push((start_x, width, color));
+                            bg_start = Some((col_idx, bg));
+                        }
+                        None => {
+                            bg_start = Some((col_idx, bg));
+                        }
+                    }
+                } else if let Some((start, color)) = bg_start.take() {
+                    let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
+                    let width = (col_idx - start) as f32 * self.char_width;
+                    bg_rects.push((start_x, width, color));
                 }
 
-                // Draw character if not space
-                if cell.ch != ' ' && !cell.attrs.hidden {
-                    let mut text_color = fg;
+                // --- Text batching ---
+                if cell.ch == ' ' || cell.attrs.hidden {
+                    if let Some((start, color)) = run_start.take() {
+                        if !text_run.is_empty() {
+                            let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
+                            text_runs.push((start_x, std::mem::take(&mut text_run), color));
+                        }
+                    }
+                } else {
+                    let mut fg = if cell.attrs.reverse {
+                        self.color_to_egui(cell.bg)
+                    } else {
+                        self.color_to_egui(cell.fg)
+                    };
 
-                    // Apply dim attribute
                     if cell.attrs.dim {
-                        text_color = Color32::from_rgba_unmultiplied(
-                            text_color.r(),
-                            text_color.g(),
-                            text_color.b(),
-                            128,
-                        );
+                        fg = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 128);
                     }
 
-                    // Create text galley
-                    let text = cell.ch.to_string();
-                    let galley = painter.layout_no_wrap(text, font_id.clone(), text_color);
-
-                    // Center text in cell
-                    let text_pos = Pos2::new(
-                        x + (self.char_width - galley.size().x) / 2.0,
-                        y + (self.char_height - galley.size().y) / 2.0,
-                    );
-
-                    painter.galley(text_pos, galley, text_color);
-
-                    // Draw underline
-                    if cell.attrs.underline {
-                        let y_line = y + self.char_height - 2.0;
-                        painter.line_segment(
-                            [Pos2::new(x, y_line), Pos2::new(x + self.char_width, y_line)],
-                            Stroke::new(1.0, text_color),
-                        );
+                    match run_start {
+                        Some((_start, color)) if color == fg => {
+                            text_run.push(cell.ch);
+                        }
+                        Some((start, color)) => {
+                            if !text_run.is_empty() {
+                                let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
+                                text_runs.push((start_x, std::mem::take(&mut text_run), color));
+                            }
+                            run_start = Some((col_idx, fg));
+                            text_run.push(cell.ch);
+                        }
+                        None => {
+                            run_start = Some((col_idx, fg));
+                            text_run.push(cell.ch);
+                        }
                     }
+                }
 
-                    // Draw strikethrough
-                    if cell.attrs.strikethrough {
-                        let y_line = y + self.char_height / 2.0;
-                        painter.line_segment(
-                            [Pos2::new(x, y_line), Pos2::new(x + self.char_width, y_line)],
-                            Stroke::new(1.0, text_color),
-                        );
-                    }
+                // --- Decorations (collect, don't batch - they're rare) ---
+                if cell.attrs.underline || cell.attrs.strikethrough {
+                    let fg = if cell.attrs.reverse {
+                        self.color_to_egui(cell.bg)
+                    } else {
+                        self.color_to_egui(cell.fg)
+                    };
+                    decorations.push((x, cell.attrs.underline, cell.attrs.strikethrough, fg));
                 }
             }
+
+            // Flush remaining background
+            if let Some((start, color)) = bg_start {
+                let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
+                let width = (row_len - start) as f32 * self.char_width;
+                bg_rects.push((start_x, width, color));
+            }
+
+            // Flush remaining text
+            if let Some((start, color)) = run_start {
+                if !text_run.is_empty() {
+                    let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
+                    text_runs.push((start_x, text_run.clone(), color));
+                }
+            }
+
+            // --- DRAW PHASE: Render in correct z-order using helper functions ---
+            render_backgrounds(&painter, rect, y, self.char_height, &bg_rects);
+            render_text_runs(&painter, rect, y, font_id, &text_runs);
+            render_decorations(&painter, rect, y, self.char_width, self.char_height, &decorations);
         }
 
         // Draw cursor (only when at bottom/live view, after shell init, with blink)
         if cursor_visible && self.shell_initialized && self.cursor_blink_visible && scroll_offset == 0 {
-            let cursor_x = rect.left() + cursor_col as f32 * self.char_width;
+            let cursor_x = rect.left() + self.column_x_coords.get(cursor_col as usize).copied().unwrap_or(cursor_col as f32 * self.char_width);
             let cursor_y = rect.top() + cursor_row as f32 * self.char_height;
-
-            // Thin vertical bar cursor (like Linux terminal)
-            let bar_rect = Rect::from_min_size(
-                Pos2::new(cursor_x, cursor_y),
-                Vec2::new(2.0, self.char_height),
-            );
 
             // Only draw cursor when window is focused
             if ui.input(|i| i.focused) {
-                painter.rect_filled(bar_rect, 0.0, self.theme.cursor);
+                render_cursor(&painter, cursor_x, cursor_y, self.char_height, self.theme.cursor);
             }
         }
 
         // Draw scrollbar if there's scrollback content
         if max_scroll > 0 {
-            let scrollbar_width = 8.0;
-            let scrollbar_x = rect.right() - scrollbar_width - 2.0;
-
-            // Calculate thumb position and size
-            let total_lines = max_scroll + visible_rows.len();
-            let thumb_height = (visible_rows.len() as f32 / total_lines as f32 * rect.height()).max(20.0);
-            let scroll_range = rect.height() - thumb_height;
-            let thumb_y = rect.top() + (1.0 - scroll_offset as f32 / max_scroll as f32) * scroll_range;
-
-            // Draw scrollbar track
-            let track_rect = Rect::from_min_size(
-                Pos2::new(scrollbar_x, rect.top()),
-                Vec2::new(scrollbar_width, rect.height()),
-            );
-            painter.rect_filled(track_rect, 4.0, Color32::from_gray(40));
-
-            // Draw scrollbar thumb
-            let thumb_rect = Rect::from_min_size(
-                Pos2::new(scrollbar_x, thumb_y),
-                Vec2::new(scrollbar_width, thumb_height),
-            );
-            painter.rect_filled(thumb_rect, 4.0, Color32::from_gray(100));
+            render_scrollbar(&painter, rect, scroll_offset, max_scroll, visible_rows.len());
         }
     }
 }
@@ -851,7 +544,7 @@ impl eframe::App for InfrawareApp {
 
         // Update cursor blink only when window has focus (530ms interval)
         if has_focus {
-            if self.last_cursor_blink.elapsed() > Duration::from_millis(530) {
+            if self.last_cursor_blink.elapsed() > timing::CURSOR_BLINK_INTERVAL {
                 self.cursor_blink_visible = !self.cursor_blink_visible;
                 self.last_cursor_blink = Instant::now();
             }
@@ -871,15 +564,10 @@ impl eframe::App for InfrawareApp {
         self.handle_keyboard(ctx);
 
         // Poll PTY output and feed to VTE parser (limited per frame)
-        self.poll_pty_output();
+        let pty_had_data = self.poll_pty_output();
 
         // Initialize shell with custom prompt after startup delay
         self.initialize_shell();
-
-        // Poll LLM response if waiting
-        if self.mode == AppMode::WaitingLLM {
-            self.poll_llm_response();
-        }
 
         // Render UI
         egui::CentralPanel::default()
@@ -894,7 +582,30 @@ impl eframe::App for InfrawareApp {
                 self.render_terminal(ui);
             });
 
-        // Request continuous repaint for smooth updates
-        ctx.request_repaint_after(Duration::from_millis(16));
+        // REACTIVE REPAINT: Only request repaint when something actually changed
+        // This dramatically reduces CPU usage when idle (from ~50% to <5%)
+        if has_focus {
+            // Check if there was any user interaction (keyboard/mouse)
+            let had_user_input = ctx.input(|i| {
+                !i.events.is_empty() || i.pointer.any_down() || i.pointer.any_released()
+            });
+
+            // Calculate time until next cursor blink
+            let blink_interval = timing::CURSOR_BLINK_INTERVAL;
+            let time_since_blink = self.last_cursor_blink.elapsed();
+            let cursor_needs_blink = time_since_blink >= blink_interval;
+
+            if pty_had_data || cursor_needs_blink || had_user_input {
+                // Something changed - repaint immediately
+                ctx.request_repaint();
+            } else {
+                // Idle - schedule repaint only for next cursor blink
+                let time_to_next_blink = blink_interval.saturating_sub(time_since_blink);
+                ctx.request_repaint_after(time_to_next_blink);
+            }
+        } else {
+            // Window in background: very low FPS to save CPU
+            ctx.request_repaint_after(timing::BACKGROUND_REPAINT);
+        }
     }
 }

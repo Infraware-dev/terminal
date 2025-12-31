@@ -4,6 +4,7 @@ use egui::Color32;
 
 /// Theme colors for the terminal.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Theme {
     /// Background color
     pub background: Color32,

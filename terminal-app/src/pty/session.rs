@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 /// Configuration for spawning a PTY session.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PtySessionConfig {
     /// Command to execute
     pub command: String,
@@ -26,6 +27,7 @@ pub struct PtySessionConfig {
     pub size: PtySize,
 }
 
+#[allow(dead_code)]
 impl PtySessionConfig {
     /// Create a new configuration with default settings.
     #[must_use]
@@ -101,6 +103,7 @@ impl std::fmt::Debug for PtySession {
     }
 }
 
+#[allow(dead_code)]
 impl PtySession {
     /// Create a new PTY session from a PTY pair and child process.
     pub(crate) fn new(pair: PtyPair, child: Box<dyn Child + Send + Sync>) -> Self {
@@ -412,7 +415,7 @@ mod tests {
             .spawn("bash", &["-i"], crate::pty::DEFAULT_PTY_SIZE)
             .expect("Failed to spawn PTY");
 
-        let mut writer = session.writer().await.expect("Failed to get writer");
+        let writer = session.writer().await.expect("Failed to get writer");
 
         // Wait for shell to start
         std::thread::sleep(std::time::Duration::from_millis(300));

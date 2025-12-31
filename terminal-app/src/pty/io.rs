@@ -33,6 +33,7 @@ impl Drop for PtyReader {
     }
 }
 
+#[allow(dead_code)]
 impl PtyReader {
     /// Create a new async PTY reader with a background reading thread.
     pub fn new(mut reader: Box<dyn Read + Send>) -> Self {
@@ -111,6 +112,20 @@ impl PtyReader {
         }
     }
 
+    /// Blocking read - waits indefinitely for data from PTY.
+    /// This is more efficient than polling with timeout as the thread sleeps
+    /// until data is actually available.
+    /// Returns error if the channel is closed (shell exited).
+    pub async fn read(&mut self) -> Result<Vec<u8>> {
+        match self.receiver.recv().await {
+            Some(data) => Ok(data),
+            None => {
+                // Channel closed - shell exited
+                anyhow::bail!("PTY channel closed - shell exited")
+            }
+        }
+    }
+
     /// Check if the reader channel is still open.
     pub fn is_alive(&self) -> bool {
         !self.stop_flag.load(Ordering::SeqCst)
@@ -131,6 +146,7 @@ impl fmt::Debug for PtyWriter {
     }
 }
 
+#[allow(dead_code)]
 impl PtyWriter {
     /// Create a new PTY writer.
     pub fn new(writer: Box<dyn Write + Send>) -> Self {

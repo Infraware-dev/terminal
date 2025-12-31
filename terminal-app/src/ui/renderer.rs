@@ -1,0 +1,159 @@
+//! Terminal rendering utilities.
+//!
+//! Provides helper functions for rendering terminal cells and decorations.
+
+use egui::{Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
+
+/// Configuration for terminal rendering.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct RenderConfig {
+    /// Character width in pixels
+    pub char_width: f32,
+    /// Character height in pixels
+    pub char_height: f32,
+    /// Background color
+    pub background: Color32,
+    /// Cursor color
+    pub cursor_color: Color32,
+}
+
+#[allow(dead_code)]
+impl RenderConfig {
+    /// Create a new render configuration.
+    #[must_use]
+    pub fn new(char_width: f32, char_height: f32, background: Color32, cursor_color: Color32) -> Self {
+        Self {
+            char_width,
+            char_height,
+            background,
+            cursor_color,
+        }
+    }
+}
+
+/// Render a batch of background rectangles.
+pub fn render_backgrounds(
+    painter: &Painter,
+    rect: Rect,
+    y: f32,
+    char_height: f32,
+    bg_rects: &[(f32, f32, Color32)],
+) {
+    for (start_x, width, color) in bg_rects {
+        painter.rect_filled(
+            Rect::from_min_size(
+                Pos2::new(rect.left() + start_x, y),
+                Vec2::new(*width, char_height),
+            ),
+            0.0,
+            *color,
+        );
+    }
+}
+
+/// Render a batch of text runs.
+pub fn render_text_runs(
+    painter: &Painter,
+    rect: Rect,
+    y: f32,
+    font_id: &FontId,
+    text_runs: &[(f32, String, Color32)],
+) {
+    for (start_x, text, color) in text_runs {
+        painter.text(
+            Pos2::new(rect.left() + start_x, y),
+            egui::Align2::LEFT_TOP,
+            text,
+            font_id.clone(),
+            *color,
+        );
+    }
+}
+
+/// Render text decorations (underline, strikethrough).
+pub fn render_decorations(
+    painter: &Painter,
+    rect: Rect,
+    y: f32,
+    char_width: f32,
+    char_height: f32,
+    decorations: &[(f32, bool, bool, Color32)],
+) {
+    for (x, underline, strikethrough, fg) in decorations {
+        let abs_x = rect.left() + x;
+        if *underline {
+            let y_line = y + char_height - 2.0;
+            painter.line_segment(
+                [Pos2::new(abs_x, y_line), Pos2::new(abs_x + char_width, y_line)],
+                Stroke::new(1.0, *fg),
+            );
+        }
+        if *strikethrough {
+            let y_line = y + char_height / 2.0;
+            painter.line_segment(
+                [Pos2::new(abs_x, y_line), Pos2::new(abs_x + char_width, y_line)],
+                Stroke::new(1.0, *fg),
+            );
+        }
+    }
+}
+
+/// Render a vertical bar cursor.
+pub fn render_cursor(
+    painter: &Painter,
+    cursor_x: f32,
+    cursor_y: f32,
+    char_height: f32,
+    color: Color32,
+) {
+    let bar_rect = Rect::from_min_size(
+        Pos2::new(cursor_x, cursor_y),
+        Vec2::new(2.0, char_height),
+    );
+    painter.rect_filled(bar_rect, 0.0, color);
+}
+
+/// Render a scrollbar with track and thumb.
+pub fn render_scrollbar(
+    painter: &Painter,
+    rect: Rect,
+    scroll_offset: usize,
+    max_scroll: usize,
+    visible_lines: usize,
+) {
+    let scrollbar_width = 8.0;
+    let scrollbar_x = rect.right() - scrollbar_width - 2.0;
+
+    // Calculate thumb position and size
+    let total_lines = max_scroll + visible_lines;
+    let thumb_height = (visible_lines as f32 / total_lines as f32 * rect.height()).max(20.0);
+    let scroll_range = rect.height() - thumb_height;
+    let thumb_y = rect.top() + (1.0 - scroll_offset as f32 / max_scroll as f32) * scroll_range;
+
+    // Draw scrollbar track
+    let track_rect = Rect::from_min_size(
+        Pos2::new(scrollbar_x, rect.top()),
+        Vec2::new(scrollbar_width, rect.height()),
+    );
+    painter.rect_filled(track_rect, 4.0, Color32::from_gray(40));
+
+    // Draw scrollbar thumb
+    let thumb_rect = Rect::from_min_size(
+        Pos2::new(scrollbar_x, thumb_y),
+        Vec2::new(scrollbar_width, thumb_height),
+    );
+    painter.rect_filled(thumb_rect, 4.0, Color32::from_gray(100));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_config_creation() {
+        let config = RenderConfig::new(8.4, 16.0, Color32::BLACK, Color32::WHITE);
+        assert_eq!(config.char_width, 8.4);
+        assert_eq!(config.char_height, 16.0);
+    }
+}

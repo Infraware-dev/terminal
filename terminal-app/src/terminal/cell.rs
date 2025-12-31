@@ -188,6 +188,7 @@ impl Default for Cell {
     }
 }
 
+#[allow(dead_code)]
 impl Cell {
     /// Create a new cell with a character.
     #[must_use]
