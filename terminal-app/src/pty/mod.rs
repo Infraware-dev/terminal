@@ -17,10 +17,15 @@
 mod io;
 mod manager;
 mod session;
+mod traits;
 
 pub use io::PtyWriter;
 pub use manager::PtyManager;
 pub use session::PtySession;
+
+// Traits for future DI support (currently unused)
+#[allow(unused_imports)]
+pub use traits::{PtyControl, PtyWrite};
 
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};

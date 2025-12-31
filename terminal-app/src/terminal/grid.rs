@@ -69,6 +69,7 @@ struct AltScreenState {
     saved_cursor: Option<SavedCursor>,
 }
 
+#[allow(dead_code)]
 impl TerminalGrid {
     /// Create a new terminal grid with given dimensions.
     #[must_use]

@@ -1,7 +1,10 @@
 //! Application state management.
 
 /// Application mode states.
+///
+/// Note: Some variants are currently unused but will be used in Phase 4 (State Machine).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum AppMode {
     /// Normal operation - waiting for user input
     Normal,

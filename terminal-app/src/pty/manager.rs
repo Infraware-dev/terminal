@@ -23,6 +23,7 @@ pub struct PtyManager {
     shell: String,
 }
 
+#[allow(dead_code)]
 impl PtyManager {
     /// Create a new PTY manager by spawning a shell.
     ///

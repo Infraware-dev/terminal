@@ -5,6 +5,8 @@
 //! the input is sent to the LLM backend for assistance.
 
 mod app;
+mod config;
+mod input;
 mod llm;
 mod pty;
 mod state;

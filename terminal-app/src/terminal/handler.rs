@@ -12,6 +12,7 @@ pub struct TerminalHandler {
     window_title: String,
 }
 
+#[allow(dead_code)]
 impl TerminalHandler {
     /// Create a new terminal handler with given dimensions.
     #[must_use]
@@ -169,7 +170,7 @@ impl vte::Perform for TerminalHandler {
                 self.grid.tab();
             }
             // Line feed, vertical tab, form feed
-            0x0A | 0x0B | 0x0C => {
+            0x0A..=0x0C => {
                 self.grid.linefeed();
             }
             // Carriage return
