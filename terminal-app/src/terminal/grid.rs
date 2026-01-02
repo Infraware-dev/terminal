@@ -71,6 +71,7 @@ struct SavedCursor {
 #[derive(Debug)]
 struct AltScreenState {
     cells: Vec<Vec<Cell>>,
+    cells_offset: usize,
     cursor_row: u16,
     cursor_col: u16,
     saved_cursor: Option<SavedCursor>,
@@ -738,24 +739,30 @@ impl TerminalGrid {
             return; // Already in alt screen
         }
 
-        // Save current state
+        // Save current state including ring buffer offset
         let alt_state = AltScreenState {
-            cells: std::mem::replace(&mut self.cells, Self::create_empty_grid(self.rows, self.cols)),
+            cells: std::mem::replace(
+                &mut self.cells,
+                Self::create_empty_grid(self.rows, self.cols),
+            ),
+            cells_offset: self.cells_offset,
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
             saved_cursor: self.saved_cursor.take(),
         };
         self.alt_screen = Some(alt_state);
 
-        // Reset cursor for alt screen
+        // Reset cursor and ring buffer offset for alt screen
         self.cursor_row = 0;
         self.cursor_col = 0;
+        self.cells_offset = 0;
     }
 
     /// Exit alternate screen buffer (DECRST 1049).
     pub fn exit_alt_screen(&mut self) {
         if let Some(alt_state) = self.alt_screen.take() {
             self.cells = alt_state.cells;
+            self.cells_offset = alt_state.cells_offset;
             self.cursor_row = alt_state.cursor_row;
             self.cursor_col = alt_state.cursor_col;
             self.saved_cursor = alt_state.saved_cursor;
@@ -868,5 +875,43 @@ impl TerminalGrid {
             alt.cursor_row = alt.cursor_row.min(rows.saturating_sub(1));
             alt.cursor_col = alt.cursor_col.min(cols.saturating_sub(1));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_alt_screen_preserves_ring_buffer_offset() {
+        let mut grid = TerminalGrid::new(10, 80);
+
+        // Scroll to create non-zero offset
+        for _ in 0..5 {
+            grid.scroll_up(1);
+        }
+        let offset_before = grid.cells_offset;
+        assert!(
+            offset_before > 0,
+            "Should have non-zero offset after scrolling"
+        );
+
+        // Enter alt screen - offset should be reset
+        grid.enter_alt_screen();
+        assert_eq!(
+            grid.cells_offset, 0,
+            "Alt screen should start with zero offset"
+        );
+
+        // Scroll in alt screen
+        grid.scroll_up(3);
+        assert!(grid.cells_offset > 0, "Alt screen should allow scrolling");
+
+        // Exit alt screen - original offset should be restored
+        grid.exit_alt_screen();
+        assert_eq!(
+            grid.cells_offset, offset_before,
+            "Original offset should be restored after exiting alt screen"
+        );
     }
 }
