@@ -323,15 +323,6 @@ impl InfrawareApp {
 
     /// Handle keyboard input using the extracted KeyboardHandler.
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
-        // Handle paste events from egui (macOS Cmd+V fires Event::Paste)
-        ctx.input(|i| {
-            for event in &i.events {
-                if let egui::Event::Paste(text) = event {
-                    self.handle_paste(text);
-                }
-            }
-        });
-
         // Process keyboard input and get actions (returns owned Vec to avoid borrow issues)
         let actions = self.keyboard_handler.process(ctx);
 
@@ -347,6 +338,9 @@ impl InfrawareApp {
                 }
                 KeyboardAction::Copy => {
                     self.copy_selection_to_clipboard(ctx);
+                }
+                KeyboardAction::Paste => {
+                    self.perform_paste();
                 }
             }
         }
@@ -440,11 +434,57 @@ impl InfrawareApp {
         }
     }
 
-    /// Handle paste event from egui (Event::Paste).
-    fn handle_paste(&self, text: &str) {
-        if !text.is_empty() {
-            log::info!("Pasting {} chars from clipboard", text.len());
-            self.send_to_pty(text.as_bytes());
+    /// Perform paste operation using arboard for direct OS clipboard access.
+    ///
+    /// Supports Bracketed Paste Mode: when enabled by the terminal application
+    /// (via ESC[?2004h), wraps pasted content in escape sequences to prevent
+    /// auto-execution and the "staircase effect" in editors like vim.
+    fn perform_paste(&mut self) {
+        log::info!("perform_paste() called");
+
+        if self.clipboard.is_none() {
+            log::error!("Clipboard (arboard) not initialized!");
+            return;
+        }
+
+        let cb = self.clipboard.as_mut().expect("checked above");
+        match cb.get_text() {
+            Ok(text) if !text.is_empty() => {
+                let use_bracketed = self.terminal_handler.bracketed_paste_enabled();
+
+                let mut payload =
+                    Vec::with_capacity(text.len() + if use_bracketed { 12 } else { 0 });
+
+                if use_bracketed {
+                    // Start bracketed paste sequence
+                    payload.extend_from_slice(b"\x1b[200~");
+                }
+
+                payload.extend_from_slice(text.as_bytes());
+
+                if use_bracketed {
+                    // End bracketed paste sequence
+                    payload.extend_from_slice(b"\x1b[201~");
+                }
+
+                log::info!(
+                    "Pasting {} bytes to PTY (bracketed: {}, text: '{}')",
+                    payload.len(),
+                    use_bracketed,
+                    if text.len() > 50 {
+                        format!("{}...", &text[..50])
+                    } else {
+                        text.clone()
+                    }
+                );
+                self.send_to_pty(&payload);
+            }
+            Ok(_) => {
+                log::warn!("Clipboard is empty, nothing to paste");
+            }
+            Err(e) => {
+                log::error!("Failed to read clipboard via arboard: {}", e);
+            }
         }
     }
 
