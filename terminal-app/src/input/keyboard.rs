@@ -13,6 +13,8 @@ pub enum KeyboardAction {
     SendSigInt,
     /// Copy selected text to clipboard (Cmd+C on macOS, Ctrl+Shift+C on Linux)
     Copy,
+    /// Paste from clipboard (Cmd+V on macOS, Ctrl+Shift+V on Linux)
+    Paste,
 }
 
 /// Keyboard handler that processes egui input and returns terminal actions.
@@ -60,22 +62,59 @@ impl KeyboardHandler {
         std::mem::take(&mut self.actions)
     }
 
-    /// Process clipboard shortcuts.
-    /// Listens for egui's Event::Copy which is triggered by Cmd+C (macOS) or Ctrl+C (Linux/Windows).
+    /// Process clipboard shortcuts (Copy/Paste).
+    ///
+    /// Priority order:
+    /// 1. egui native events (Event::Copy, Event::Paste) - most reliable
+    /// 2. Manual key detection as fallback
+    ///
+    /// - macOS: Cmd+C for copy, Cmd+V for paste
+    /// - Linux/Windows: Ctrl+Shift+C for copy, Ctrl+Shift+V for paste
     fn process_clipboard_keys(ctx: &egui::Context) -> Option<KeyboardAction> {
-        let mut result = None;
-
         ctx.input(|i| {
+            // 1. Check egui native events FIRST (OS sends these reliably)
             for event in &i.events {
-                if matches!(event, egui::Event::Copy) {
-                    log::info!("Event::Copy detected");
-                    result = Some(KeyboardAction::Copy);
-                    return;
+                match event {
+                    egui::Event::Copy => {
+                        log::info!("Event::Copy detected");
+                        return Some(KeyboardAction::Copy);
+                    }
+                    egui::Event::Paste(_) => {
+                        // We detect the event but use arboard for actual paste
+                        log::info!("Event::Paste detected");
+                        return Some(KeyboardAction::Paste);
+                    }
+                    _ => {}
                 }
             }
-        });
 
-        result
+            // 2. Fallback: Manual key detection (Cmd on macOS, Ctrl+Shift elsewhere)
+            #[cfg(target_os = "macos")]
+            {
+                if i.modifiers.command && i.key_pressed(Key::V) {
+                    log::info!("Cmd+V detected (macOS paste fallback)");
+                    return Some(KeyboardAction::Paste);
+                }
+                if i.modifiers.command && i.key_pressed(Key::C) {
+                    log::info!("Cmd+C detected (macOS copy fallback)");
+                    return Some(KeyboardAction::Copy);
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::V) {
+                    log::info!("Ctrl+Shift+V detected (paste fallback)");
+                    return Some(KeyboardAction::Paste);
+                }
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::C) {
+                    log::info!("Ctrl+Shift+C detected (copy fallback)");
+                    return Some(KeyboardAction::Copy);
+                }
+            }
+
+            None
+        })
     }
 
     /// Process Ctrl+key combinations by iterating events directly.

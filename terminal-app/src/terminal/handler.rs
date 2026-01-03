@@ -10,6 +10,9 @@ pub struct TerminalHandler {
     grid: TerminalGrid,
     /// Window title set by OSC sequences.
     window_title: String,
+    /// Bracketed paste mode (ESC[?2004h enables, ESC[?2004l disables).
+    /// When enabled, pasted text should be wrapped in ESC[200~ ... ESC[201~
+    bracketed_paste_mode: bool,
 }
 
 #[allow(dead_code)]
@@ -20,7 +23,18 @@ impl TerminalHandler {
         Self {
             grid: TerminalGrid::new(rows, cols),
             window_title: String::from("Infraware Terminal"),
+            bracketed_paste_mode: false,
         }
+    }
+
+    /// Check if bracketed paste mode is enabled.
+    ///
+    /// When enabled, pasted text should be wrapped in escape sequences:
+    /// `\x1b[200~` before and `\x1b[201~` after the pasted content.
+    /// This prevents shells/editors from auto-executing or auto-indenting pasted text.
+    #[must_use]
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.bracketed_paste_mode
     }
 
     /// Get a reference to the grid.
@@ -481,8 +495,9 @@ impl TerminalHandler {
                     self.grid.restore_cursor();
                 }
             }
-            // Bracketed paste mode (ignored for now)
+            // Bracketed paste mode
             2004 => {
+                self.bracketed_paste_mode = enable;
                 debug!("Bracketed paste mode: {}", enable);
             }
             _ => {
