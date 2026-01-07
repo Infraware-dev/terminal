@@ -307,7 +307,7 @@ impl HttpLLMClient {
                 .header("X-Api-Key", &self.api_key)
                 .json(&request)
                 .send() => {
-                    result? 
+                    result?
             }
             _ = cancel_token.cancelled() => {
                 log::info!("HTTP request cancelled before response");
@@ -380,7 +380,7 @@ impl HttpLLMClient {
                         // Parse SSE line
                         if let Some(event_type) = line.strip_prefix("event: ") {
                             current_event = Some(event_type.trim().to_string());
-                            log::trace!("SSE event type: {}", event_type);
+                            log::debug!("SSE event type: {}", event_type);
                         } else if let Some(data) = line.strip_prefix("data: ") {
                             if let Some(ref event) = current_event {
                                 match self.handle_sse_event(event, data, &mut result) {
@@ -388,7 +388,7 @@ impl HttpLLMClient {
                                         interrupt_data = Some(interrupt);
                                         // Don't break - continue processing to get any remaining messages
                                     }
-                                    Ok(None) => {} 
+                                    Ok(None) => {}
                                     Err(e) => {
                                         log::error!("Error handling SSE event '{}': {}", event, e);
                                         return Err(e);
@@ -425,12 +425,20 @@ impl HttpLLMClient {
             }
         }
 
-        log::debug!(
-            "SSE stream completed: {} chunks, {} chars, {}ms elapsed",
+        log::info!(
+            "SSE stream completed: {} chunks, {} result chars, {}ms elapsed",
             chunk_count,
             result.len(),
             stream_start.elapsed().as_millis()
         );
+        if result.is_empty() {
+            log::warn!("SSE stream returned EMPTY result - no AI content extracted");
+        } else {
+            log::debug!(
+                "Final result preview: {}...",
+                &result[..result.len().min(200)]
+            );
+        }
 
         // Return interrupt if detected, otherwise complete
         match interrupt_data {
@@ -446,7 +454,7 @@ impl HttpLLMClient {
         }
     }
 
-    // ========== SSE Event Parsing Helpers ========== 
+    // ========== SSE Event Parsing Helpers ==========
 
     /// Check if a JSON message is from the AI (type="ai" OR role="assistant")
     fn is_ai_message(msg: &serde_json::Value) -> bool {
@@ -531,7 +539,7 @@ impl HttpLLMClient {
         }
     }
 
-    // ========== SSE Event Handlers ========== 
+    // ========== SSE Event Handlers ==========
 
     /// Handle "metadata" SSE event - log run_id for debugging
     fn handle_metadata_event(data: &str) {
@@ -544,12 +552,15 @@ impl HttpLLMClient {
 
     /// Handle "messages" SSE event - extract and accumulate AI message content
     fn handle_messages_event(data: &str, result: &mut String) {
-        let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) else { 
+        let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) else {
+            log::warn!("Failed to parse 'messages' event JSON");
             return;
         };
-        let Some(msgs) = messages.as_array() else { 
+        let Some(msgs) = messages.as_array() else {
+            log::debug!("'messages' event is not an array");
             return;
         };
+        log::debug!("Processing {} items in 'messages' event", msgs.len());
 
         for msg in msgs {
             if Self::is_ai_message(msg) {
@@ -565,10 +576,10 @@ impl HttpLLMClient {
 
     /// Handle "updates" SSE event - check for human-in-the-loop interrupts
     fn handle_updates_event(data: &str) -> Result<Option<InterruptData>> {
-        let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) else { 
+        let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) else {
             return Ok(None);
         };
-        let Some(interrupts) = updates.get("__interrupt__").and_then(|v| v.as_array()) else { 
+        let Some(interrupts) = updates.get("__interrupt__").and_then(|v| v.as_array()) else {
             return Ok(None);
         };
 
@@ -594,12 +605,21 @@ impl HttpLLMClient {
 
     /// Handle "values" SSE event - extract latest AI message from state update
     fn handle_values_event(data: &str, result: &mut String) {
-        let Ok(values) = serde_json::from_str::<serde_json::Value>(data) else { 
+        let Ok(values) = serde_json::from_str::<serde_json::Value>(data) else {
+            log::warn!(
+                "Failed to parse 'values' event JSON: {}",
+                &data[..data.len().min(200)]
+            );
             return;
         };
-        let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) else { 
+        let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) else {
+            log::debug!(
+                "No 'messages' array in values event, keys: {:?}",
+                values.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
             return;
         };
+        log::debug!("Processing {} messages from 'values' event", msgs.len());
 
         // Get the last AI message with actual content from the values
         // Skip messages with empty content or just handoff messages
@@ -619,10 +639,22 @@ impl HttpLLMClient {
 
             if let Some(content) = Self::extract_message_content(msg) {
                 if Self::is_valid_ai_content(&content) {
+                    log::info!(
+                        "Found AI message content ({} chars): {}...",
+                        content.len(),
+                        &content[..content.len().min(100)]
+                    );
                     result.clear(); // Replace with latest AI message
                     result.push_str(&content);
                     break; // Found a good message, stop searching
+                } else {
+                    log::debug!(
+                        "Skipping invalid AI content: {}...",
+                        &content[..content.len().min(50)]
+                    );
                 }
+            } else {
+                log::debug!("No content extracted from AI message");
             }
         }
     }
@@ -640,7 +672,7 @@ impl HttpLLMClient {
         Ok(None)
     }
 
-    // ========== Main SSE Event Dispatcher ========== 
+    // ========== Main SSE Event Dispatcher ==========
 
     /// Handle a single SSE event - returns interrupt data instead of marker
     /// Returns Some(InterruptData) if an interrupt is detected, None otherwise
@@ -822,15 +854,13 @@ impl LLMClientTrait for MockLLMClient {
         // Simple mock responses for testing
         let response = match text.to_lowercase().as_str() {
             s if s.contains("list files") => {
-                "To list files, you can use the `ls` command. Some common options:\n\n"
-                    .to_string()
+                "To list files, you can use the `ls` command. Some common options:\n\n".to_string()
                     + "- `ls -l` - Long format with details\n"
                     + "- `ls -a` - Show hidden files\n"
                     + "- `ls -lh` - Human-readable file sizes"
             }
             s if s.contains("docker") => {
-                "Docker is a containerization platform. Some common commands:\n\n"
-                    .to_string()
+                "Docker is a containerization platform. Some common commands:\n\n".to_string()
                     + "```bash\n"
                     + "docker ps          # List running containers\n"
                     + "docker images      # List images\n"
@@ -838,8 +868,7 @@ impl LLMClientTrait for MockLLMClient {
                     + "```"
             }
             s if s.contains("kubernetes") || s.contains("k8s") => {
-                "Kubernetes is a container orchestration platform. Common commands:\n\n"
-                    .to_string()
+                "Kubernetes is a container orchestration platform. Common commands:\n\n".to_string()
                     + "```bash\n"
                     + "kubectl get pods              # List pods\n"
                     + "kubectl get services          # List services\n"
@@ -847,8 +876,7 @@ impl LLMClientTrait for MockLLMClient {
                     + "```"
             }
             _ => {
-                "I'm a mock LLM. In production, I would provide detailed answers "
-                    .to_string()
+                "I'm a mock LLM. In production, I would provide detailed answers ".to_string()
                     + "about DevOps, cloud platforms, and terminal commands."
             }
         };
