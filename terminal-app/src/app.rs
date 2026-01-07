@@ -189,12 +189,13 @@ impl InfrawareApp {
         let (bg_event_tx, bg_event_rx) = mpsc::channel();
 
         // Initialize LLM Orchestrator with fallback logic
+        // Reads from .env file (loaded in main.rs via dotenvy)
         let backend_url = std::env::var("INFRAWARE_BACKEND_URL")
             .unwrap_or_else(|_| "http://localhost:8000".to_string());
-        let api_key = std::env::var("BACKEND_API_KEY").unwrap_or_default();
-        
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+
         let llm_client: Arc<dyn LLMClientTrait> = if api_key.is_empty() {
-            log::warn!("No BACKEND_API_KEY found, using Mock LLM Client");
+            log::warn!("No ANTHROPIC_API_KEY found, using Mock LLM Client");
             Arc::new(crate::llm::MockLLMClient::new())
         } else {
             log::info!("Using HTTP LLM Client at {}", backend_url);
@@ -277,11 +278,11 @@ impl InfrawareApp {
         self.send_to_pty(init_commands.as_bytes());
         
         // Print welcome message with LLM status
-        if std::env::var("BACKEND_API_KEY").is_ok() {
+        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
             let msg = "\r\n\x1b[1;32mInfraware Terminal Ready (Connected to LLM Backend)\x1b[0m\r\n";
             self.vte_parser.advance(&mut self.terminal_handler, msg.as_bytes());
         } else {
-            let msg = "\r\n\x1b[1;33mInfraware Terminal Ready (Using Mock LLM - Set BACKEND_API_KEY to connect)\x1b[0m\r\n";
+            let msg = "\r\n\x1b[1;33mInfraware Terminal Ready (Using Mock LLM - Set ANTHROPIC_API_KEY to connect)\x1b[0m\r\n";
             self.vte_parser.advance(&mut self.terminal_handler, msg.as_bytes());
         }
         
