@@ -22,6 +22,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub static SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> eframe::Result<()> {
+    // Load environment variables from .env file (if present)
+    dotenvy::dotenv().ok();
+    // Load secrets from .env.secrets file (if present)
+    dotenvy::from_filename(".env.secrets").ok();
+
     // Initialize logging
     env_logger::init();
 

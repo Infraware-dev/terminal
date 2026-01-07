@@ -39,6 +39,9 @@ anyhow = "1.0.100"
 log = "0.4.29"
 env_logger = "0.11.8"
 
+# Environment
+dotenvy = "0.15"
+
 # Utilities
 which = "8.0"
 hostname = "0.4"
