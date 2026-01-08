@@ -144,8 +144,6 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     }
 
     /// Resume an interrupted run after user approval (for command approval).
-    /// Reserved for future multi-turn HITL flow where LLM continues after command execution.
-    #[allow(dead_code)]
     async fn resume_run(&self) -> Result<LLMQueryResult>;
 
     /// Resume an interrupted run with a text answer (for questions)

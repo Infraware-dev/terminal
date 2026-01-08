@@ -704,8 +704,10 @@ impl InfrawareApp {
                     let cmd_bytes = format!("{}\n", command);
                     self.send_to_pty(cmd_bytes.as_bytes());
 
-                    // Return to normal mode - shell will handle the command execution
+                    // Stay in Normal mode so user can interact with shell (e.g., sudo password)
+                    // Resume LLM in background - when it responds, we'll show next approval
                     self.mode = AppMode::Normal;
+                    self.resume_llm_run_background();
                 } else {
                     log::info!("User rejected command: {}", command);
                     self.mode = AppMode::Normal;
@@ -721,11 +723,16 @@ impl InfrawareApp {
         }
     }
 
-    /// Resume LLM run after approval.
-    /// Reserved for future multi-turn HITL flow where LLM continues after command execution.
+    /// Resume LLM run after approval (sets WaitingLLM mode immediately).
     #[allow(dead_code)]
     fn resume_llm_run(&mut self) {
         self.mode = AppMode::WaitingLLM;
+        self.resume_llm_run_background();
+    }
+
+    /// Resume LLM run in background without changing mode.
+    /// Allows user to interact with shell while LLM processes.
+    fn resume_llm_run_background(&mut self) {
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 

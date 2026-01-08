@@ -44,8 +44,6 @@ impl NaturalLanguageOrchestrator {
     }
 
     /// Resume an interrupted run (e.g. after command approval).
-    /// Reserved for future multi-turn HITL flow where LLM continues after command execution.
-    #[allow(dead_code)]
     pub async fn resume_run(&self) -> Result<LLMQueryResult> {
         self.llm_client.resume_run().await
     }
