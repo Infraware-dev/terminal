@@ -149,6 +149,17 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     /// Resume an interrupted run with a text answer (for questions)
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult>;
 
+    /// Resume with command output after PTY execution.
+    /// Called when a command was executed in the terminal and output was captured.
+    async fn resume_with_command_output(
+        &self,
+        command: &str,
+        output: &str,
+    ) -> Result<LLMQueryResult>;
+
+    /// Resume an interrupted run with rejection (user rejected the command)
+    async fn resume_rejected(&self) -> Result<LLMQueryResult>;
+
     /// Query with cancellation support (default: no cancellation)
     async fn query_cancellable(
         &self,
@@ -820,6 +831,133 @@ impl LLMClientTrait for HttpLLMClient {
             .await?;
         Self::convert_stream_result(stream_result)
     }
+
+    async fn resume_with_command_output(
+        &self,
+        command: &str,
+        output: &str,
+    ) -> Result<LLMQueryResult> {
+        let thread_id = self
+            .thread_id
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
+
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        log::info!(
+            "[HTTP-OUT] POST {} | command_output | cmd_len={} | output_len={}",
+            url,
+            command.len(),
+            output.len()
+        );
+
+        // Send command and output as two messages with resume type "command_output"
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: Some(StreamInput {
+                messages: vec![
+                    ChatMessage {
+                        role: "user".into(),
+                        content: command.into(),
+                    },
+                    ChatMessage {
+                        role: "user".into(),
+                        content: output.into(),
+                    },
+                ],
+            }),
+            command: Some(StreamCommand {
+                resume: "command_output".into(),
+            }),
+        };
+
+        let request_start = std::time::Instant::now();
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Api-Key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        let elapsed = request_start.elapsed();
+        log::info!(
+            "[HTTP-IN] POST /runs/stream (command_output) | status={} | elapsed={}ms",
+            response.status(),
+            elapsed.as_millis()
+        );
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!(
+                "Resume with command output failed ({}): {}",
+                status,
+                error_text
+            );
+            anyhow::bail!(
+                "Resume with command output failed ({}): {}",
+                status,
+                error_text
+            );
+        }
+
+        let stream_result = self
+            .parse_sse_stream(response, CancellationToken::new())
+            .await?;
+        Self::convert_stream_result(stream_result)
+    }
+
+    async fn resume_rejected(&self) -> Result<LLMQueryResult> {
+        let thread_id = self
+            .thread_id
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
+
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        log::info!("[HTTP-OUT] POST {} | rejected", url);
+
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: None,
+            command: Some(StreamCommand {
+                resume: "rejected".into(),
+            }),
+        };
+
+        let request_start = std::time::Instant::now();
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Api-Key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        let elapsed = request_start.elapsed();
+        log::info!(
+            "[HTTP-IN] POST /runs/stream (rejected) | status={} | elapsed={}ms",
+            response.status(),
+            elapsed.as_millis()
+        );
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!("Resume rejected failed ({}): {}", status, error_text);
+            anyhow::bail!("Resume rejected failed ({}): {}", status, error_text);
+        }
+
+        let stream_result = self
+            .parse_sse_stream(response, CancellationToken::new())
+            .await?;
+        Self::convert_stream_result(stream_result)
+    }
 }
 
 impl HttpLLMClient {
@@ -896,6 +1034,27 @@ impl LLMClientTrait for MockLLMClient {
             "Mock received answer: '{}' - Processing complete.",
             answer
         )))
+    }
+
+    async fn resume_with_command_output(
+        &self,
+        command: &str,
+        output: &str,
+    ) -> Result<LLMQueryResult> {
+        // Mock acknowledges the command output and returns complete
+        Ok(LLMQueryResult::Complete(format!(
+            "Mock received command output.\nCommand: {}\nOutput ({} chars): {}...",
+            command,
+            output.len(),
+            &output[..output.len().min(100)]
+        )))
+    }
+
+    async fn resume_rejected(&self) -> Result<LLMQueryResult> {
+        // Mock acknowledges the rejection and returns complete
+        Ok(LLMQueryResult::Complete(
+            "Mock: Command was rejected by user. Task cancelled.".to_string(),
+        ))
     }
 
     async fn query_cancellable(

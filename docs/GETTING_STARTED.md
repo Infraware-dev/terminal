@@ -167,8 +167,11 @@ cp .env.secrets.example .env.secrets
 **Avvia il backend:**
 
 ```bash
-ENGINE_TYPE=rig cargo run --bin infraware-backend
+# IMPORTANTE: la feature "rig" deve essere abilitata esplicitamente
+ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
 ```
+
+> **Nota:** Senza `--features rig`, il backend usa MockEngine come fallback.
 
 **File di configurazione:**
 ```

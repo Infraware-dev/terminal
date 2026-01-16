@@ -14,16 +14,22 @@ edition = "2024"
 license = "MIT"
 
 [workspace.lints.rust]
+ambiguous_negative_literals = "warn"
 missing_debug_implementations = "warn"
 redundant_imports = "warn"
 redundant_lifetimes = "warn"
-trivial_numeric_casts = "allow"
+trivial_numeric_casts = "warn"
 unsafe_op_in_unsafe_fn = "forbid"
 unused_lifetimes = "warn"
 
 [workspace.lints.clippy]
 all = "warn"
-pedantic = "allow"
+complexity = "warn"
+correctness = "warn"
+perf = "warn"
+style = "warn"
+suspicious = "warn"
+# pedantic = "warn"  # TODO: enable after fixing existing warnings
 
 [workspace.dependencies]
 # Async runtime
@@ -50,6 +56,7 @@ thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
 dotenvy = "0.15"
+schemars = "0.8"
 
 # AI / LLM
 rig-core = "0.28"

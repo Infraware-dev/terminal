@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rig::providers::anthropic;
 
 use crate::error::EngineError;
 use crate::traits::{AgenticEngine, EventStream};
@@ -18,16 +19,31 @@ use infraware_shared::{RunInput, ThreadId};
 ///
 /// This engine provides a native Rust implementation backed by
 /// the rig-core library and Anthropic's Claude API.
-#[derive(Debug)]
+///
+/// The Anthropic client is cached to avoid recreating it for each request.
 pub struct RigEngine {
     /// Engine configuration
     config: Arc<RigEngineConfig>,
+    /// Cached Anthropic client
+    client: Arc<anthropic::Client>,
     /// State store for threads and runs
     state: Arc<StateStore>,
 }
 
+impl std::fmt::Debug for RigEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RigEngine")
+            .field("config", &self.config)
+            .field("state", &self.state)
+            .field("client", &"<anthropic::Client>")
+            .finish()
+    }
+}
+
 impl RigEngine {
     /// Create a new RigEngine with the given configuration
+    ///
+    /// This creates and caches the Anthropic client for reuse across requests.
     pub fn new(config: RigEngineConfig) -> Result<Self, EngineError> {
         // Validate config
         if config.api_key.is_empty() {
@@ -36,15 +52,21 @@ impl RigEngine {
             )));
         }
 
+        // Create and cache the Anthropic client
+        let client = anthropic::Client::new(&config.api_key).map_err(|e| {
+            EngineError::Other(anyhow::anyhow!("Failed to create Anthropic client: {}", e))
+        })?;
+
         tracing::info!(
             model = %config.model,
             max_tokens = %config.max_tokens,
             timeout_secs = %config.timeout_secs,
-            "Creating RigEngine"
+            "Creating RigEngine with cached Anthropic client"
         );
 
         Ok(Self {
             config: Arc::new(config),
+            client: Arc::new(client),
             state: Arc::new(StateStore::new()),
         })
     }
@@ -90,6 +112,7 @@ impl AgenticEngine for RigEngine {
 
         Ok(create_run_stream(
             Arc::clone(&self.config),
+            Arc::clone(&self.client),
             Arc::clone(&self.state),
             thread_id.clone(),
             input,
@@ -119,6 +142,7 @@ impl AgenticEngine for RigEngine {
 
         Ok(create_resume_stream(
             Arc::clone(&self.config),
+            Arc::clone(&self.client),
             Arc::clone(&self.state),
             thread_id.clone(),
             response,

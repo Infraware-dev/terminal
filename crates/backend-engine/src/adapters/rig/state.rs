@@ -120,20 +120,53 @@ struct RunState {
 pub struct PendingInterrupt {
     /// Context needed to resume after the interrupt
     pub resume_context: ResumeContext,
+    /// Tool call ID from rig-rs (for tool result message)
+    #[allow(dead_code)] // Reserved for future tool result handling
+    pub tool_call_id: Option<String>,
+    /// Original tool arguments (for retry/debug)
+    #[allow(dead_code)] // Reserved for future retry/debug functionality
+    pub tool_args: Option<serde_json::Value>,
 }
 
 impl PendingInterrupt {
-    /// Create a new pending command approval interrupt
-    pub fn command_approval(command: String, _message: String) -> Self {
+    /// Create a new pending command approval interrupt with tool call metadata
+    pub fn command_approval_with_tool(
+        command: String,
+        _message: String,
+        needs_continuation: bool,
+        tool_call_id: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> Self {
         Self {
-            resume_context: ResumeContext::CommandApproval { command },
+            resume_context: ResumeContext::CommandApproval {
+                command,
+                needs_continuation,
+            },
+            tool_call_id,
+            tool_args,
         }
     }
 
-    /// Create a new pending question interrupt
-    pub fn question(question: String, _options: Option<Vec<String>>) -> Self {
+    /// Create a new pending question interrupt with tool call metadata
+    pub fn question_with_tool(
+        question: String,
+        _options: Option<Vec<String>>,
+        tool_call_id: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             resume_context: ResumeContext::Question { question },
+            tool_call_id,
+            tool_args,
+        }
+    }
+
+    /// Create a pending sudo password interrupt
+    pub fn sudo_password(command: String) -> Self {
+        Self {
+            resume_context: ResumeContext::SudoPassword { command },
+            tool_call_id: None,
+            tool_args: None,
         }
     }
 }
@@ -145,11 +178,18 @@ pub enum ResumeContext {
     CommandApproval {
         /// The command that was proposed
         command: String,
+        /// Whether agent needs to process output after execution
+        needs_continuation: bool,
     },
     /// Resuming after a question was answered
     Question {
         /// The question that was asked
         question: String,
+    },
+    /// Waiting for sudo password to execute a command
+    SudoPassword {
+        /// The command that requires sudo with password
+        command: String,
     },
 }
 
@@ -182,9 +222,14 @@ mod tests {
         let store = StateStore::new();
         let thread_id = store.create_thread().await;
 
-        // Store an interrupt
-        let interrupt =
-            PendingInterrupt::command_approval("ls -la".to_string(), "List files".to_string());
+        // Store an interrupt (needs_continuation=false for simple command)
+        let interrupt = PendingInterrupt::command_approval_with_tool(
+            "ls -la".to_string(),
+            "List files".to_string(),
+            false, // needs_continuation
+            None,
+            None,
+        );
         assert!(store.store_interrupt(&thread_id, interrupt).await);
 
         // Take the interrupt

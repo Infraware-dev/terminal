@@ -17,7 +17,7 @@ use crate::models::{Message, MessageRole};
 /// let end = AgentEvent::end();
 ///
 /// // Create an interrupt event
-/// let interrupt = Interrupt::command_approval("ls -la", "List files");
+/// let interrupt = Interrupt::command_approval("ls -la", "List files", false);
 /// let update = AgentEvent::updates_with_interrupt(interrupt);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,8 +101,11 @@ impl MessageEvent {
 /// ```
 /// use infraware_shared::Interrupt;
 ///
-/// // Command requiring user approval
-/// let cmd = Interrupt::command_approval("rm -rf /tmp/cache", "Clean cache directory");
+/// // Command requiring user approval (final command, no continuation needed)
+/// let cmd = Interrupt::command_approval("ls -la", "List files", false);
+///
+/// // Command that needs continuation (agent will process output)
+/// let cmd = Interrupt::command_approval("uname -s", "Detect OS", true);
 ///
 /// // Question with predefined options
 /// let question = Interrupt::question(
@@ -113,7 +116,7 @@ impl MessageEvent {
 /// // Open-ended question
 /// let open = Interrupt::question("What should I name the file?", None);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Interrupt {
     /// Request approval to execute a command
@@ -122,6 +125,11 @@ pub enum Interrupt {
         command: String,
         /// Explanation of why this command is needed
         message: String,
+        /// Whether the agent needs to process the output after execution.
+        /// - false: Command output IS the answer (e.g., "list files" → ls output)
+        /// - true: Command output is INPUT for agent to continue (e.g., detect OS → then give instructions)
+        #[serde(default)]
+        needs_continuation: bool,
     },
     /// Ask the user a question
     Question {
@@ -134,10 +142,21 @@ pub enum Interrupt {
 }
 
 impl Interrupt {
-    pub fn command_approval(command: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Create a command approval interrupt.
+    ///
+    /// # Arguments
+    /// * `command` - The shell command to execute
+    /// * `message` - Explanation of why this command is needed
+    /// * `needs_continuation` - Whether agent needs to process output after execution
+    pub fn command_approval(
+        command: impl Into<String>,
+        message: impl Into<String>,
+        needs_continuation: bool,
+    ) -> Self {
         Self::CommandApproval {
             command: command.into(),
             message: message.into(),
+            needs_continuation,
         }
     }
 
@@ -180,11 +199,29 @@ mod tests {
 
     #[test]
     fn test_interrupt_command_approval() {
-        let interrupt = Interrupt::command_approval("rm -rf temp/", "Clean up temp files");
+        let interrupt = Interrupt::command_approval("rm -rf temp/", "Clean up temp files", false);
         match interrupt {
-            Interrupt::CommandApproval { command, message } => {
+            Interrupt::CommandApproval {
+                command,
+                message,
+                needs_continuation,
+            } => {
                 assert_eq!(command, "rm -rf temp/");
                 assert_eq!(message, "Clean up temp files");
+                assert!(!needs_continuation);
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    #[test]
+    fn test_interrupt_command_approval_with_continuation() {
+        let interrupt = Interrupt::command_approval("uname -s", "Detect OS", true);
+        match interrupt {
+            Interrupt::CommandApproval {
+                needs_continuation, ..
+            } => {
+                assert!(needs_continuation);
             }
             _ => panic!("Expected CommandApproval"),
         }
@@ -207,7 +244,8 @@ mod tests {
 
     #[test]
     fn test_serde_roundtrip() {
-        let event = AgentEvent::updates_with_interrupt(Interrupt::command_approval("ls", "List"));
+        let event =
+            AgentEvent::updates_with_interrupt(Interrupt::command_approval("ls", "List", false));
         let json = serde_json::to_string(&event).unwrap();
         let parsed: AgentEvent = serde_json::from_str(&json).unwrap();
 

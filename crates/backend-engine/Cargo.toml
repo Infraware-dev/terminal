@@ -28,9 +28,10 @@ bytes = { workspace = true, optional = true }
 # For Rig adapter (optional feature)
 rig-core = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
 
 [features]
 default = []
 http = ["reqwest", "async-stream", "bytes"]
 process = ["async-stream"]
-rig = ["rig-core", "async-stream", "regex"]
+rig = ["rig-core", "async-stream", "regex", "schemars"]

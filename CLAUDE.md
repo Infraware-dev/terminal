@@ -31,7 +31,7 @@ ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infrawa
 
 # Testing
 cargo test --workspace               # All tests (~100 tests)
-cargo test -p infraware-terminal test_name       # Single test
+cargo test -p infraware-terminal -- test_name    # Single test by name
 cargo test -p infraware-engine       # Test engine crate only
 cargo test -- --nocapture            # With output
 
@@ -40,9 +40,11 @@ cargo watch -x 'run -p infraware-backend'    # Requires: cargo install cargo-wat
 
 # Linting (CI enforces both)
 cargo fmt --all && cargo clippy --workspace
+cargo clippy --workspace -- -D warnings    # CI-strict mode (warnings = errors)
 
-# Coverage
+# Coverage (CI enforces 75% minimum)
 cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+cargo llvm-cov --all-features --workspace --summary-only  # Quick summary
 
 # Quick API verification
 curl http://localhost:8080/health
@@ -203,6 +205,22 @@ Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace =
 ### New API Types
 1. Add to `crates/shared/src/models.rs` or `events.rs`
 2. Export from `crates/shared/src/lib.rs`
+
+## Skills (`.claude/skills/`)
+
+When writing Rust code, these skills are automatically applied:
+
+| Skill | When to Apply |
+|-------|---------------|
+| `microsoft-rust-guidelines` | All Rust code (safety, naming, panics, Debug impl) |
+| `rig-rs` | Code using rig-rs (agents, tools, embeddings, completions, extractors, vector stores, MCP) |
+
+**rig-rs key patterns:**
+- Always set `max_tokens` for Anthropic
+- Use `schemars::JsonSchema` for tool parameter schemas
+- Use `Option<T>` for extractor fields
+- Wrap vector stores in `Arc<RwLock<>>` for concurrent access
+- Use `multi_turn()` for complex multi-step tool calling
 
 ## Known Issues
 

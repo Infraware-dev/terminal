@@ -165,6 +165,18 @@ impl AgenticEngine for MockEngine {
             ResumeResponse::Answer { text } => {
                 format!("Received your answer: \"{}\". Processing...", text)
             }
+            ResumeResponse::CommandOutput { command, output } => {
+                format!(
+                    "Command `{}` executed in terminal.\nOutput ({} chars): {}",
+                    command,
+                    output.len(),
+                    if output.len() > 100 {
+                        format!("{}...", &output[..100])
+                    } else {
+                        output
+                    }
+                )
+            }
         };
 
         let events: Vec<Result<AgentEvent, EngineError>> = vec![
@@ -224,7 +236,7 @@ mod tests {
         engine
             .queue_interrupt(
                 &thread_id,
-                Interrupt::command_approval("rm -rf temp/", "Clean temp files"),
+                Interrupt::command_approval("rm -rf temp/", "Clean temp files", false),
             )
             .await;
 

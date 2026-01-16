@@ -2,13 +2,6 @@
 //!
 //! Validates API key from Authorization header or X-Api-Key header.
 
-use axum::{
-    extract::Request,
-    http::{StatusCode, header},
-    middleware::Next,
-    response::Response,
-};
-
 /// Shared state for auth middleware
 #[derive(Clone, Debug)]
 pub struct AuthConfig {
@@ -55,63 +48,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         result |= x ^ y;
     }
     result == 0
-}
-
-/// Extract API key from request headers
-///
-/// Tries Authorization: Bearer <token> first, then X-Api-Key header.
-fn extract_api_key(request: &Request) -> Option<String> {
-    // Try Authorization: Bearer <token>
-    if let Some(auth_header) = request.headers().get(header::AUTHORIZATION) {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                return Some(token.to_string());
-            }
-        }
-    }
-
-    // Try X-Api-Key header
-    if let Some(api_key_header) = request.headers().get("x-api-key") {
-        if let Ok(key) = api_key_header.to_str() {
-            return Some(key.to_string());
-        }
-    }
-
-    None
-}
-
-/// Authentication middleware
-///
-/// Validates API key from Authorization header (Bearer token) or X-Api-Key header.
-/// If auth is disabled (no API_KEY configured), all requests pass through.
-pub async fn require_auth(request: Request, next: Next) -> Result<Response, StatusCode> {
-    // Get auth config from extensions (set by layer)
-    let auth_config = request
-        .extensions()
-        .get::<AuthConfig>()
-        .cloned()
-        .unwrap_or_else(|| AuthConfig::new(None));
-
-    // If auth is disabled, pass through
-    if !auth_config.is_enabled() {
-        return Ok(next.run(request).await);
-    }
-
-    // Extract and validate token
-    match extract_api_key(&request) {
-        Some(token) if auth_config.validate(&token) => {
-            tracing::debug!("Authentication successful");
-            Ok(next.run(request).await)
-        }
-        Some(_) => {
-            tracing::warn!("Authentication failed: invalid API key");
-            Err(StatusCode::UNAUTHORIZED)
-        }
-        None => {
-            tracing::warn!("Authentication failed: no API key provided");
-            Err(StatusCode::UNAUTHORIZED)
-        }
-    }
 }
 
 #[cfg(test)]

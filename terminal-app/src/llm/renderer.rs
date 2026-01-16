@@ -127,19 +127,18 @@ impl ResponseRenderer {
 
         let mut output = Vec::new();
 
-        // Add code block header
-        output.push(format!("\x1b[90m┌─ {lang} ─\x1b[0m"));
+        // Add simple language label if present
+        if !lang.is_empty() {
+            output.push(format!("\x1b[90m[{lang}]\x1b[0m"));
+        }
 
         for line in lines {
             let ranges = highlighter
                 .highlight_line(line, &self.syntax_set)
                 .unwrap_or_default();
             let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-            output.push(format!("\x1b[90m│\x1b[0m {escaped}"));
+            output.push(format!("  {escaped}"));
         }
-
-        // Add code block footer
-        output.push("\x1b[90m└─\x1b[0m".to_string());
 
         output
     }
@@ -239,14 +238,14 @@ mod tests {
         let renderer = ResponseRenderer::new();
         let lines = renderer.render("```\ncode here\n```");
 
-        // Should have: header, code line, footer
-        assert!(lines.len() >= 3);
+        // Should have code line (no header for empty lang, no footer)
+        assert!(!lines.is_empty());
 
-        // Header should have box drawing character
-        assert!(lines[0].contains("┌─"));
-
-        // Footer should have box drawing character
-        assert!(lines.last().unwrap().contains("└─"));
+        // Should NOT have box drawing characters
+        let joined = lines.join("");
+        assert!(!joined.contains("┌"));
+        assert!(!joined.contains("│"));
+        assert!(!joined.contains("└"));
     }
 
     #[test]
@@ -254,8 +253,8 @@ mod tests {
         let renderer = ResponseRenderer::new();
         let lines = renderer.render("```rust\nlet x = 5;\n```");
 
-        // Header should contain language
-        assert!(lines[0].contains("rust"));
+        // First line should contain language label
+        assert!(lines[0].contains("[rust]"));
     }
 
     #[test]
@@ -263,12 +262,16 @@ mod tests {
         let renderer = ResponseRenderer::new();
         let lines = renderer.render("```bash\necho hello\necho world\n```");
 
-        // Should have header + 2 code lines + footer = at least 4 lines
-        assert!(lines.len() >= 4);
+        // Should have header + 2 code lines = 3 lines
+        assert!(lines.len() >= 3);
 
-        // Code lines should have the pipe character prefix
-        let code_lines: Vec<_> = lines.iter().filter(|l| l.contains("│")).collect();
-        assert_eq!(code_lines.len(), 2);
+        // Should NOT have box drawing characters
+        let joined = lines.join("");
+        assert!(!joined.contains("│"));
+
+        // Code lines should be indented
+        let indented_lines: Vec<_> = lines.iter().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(indented_lines.len(), 2);
     }
 
     #[test]
@@ -324,7 +327,7 @@ mod tests {
         let renderer = ResponseRenderer::new();
         let lines = renderer.render("```\n```");
 
-        // Should have header and footer at minimum
-        assert!(lines.len() >= 2);
+        // Empty code block with no language should produce empty output
+        assert!(lines.is_empty());
     }
 }

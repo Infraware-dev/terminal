@@ -1,17 +1,29 @@
-//! HITL markers for the Rig engine adapter
+//! Tools for the Rig engine adapter
 //!
-//! These markers signal when the orchestrator should pause for user input.
+//! This module provides rig-rs native tools for:
+//! - Shell command execution with HITL approval
+//! - Asking user questions for clarification
+//!
+//! These tools implement the `rig::tool::Tool` trait and integrate with
+//! rig-rs's native function calling system via `PromptHook`.
 
-use serde::{Deserialize, Serialize};
+mod ask_user;
+mod shell;
+
+// Tool result types - used by orchestrator for HITL detection
+pub use ask_user::AskUserResult;
+pub use shell::ShellCommandResult;
+
+// Tool implementations - registered with agent via .tool()
+pub use ask_user::{AskUserArgs, AskUserTool};
+pub use shell::{ShellCommandArgs, ShellCommandTool};
 
 use infraware_shared::Interrupt;
+use serde::{Deserialize, Serialize};
 
-/// Marker to signal HITL interaction is needed
+/// Unified HITL marker that can represent any tool result requiring user interaction
 ///
-/// When the orchestrator detects a HitlMarker pattern in the LLM response:
-/// 1. Stop the current agent execution
-/// 2. Emit an interrupt event to the client
-/// 3. Store the pending interrupt for resume_run
+/// This enum provides a common type for converting tool results into interrupt events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "hitl_type", rename_all = "snake_case")]
 pub enum HitlMarker {
@@ -19,8 +31,11 @@ pub enum HitlMarker {
     CommandApproval {
         /// The shell command to execute
         command: String,
-        /// Explanation of what the command does and why it's needed
+        /// Explanation of what the command does
         message: String,
+        /// Whether the agent needs to process output after execution
+        #[serde(default)]
+        needs_continuation: bool,
     },
     /// The LLM needs to ask the user a question
     Question {
@@ -34,10 +49,15 @@ pub enum HitlMarker {
 
 impl HitlMarker {
     /// Create a command approval marker
-    pub fn command_approval(command: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn command_approval(
+        command: impl Into<String>,
+        message: impl Into<String>,
+        needs_continuation: bool,
+    ) -> Self {
         Self::CommandApproval {
             command: command.into(),
             message: message.into(),
+            needs_continuation,
         }
     }
 
@@ -53,26 +73,42 @@ impl HitlMarker {
 impl From<HitlMarker> for Interrupt {
     fn from(marker: HitlMarker) -> Self {
         match marker {
-            HitlMarker::CommandApproval { command, message } => {
-                Interrupt::command_approval(command, message)
-            }
+            HitlMarker::CommandApproval {
+                command,
+                message,
+                needs_continuation,
+            } => Interrupt::command_approval(command, message, needs_continuation),
             HitlMarker::Question { question, options } => Interrupt::question(question, options),
         }
     }
 }
 
-/// Prefix used to detect HITL markers in LLM output
-pub const HITL_MARKER_PREFIX: &str = "[[HITL:";
-pub const HITL_MARKER_SUFFIX: &str = "]]";
+impl From<ShellCommandResult> for Option<HitlMarker> {
+    fn from(result: ShellCommandResult) -> Self {
+        match result {
+            ShellCommandResult::PendingApproval {
+                command,
+                explanation,
+                needs_continuation,
+            } => Some(HitlMarker::CommandApproval {
+                command,
+                message: explanation,
+                needs_continuation,
+            }),
+            _ => None,
+        }
+    }
+}
 
-/// Try to parse a HitlMarker from LLM output (for use with [[HITL:...]] format)
-pub fn parse_hitl_marker(output: &str) -> Option<HitlMarker> {
-    let start = output.find(HITL_MARKER_PREFIX)?;
-    let json_start = start + HITL_MARKER_PREFIX.len();
-    let end = output[json_start..].find(HITL_MARKER_SUFFIX)?;
-    let json = &output[json_start..json_start + end];
-
-    serde_json::from_str(json).ok()
+impl From<AskUserResult> for Option<HitlMarker> {
+    fn from(result: AskUserResult) -> Self {
+        match result {
+            AskUserResult::Pending { question, options } => {
+                Some(HitlMarker::Question { question, options })
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -81,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_hitl_marker_command_approval() {
-        let marker = HitlMarker::command_approval("ls -la", "List files");
+        let marker = HitlMarker::command_approval("ls -la", "List files", false);
         assert!(matches!(marker, HitlMarker::CommandApproval { .. }));
     }
 
@@ -93,28 +129,49 @@ mod tests {
 
     #[test]
     fn test_hitl_marker_to_interrupt() {
-        let marker = HitlMarker::command_approval("ls", "List");
+        let marker = HitlMarker::command_approval("ls", "List", false);
         let interrupt: Interrupt = marker.into();
         assert!(matches!(interrupt, Interrupt::CommandApproval { .. }));
     }
 
     #[test]
-    fn test_parse_marker() {
-        let json =
-            r#"{"hitl_type":"command_approval","command":"docker ps","message":"List containers"}"#;
-        let output = format!("{}{}{}", HITL_MARKER_PREFIX, json, HITL_MARKER_SUFFIX);
+    fn test_shell_result_to_marker() {
+        let result = ShellCommandResult::PendingApproval {
+            command: "ls".to_string(),
+            explanation: "List files".to_string(),
+            needs_continuation: false,
+        };
 
-        let parsed = parse_hitl_marker(&output);
-        assert!(parsed.is_some());
+        let marker: Option<HitlMarker> = result.into();
+        assert!(marker.is_some());
         assert!(matches!(
-            parsed.unwrap(),
+            marker.unwrap(),
             HitlMarker::CommandApproval { .. }
         ));
     }
 
     #[test]
-    fn test_parse_no_marker() {
-        let output = "Just a regular response without any markers.";
-        assert!(parse_hitl_marker(output).is_none());
+    fn test_shell_executed_no_marker() {
+        let result = ShellCommandResult::Executed {
+            command: "ls".to_string(),
+            output: "file1".to_string(),
+            success: true,
+            exit_code: Some(0),
+        };
+
+        let marker: Option<HitlMarker> = result.into();
+        assert!(marker.is_none());
+    }
+
+    #[test]
+    fn test_ask_user_result_to_marker() {
+        let result = AskUserResult::Pending {
+            question: "Which env?".to_string(),
+            options: Some(vec!["dev".to_string()]),
+        };
+
+        let marker: Option<HitlMarker> = result.into();
+        assert!(marker.is_some());
+        assert!(matches!(marker.unwrap(), HitlMarker::Question { .. }));
     }
 }

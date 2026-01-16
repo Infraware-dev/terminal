@@ -179,7 +179,7 @@ impl ProcessEngine {
                 if let Some(ints) = interrupts {
                     let parsed_interrupts: Vec<Interrupt> = ints
                         .iter()
-                        .filter_map(|int| {
+                        .map(|int| {
                             if int.get("command").is_some() {
                                 let command = int
                                     .get("command")
@@ -191,7 +191,8 @@ impl ProcessEngine {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("Command requires approval")
                                     .to_string();
-                                Some(Interrupt::command_approval(command, message))
+                                // Process adapter doesn't have needs_continuation info, default to false
+                                Interrupt::command_approval(command, message, false)
                             } else {
                                 let question = int
                                     .get("question")
@@ -205,7 +206,7 @@ impl ProcessEngine {
                                             .filter_map(|v| v.as_str().map(String::from))
                                             .collect()
                                     });
-                                Some(Interrupt::question(question, options))
+                                Interrupt::question(question, options)
                             }
                         })
                         .collect();
@@ -249,11 +250,11 @@ impl AgenticEngine for ProcessEngine {
             let responses = transport.recv_until_final(&request_id).await?;
 
             for response in responses {
-                if let Some(result) = response.result {
-                    if let Some(thread_id) = result.get("thread_id").and_then(|v| v.as_str()) {
-                        tracing::info!(thread_id = %thread_id, "Thread created via subprocess");
-                        return Ok(ThreadId::new(thread_id.to_string()));
-                    }
+                if let Some(result) = response.result
+                    && let Some(thread_id) = result.get("thread_id").and_then(|v| v.as_str())
+                {
+                    tracing::info!(thread_id = %thread_id, "Thread created via subprocess");
+                    return Ok(ThreadId::new(thread_id.to_string()));
                 }
                 if let Some(error) = response.error {
                     return Err(EngineError::Other(anyhow::anyhow!(
@@ -329,14 +330,14 @@ impl AgenticEngine for ProcessEngine {
                         }
 
                         // Convert event to AgentEvent
-                        if let Some(event) = &response.event {
-                            if let Some(agent_event) = Self::convert_event(event) {
-                                yield Ok(agent_event);
+                        if let Some(event) = &response.event
+                            && let Some(agent_event) = Self::convert_event(event)
+                        {
+                            yield Ok(agent_event);
 
-                                // If it's an End event, stop
-                                if matches!(event, JsonRpcEvent::End) {
-                                    break;
-                                }
+                            // If it's an End event, stop
+                            if matches!(event, JsonRpcEvent::End) {
+                                break;
                             }
                         }
 
@@ -379,6 +380,12 @@ impl AgenticEngine for ProcessEngine {
                 ResumeResponse::Approved => serde_json::json!({ "approved": true }),
                 ResumeResponse::Rejected => serde_json::json!({ "approved": false }),
                 ResumeResponse::Answer { text } => serde_json::json!({ "answer": text }),
+                ResumeResponse::CommandOutput { command, output } => serde_json::json!({
+                    "command_output": {
+                        "command": command,
+                        "output": output
+                    }
+                }),
             };
             let request =
                 JsonRpcRequest::resume_run(&request_id, thread_id.as_str(), response_json);
@@ -411,13 +418,13 @@ impl AgenticEngine for ProcessEngine {
                             continue;
                         }
 
-                        if let Some(event) = &response.event {
-                            if let Some(agent_event) = Self::convert_event(event) {
-                                yield Ok(agent_event);
+                        if let Some(event) = &response.event
+                            && let Some(agent_event) = Self::convert_event(event)
+                        {
+                            yield Ok(agent_event);
 
-                                if matches!(event, JsonRpcEvent::End) {
-                                    break;
-                                }
+                            if matches!(event, JsonRpcEvent::End) {
+                                break;
                             }
                         }
 

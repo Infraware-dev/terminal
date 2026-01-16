@@ -53,6 +53,23 @@ impl NaturalLanguageOrchestrator {
         self.llm_client.resume_with_answer(answer).await
     }
 
+    /// Resume with command output after PTY execution.
+    /// Called when a command was executed in the terminal and output was captured.
+    pub async fn resume_with_command_output(
+        &self,
+        command: &str,
+        output: &str,
+    ) -> Result<LLMQueryResult> {
+        self.llm_client
+            .resume_with_command_output(command, output)
+            .await
+    }
+
+    /// Resume with rejection (user rejected the command)
+    pub async fn resume_rejected(&self) -> Result<LLMQueryResult> {
+        self.llm_client.resume_rejected().await
+    }
+
     /// Render the response text (markdown -> ANSI)
     pub fn render_response(&self, text: &str) -> Vec<String> {
         self.renderer.render(text)
@@ -119,19 +136,24 @@ mod tests {
         let text = "Example:\n```bash\nls -la\necho hello\n```\nDone.";
         let lines = orchestrator.render_response(text);
 
-        // Should have: Example, code block header, 2 code lines, code block footer, Done
+        // Should have: Example, [bash] label, 2 code lines, Done
         assert!(lines.len() >= 4);
 
         // First line should be "Example:"
         assert!(lines[0].contains("Example:"));
 
-        // Should contain code block markers
+        // Should contain language label
         let joined = lines.join("\n");
-        assert!(joined.contains("bash")); // Language marker
+        assert!(joined.contains("[bash]")); // Language label
 
-        // Code lines should have the pipe character prefix (syntect adds escape codes to content)
-        let code_lines: Vec<_> = lines.iter().filter(|l| l.contains("│")).collect();
-        assert_eq!(code_lines.len(), 2);
+        // Should NOT have box drawing characters
+        assert!(!joined.contains("│"));
+        assert!(!joined.contains("┌"));
+        assert!(!joined.contains("└"));
+
+        // Code lines should be indented
+        let indented_lines: Vec<_> = lines.iter().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(indented_lines.len(), 2);
     }
 
     #[tokio::test]

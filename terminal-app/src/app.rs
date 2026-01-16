@@ -2,11 +2,14 @@
 
 use crate::auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use crate::config::{pty as pty_config, rendering, size, timing};
-use crate::input::{InputClassifier, InputType, KeyboardAction, KeyboardHandler, TextSelection};
+use crate::input::{
+    InputClassifier, InputType, KeyboardAction, KeyboardHandler, OutputCapture, PromptDetector,
+    TextSelection, ValidationResult, validate_command,
+};
 use crate::llm::{HttpLLMClient, LLMClientTrait, LLMQueryResult};
 use crate::orchestrators::NaturalLanguageOrchestrator;
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
-use crate::state::AppMode;
+use crate::state::{AgentState, AppMode};
 use crate::terminal::{Color, TerminalHandler};
 use crate::ui::scrollbar::{ScrollAction, Scrollbar};
 use crate::ui::{
@@ -118,6 +121,8 @@ pub struct InfrawareApp {
     bg_event_tx: mpsc::Sender<AppBackgroundEvent>,
     /// Channel for background events (receiver)
     bg_event_rx: mpsc::Receiver<AppBackgroundEvent>,
+    /// Cancellation token for active LLM queries (allows Ctrl+C to cancel)
+    llm_cancel_token: Option<tokio_util::sync::CancellationToken>,
 
     // === PERFORMANCE: Reusable render buffers (avoid per-frame allocations) ===
     /// Background rectangles buffer (reused each frame with .clear())
@@ -141,12 +146,20 @@ pub struct InfrawareApp {
     /// Authentication status message (shown at startup)
     auth_status_message: Option<String>,
 
-    /// Flag to track when LLM is processing in background (after command approval)
-    /// Used to show throbber even when mode is Normal (allowing shell interaction)
-    llm_background_processing: bool,
+    /// Agent state for tracking LLM stream activity independently of AppMode.
+    /// Allows showing throbber during background processing while user interacts with shell.
+    agent_state: AgentState,
+
+    /// Interactive prompt detector for PTY output (sudo, ssh, etc.)
+    /// Used to hide throbber when shell is waiting for user input.
+    prompt_detector: PromptDetector,
 
     /// Timestamp of last PTY activity (used to suppress throbber during command execution)
     last_pty_activity: Instant,
+
+    /// Output capture for commands executed in PTY.
+    /// Captures output to send to backend for LLM continuation.
+    output_capture: OutputCapture,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -299,6 +312,7 @@ impl InfrawareApp {
             orchestrator,
             bg_event_tx,
             bg_event_rx,
+            llm_cancel_token: None,
             // Pre-allocate render buffers (reused each frame to avoid allocations)
             render_bg_rects: Vec::with_capacity(32),
             render_text_runs: Vec::with_capacity(32),
@@ -311,10 +325,14 @@ impl InfrawareApp {
             scrollbar: Scrollbar::new(),
             // Authentication status
             auth_status_message,
-            // LLM background processing flag
-            llm_background_processing: false,
+            // Agent state for LLM stream tracking
+            agent_state: AgentState::new(),
+            // Interactive prompt detector
+            prompt_detector: PromptDetector::new(),
             // Last PTY activity timestamp (start in past to not suppress initial throbber)
             last_pty_activity: Instant::now() - std::time::Duration::from_secs(10),
+            // Output capture for PTY command execution
+            output_capture: OutputCapture::new(),
         }
     }
 
@@ -368,6 +386,8 @@ impl InfrawareApp {
         }
 
         let mut bytes_processed = 0;
+        // Store command output to send after releasing the rx borrow
+        let mut completed_command: Option<(String, String)> = None;
 
         if let Some(ref rx) = self.pty_output_rx {
             loop {
@@ -378,10 +398,49 @@ impl InfrawareApp {
                 match rx.try_recv() {
                     Ok(bytes) => {
                         bytes_processed += bytes.len();
+
+                        // Feed output to prompt detector for interactive prompt detection
+                        self.prompt_detector.process_output(&bytes);
+
+                        // Update last PTY activity timestamp (for throbber suppression)
+                        self.last_pty_activity = Instant::now();
+
                         // VTE 0.15+ takes &[u8] slice instead of single byte
                         self.vte_parser.advance(&mut self.terminal_handler, &bytes);
                         // Auto-scroll to bottom when new output arrives
                         self.terminal_handler.grid_mut().scroll_to_bottom();
+
+                        // If executing a command, capture output
+                        if let AppMode::ExecutingCommand { ref command } = self.mode {
+                            let text = String::from_utf8_lossy(&bytes);
+                            log::debug!(
+                                "ExecutingCommand: received {} bytes for '{}'",
+                                bytes.len(),
+                                command
+                            );
+                            let command_complete = self.output_capture.append(&text);
+
+                            if command_complete {
+                                log::info!(
+                                    "Command '{}' completed (prompt detected), sending output to backend",
+                                    command
+                                );
+                                let output = self.output_capture.take_output();
+                                log::debug!(
+                                    "Captured output ({} chars): {}...",
+                                    output.len(),
+                                    &output[..output.len().min(100)]
+                                );
+                                let cmd = command.clone();
+
+                                // Store for later - will send after releasing borrow
+                                completed_command = Some((cmd, output));
+                                // Transition mode here (doesn't require mutable borrow of self)
+                                self.mode = AppMode::WaitingLLM;
+                                log::info!("Mode transition: ExecutingCommand -> WaitingLLM");
+                                break; // Exit loop - we'll send to backend after
+                            }
+                        }
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -391,6 +450,11 @@ impl InfrawareApp {
                     }
                 }
             }
+        }
+
+        // Now that rx borrow is released, we can call methods that borrow self mutably
+        if let Some((cmd, output)) = completed_command {
+            self.resume_with_command_output(cmd, output);
         }
 
         bytes_processed > 0
@@ -415,21 +479,40 @@ impl InfrawareApp {
     /// Poll background events (LLM results, etc.)
     fn poll_background_events(&mut self) {
         while let Ok(event) = self.bg_event_rx.try_recv() {
-            log::debug!("Received background event: {:?}", event);
+            log::info!(
+                "Received background event: {:?}, current mode: {:?}",
+                event,
+                self.mode.name()
+            );
             match event {
                 AppBackgroundEvent::LlmResult(result) => {
-                    // Clear background processing flag - we received a result
-                    self.llm_background_processing = false;
+                    // Stream ended - we received a result
+                    self.agent_state.end_stream();
                     match result {
                         LLMQueryResult::Complete(text) => {
-                            log::info!("LLM query complete, response length: {} chars", text.len());
+                            log::info!(
+                                "LLM query complete, response length: {} chars, transitioning to Normal",
+                                text.len()
+                            );
+
+                            // Set mode FIRST to stop throbber immediately
+                            self.mode = AppMode::Normal;
+
+                            // If response is empty, just transition to Normal without any output
+                            // (e.g., after command execution where user already saw the output)
                             if text.is_empty() {
-                                log::warn!("LLM returned EMPTY response!");
+                                log::debug!("Empty response, no output to render");
+                                continue;
                             }
 
-                            // Render response lines
+                            // Then render response lines
                             let lines = self.orchestrator.render_response(&text);
                             log::debug!("Rendered {} lines to display", lines.len());
+
+                            // Start with newline to avoid overwriting current prompt
+                            self.vte_parser
+                                .advance(&mut self.terminal_handler, b"\r\n");
+
                             let last_idx = lines.len().saturating_sub(1);
                             for (i, line) in lines.iter().enumerate() {
                                 self.vte_parser
@@ -440,7 +523,6 @@ impl InfrawareApp {
                                     self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
                                 }
                             }
-                            self.mode = AppMode::Normal;
 
                             // Clear shell buffer and trigger fresh prompt
                             if let Some(ref writer) = self.pty_writer {
@@ -450,26 +532,32 @@ impl InfrawareApp {
                         LLMQueryResult::CommandApproval { command, message } => {
                             log::info!("LLM requested command approval: {}", command);
 
-                            // Convert any bare \n to \r\n for proper terminal alignment
-                            let message_formatted = message.replace('\n', "\r\n");
+                            // Set mode FIRST to stop throbber immediately
+                            self.mode = AppMode::AwaitingApproval {
+                                command: command.clone(),
+                                message: message.clone(),
+                            };
 
-                            // Display the approval prompt (message already contains command info)
+                            // Then display the approval prompt with command highlighted
+                            let message_formatted = message.replace('\n', "\r\n");
                             let prompt = format!(
-                                "\r\n\x1b[1;33m{}\x1b[0m\r\n\x1b[90mType 'y' to approve, 'n' to reject:\x1b[0m ",
-                                message_formatted
+                                "\r\n\x1b[1;33m{}\x1b[0m\r\n\r\n\x1b[1;36mCommand:\x1b[0m \x1b[1m{}\x1b[0m\r\n\r\n\x1b[90mType 'y' to approve, 'n' to reject:\x1b[0m ",
+                                message_formatted, command
                             );
                             self.vte_parser
                                 .advance(&mut self.terminal_handler, prompt.as_bytes());
-
-                            self.mode = AppMode::AwaitingApproval { command, message };
                         }
                         LLMQueryResult::Question { question, options } => {
                             log::info!("LLM asked a question: {}", question);
 
-                            // Convert any bare \n to \r\n for proper terminal alignment
-                            let question_formatted = question.replace('\n', "\r\n");
+                            // Set mode FIRST to stop throbber immediately
+                            self.mode = AppMode::AwaitingAnswer {
+                                question: question.clone(),
+                                options: options.clone(),
+                            };
 
-                            // Display the question to the user
+                            // Then display the question
+                            let question_formatted = question.replace('\n', "\r\n");
                             let mut prompt = format!(
                                 "\r\n\x1b[1;33mAgent Question:\x1b[0m\r\n  {}\r\n",
                                 question_formatted
@@ -491,14 +579,12 @@ impl InfrawareApp {
                             prompt.push_str("\r\n\x1b[90mType your answer:\x1b[0m ");
                             self.vte_parser
                                 .advance(&mut self.terminal_handler, prompt.as_bytes());
-
-                            self.mode = AppMode::AwaitingAnswer { question, options };
                         }
                     }
                 }
                 AppBackgroundEvent::LlmError(err) => {
-                    // Clear background processing flag - we received an error
-                    self.llm_background_processing = false;
+                    // Stream ended - we received an error
+                    self.agent_state.end_stream();
                     log::error!("LLM query error: {}", err);
                     // No trailing newline - shell's echo of \n provides it
                     let error_msg = format!("\x1b[31mError: {}\x1b[0m", err);
@@ -519,14 +605,18 @@ impl InfrawareApp {
     fn start_llm_query(&mut self, query: String) {
         log::info!("Starting LLM query: {}", query);
         self.mode = AppMode::WaitingLLM;
+        // Start agent stream tracking (throbber will show when PTY is quiet)
+        self.agent_state.start_stream();
 
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
+        // Create cancellation token and save it for Ctrl+C cancellation
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.llm_cancel_token = Some(cancel_token.clone());
+
         self.runtime.spawn(async move {
             log::info!("Background task started for query: {}", query);
-            // Using a new cancellation token for each query
-            let cancel_token = tokio_util::sync::CancellationToken::new();
 
             match orchestrator.query(&query, cancel_token).await {
                 Ok(result) => {
@@ -590,8 +680,12 @@ impl InfrawareApp {
 
     /// Handle keyboard input using the extracted KeyboardHandler.
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
-        // Intercept input if in HITL mode
-        if !matches!(self.mode, AppMode::Normal | AppMode::WaitingLLM) {
+        // Intercept input if in HITL mode (approval/answer prompts)
+        // ExecutingCommand should NOT intercept - user can still type while command runs
+        if matches!(
+            self.mode,
+            AppMode::AwaitingApproval { .. } | AppMode::AwaitingAnswer { .. }
+        ) {
             self.handle_hitl_keyboard(ctx);
             return;
         }
@@ -599,8 +693,22 @@ impl InfrawareApp {
         // Process keyboard input and get actions (returns owned Vec to avoid borrow issues)
         let actions = self.keyboard_handler.process(ctx);
 
+        // Log current mode if there's keyboard activity
+        if !actions.is_empty() {
+            log::debug!(
+                "Keyboard actions: {} actions, mode: {:?}",
+                actions.len(),
+                self.mode.name()
+            );
+        }
+
         // Execute each action
         for action in actions {
+            // Clear prompt detection on any user input (user is responding to prompt)
+            if matches!(action, KeyboardAction::SendBytes(_)) {
+                self.prompt_detector.clear();
+            }
+
             match action {
                 KeyboardAction::SendBytes(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
@@ -641,6 +749,15 @@ impl InfrawareApp {
                 KeyboardAction::SendSigInt => {
                     log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
                     self.send_to_pty(&[0x03]);
+
+                    // Cancel LLM stream if active (check via cancel token presence)
+                    if let Some(token) = self.llm_cancel_token.take() {
+                        log::info!("Cancelling active LLM stream");
+                        token.cancel();
+                        self.agent_state.end_stream();
+                        self.mode = AppMode::Normal;
+                    }
+
                     // Pause output reading briefly to let the kernel/shell process the signal
                     // and to give immediate visual feedback (stop scrolling)
                     self.output_pause_until =
@@ -661,6 +778,11 @@ impl InfrawareApp {
         let actions = self.keyboard_handler.process(ctx);
 
         for action in actions {
+            // Clear prompt detection on any user input
+            if matches!(action, KeyboardAction::SendBytes(_)) {
+                self.prompt_detector.clear();
+            }
+
             match action {
                 KeyboardAction::SendBytes(bytes) => {
                     let text = String::from_utf8_lossy(&bytes);
@@ -709,20 +831,72 @@ impl InfrawareApp {
             AppMode::AwaitingApproval { command, .. } => {
                 let approved = crate::orchestrators::HitlOrchestrator::parse_approval(&input);
                 if approved {
+                    // SECURITY: Validate command before execution to prevent dangerous operations
+                    let validation = validate_command(&command);
+
+                    if validation.is_blocked() {
+                        log::warn!("Blocked dangerous command: {}", command);
+                        // Show red warning for blocked commands
+                        let warning = match &validation {
+                            ValidationResult::Blocked { reason } => {
+                                format!(
+                                    "\r\n\x1b[91mBLOCKED: {}\x1b[0m\r\n\
+                                     \x1b[33mCommand not executed for security reasons.\x1b[0m\r\n",
+                                    reason
+                                )
+                            }
+                            _ => unreachable!(),
+                        };
+                        self.vte_parser
+                            .advance(&mut self.terminal_handler, warning.as_bytes());
+                        self.mode = AppMode::Normal;
+
+                        // Trigger fresh shell prompt
+                        if let Some(ref writer) = self.pty_writer {
+                            let _ = writer.write_bytes(b"\x15\n");
+                        }
+                        return;
+                    }
+
+                    // Show warning for risky commands but allow execution
+                    if let ValidationResult::Warning { reason } = &validation {
+                        log::info!("Warning for command {}: {}", command, reason);
+                        let warning = format!("\x1b[33mWarning: {}\x1b[0m\r\n", reason);
+                        self.vte_parser
+                            .advance(&mut self.terminal_handler, warning.as_bytes());
+                    }
+
                     log::info!("User approved command: {}", command);
-                    // Echo the command to the terminal
-                    let echo = format!("Executing: {}\r\n", command);
+                    // Echo approval to terminal
+                    let echo = format!("Approved: {}\r\n", command);
                     self.vte_parser
                         .advance(&mut self.terminal_handler, echo.as_bytes());
 
-                    // Execute command in PTY (shell will run it and show output)
-                    let cmd_bytes = format!("{}\n", command);
-                    self.send_to_pty(cmd_bytes.as_bytes());
+                    // Execute command in PTY and capture output.
+                    // When command completes, output will be sent to backend.
+                    if let Some(ref writer) = self.pty_writer {
+                        // Start capturing output before sending command
+                        self.output_capture.start(&command);
 
-                    // Stay in Normal mode so user can interact with shell (e.g., sudo password)
-                    // Resume LLM in background - when it responds, we'll show next approval
-                    self.mode = AppMode::Normal;
-                    self.resume_llm_run_background();
+                        // Send command to PTY
+                        let cmd_with_newline = format!("{}\n", command);
+                        if let Err(e) = writer.write_bytes(cmd_with_newline.as_bytes()) {
+                            log::error!("Failed to send command to PTY: {}", e);
+                            self.output_capture.stop();
+                            self.mode = AppMode::Normal;
+                            return;
+                        }
+
+                        // Enter ExecutingCommand mode - will transition to WaitingLLM
+                        // when command completes and output is sent to backend
+                        self.mode = AppMode::ExecutingCommand {
+                            command: command.clone(),
+                        };
+                        log::debug!("Entered ExecutingCommand mode for: {}", command);
+                    } else {
+                        log::error!("No PTY writer available");
+                        self.mode = AppMode::Normal;
+                    }
                 } else {
                     log::info!("User rejected command: {}", command);
                     // Show rejection message
@@ -730,12 +904,10 @@ impl InfrawareApp {
                         &mut self.terminal_handler,
                         b"\r\n\x1b[33mCommand rejected.\x1b[0m\r\n",
                     );
-                    self.mode = AppMode::Normal;
 
-                    // Trigger fresh shell prompt
-                    if let Some(ref writer) = self.pty_writer {
-                        let _ = writer.write_bytes(b"\x15\n");
-                    }
+                    // Notify backend that command was rejected
+                    // Backend will inform LLM and complete/continue the workflow
+                    self.resume_llm_rejected();
                 }
             }
             AppMode::AwaitingAnswer { .. } => {
@@ -748,20 +920,35 @@ impl InfrawareApp {
         }
     }
 
+    /// Resume LLM run after approval (sets WaitingLLM mode immediately).
+    #[allow(dead_code)]
+    fn resume_llm_run(&mut self) {
+        self.mode = AppMode::WaitingLLM;
+        self.resume_llm_run_background();
+    }
+
     /// Resume LLM run in background without changing mode.
     /// Allows user to interact with shell while LLM processes.
     fn resume_llm_run_background(&mut self) {
-        self.llm_background_processing = true;
+        // Start agent stream tracking (throbber will show when PTY is quiet)
+        self.agent_state.start_stream();
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
+        // Create cancellation token for Ctrl+C cancellation
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.llm_cancel_token = Some(cancel_token.clone());
+
         self.runtime.spawn(async move {
-            match orchestrator.resume_run().await {
-                Ok(result) => {
-                    let _ = tx.send(AppBackgroundEvent::LlmResult(result));
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    log::info!("Background LLM run cancelled");
                 }
-                Err(e) => {
-                    let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string()));
+                result = orchestrator.resume_run() => {
+                    match result {
+                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
+                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
+                    }
                 }
             }
         });
@@ -770,16 +957,78 @@ impl InfrawareApp {
     /// Resume LLM run with a text answer.
     fn resume_llm_with_answer(&mut self, answer: String) {
         self.mode = AppMode::WaitingLLM;
+        // Start agent stream tracking
+        self.agent_state.start_stream();
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
+        // Create cancellation token for Ctrl+C cancellation
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.llm_cancel_token = Some(cancel_token.clone());
+
         self.runtime.spawn(async move {
-            match orchestrator.resume_with_answer(&answer).await {
-                Ok(result) => {
-                    let _ = tx.send(AppBackgroundEvent::LlmResult(result));
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    log::info!("Background LLM answer run cancelled");
                 }
-                Err(e) => {
-                    let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string()));
+                result = orchestrator.resume_with_answer(&answer) => {
+                    match result {
+                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
+                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Resume LLM run with command output from PTY execution.
+    fn resume_with_command_output(&mut self, command: String, output: String) {
+        // Start agent stream tracking
+        self.agent_state.start_stream();
+        let orchestrator = self.orchestrator.clone();
+        let tx = self.bg_event_tx.clone();
+
+        // Create cancellation token for Ctrl+C cancellation
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.llm_cancel_token = Some(cancel_token.clone());
+
+        self.runtime.spawn(async move {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    log::info!("Background LLM command output run cancelled");
+                }
+                result = orchestrator.resume_with_command_output(&command, &output) => {
+                    match result {
+                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
+                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Resume LLM run with rejection (user rejected the command).
+    fn resume_llm_rejected(&mut self) {
+        self.mode = AppMode::WaitingLLM;
+        // Start agent stream tracking
+        self.agent_state.start_stream();
+        let orchestrator = self.orchestrator.clone();
+        let tx = self.bg_event_tx.clone();
+
+        // Create cancellation token for Ctrl+C cancellation
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.llm_cancel_token = Some(cancel_token.clone());
+
+        self.runtime.spawn(async move {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    log::info!("Background LLM rejected run cancelled");
+                }
+                result = orchestrator.resume_rejected() => {
+                    match result {
+                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
+                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
+                    }
                 }
             }
         });
@@ -1189,9 +1438,12 @@ impl InfrawareApp {
             );
         }
 
-        // Draw Throbber when waiting for LLM response (either blocking or background)
-        let show_throbber =
-            matches!(self.mode, AppMode::WaitingLLM) || self.llm_background_processing;
+        // Draw Throbber when waiting for LLM response
+        // Throbber ON ⟺ EngineStatus::Thinking (mapped to AppMode::WaitingLLM)
+        // Hide throbber when: interactive prompt detected, or PTY was recently active
+        let throbber_suppressed = self.prompt_detector.is_prompt_active()
+            || self.last_pty_activity.elapsed() < std::time::Duration::from_millis(500);
+        let show_throbber = matches!(self.mode, AppMode::WaitingLLM) && !throbber_suppressed;
         if show_throbber && scroll_offset == 0 {
             let frame_idx =
                 (self.startup_time.elapsed().as_millis() / 250) as usize % SPINNER_FRAMES.len();
@@ -1358,8 +1610,8 @@ impl eframe::App for InfrawareApp {
             let cursor_needs_blink = time_since_blink >= blink_interval;
 
             // Check if we need to animate the throbber (4 FPS / 250ms)
-            let is_waiting_llm =
-                matches!(self.mode, AppMode::WaitingLLM) || self.llm_background_processing;
+            // Throbber animates when EngineStatus::Thinking (mapped to AppMode::WaitingLLM)
+            let is_waiting_llm = matches!(self.mode, AppMode::WaitingLLM);
 
             if pty_had_data || cursor_needs_blink || had_user_input {
                 // Something changed - repaint immediately

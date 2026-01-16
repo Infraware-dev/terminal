@@ -20,14 +20,8 @@ use infraware_engine::EngineError;
 pub enum ErrorCode {
     /// Generic internal server error
     InternalError,
-    /// Requested resource not found
-    NotFound,
     /// Invalid request parameters or body
     BadRequest,
-    /// Authentication required or failed
-    Unauthorized,
-    /// Request rate limit exceeded
-    RateLimitExceeded,
     /// Upstream service unavailable
     ServiceUnavailable,
     /// Failed to connect to upstream service
@@ -36,8 +30,6 @@ pub enum ErrorCode {
     ThreadNotFound,
     /// Run cannot be resumed (no pending interrupt)
     RunNotResumable,
-    /// Validation error in request
-    ValidationError,
 }
 
 impl ErrorCode {
@@ -45,12 +37,8 @@ impl ErrorCode {
     fn status_code(self) -> StatusCode {
         match self {
             Self::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::NotFound | Self::ThreadNotFound => StatusCode::NOT_FOUND,
-            Self::BadRequest | Self::ValidationError | Self::RunNotResumable => {
-                StatusCode::BAD_REQUEST
-            }
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+            Self::ThreadNotFound => StatusCode::NOT_FOUND,
+            Self::BadRequest | Self::RunNotResumable => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::UpstreamConnectionError => StatusCode::BAD_GATEWAY,
         }
@@ -78,19 +66,9 @@ impl ApiError {
         Self::new(ErrorCode::InternalError, message)
     }
 
-    /// Create a not found error
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(ErrorCode::NotFound, message)
-    }
-
     /// Create a bad request error
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::BadRequest, message)
-    }
-
-    /// Create a validation error
-    pub fn validation(message: impl Into<String>) -> Self {
-        Self::new(ErrorCode::ValidationError, message)
     }
 
     /// Create a thread not found error

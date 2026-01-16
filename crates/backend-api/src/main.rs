@@ -254,8 +254,8 @@ fn create_engine(config: &Config) -> anyhow::Result<Arc<dyn AgenticEngine>> {
             let engine = ProcessEngine::new(engine_config);
             Ok(Arc::new(engine))
         }
-        "mock" | _ => {
-            tracing::info!("Creating MockEngine");
+        _ => {
+            tracing::info!("Creating MockEngine (default)");
             Ok(Arc::new(MockEngine::new()))
         }
     }
@@ -513,11 +513,11 @@ async fn rate_limit_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
-    if let Some(limiter) = limiter {
-        if !limiter.check() {
-            tracing::warn!("Rate limit exceeded");
-            return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
-        }
+    if let Some(limiter) = limiter
+        && !limiter.check()
+    {
+        tracing::warn!("Rate limit exceeded");
+        return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
     Ok(next.run(request).await)
 }

@@ -155,12 +155,11 @@ fn parse_sse_stream(
                         // Parse SSE line
                         if let Some(event_type) = line.strip_prefix("event: ") {
                             current_event = Some(event_type.trim().to_string());
-                        } else if let Some(data) = line.strip_prefix("data: ") {
-                            if let Some(ref event) = current_event {
-                                if let Some(agent_event) = parse_sse_event(event, data) {
-                                    yield Ok(agent_event);
-                                }
-                            }
+                        } else if let Some(data) = line.strip_prefix("data: ")
+                            && let Some(ref event) = current_event
+                            && let Some(agent_event) = parse_sse_event(event, data)
+                        {
+                            yield Ok(agent_event);
                         }
                     }
                 }
@@ -192,50 +191,50 @@ fn parse_sse_event(event_type: &str, data: &str) -> Option<AgentEvent> {
             }
         }
         "values" => {
-            if let Ok(values) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) {
-                    let messages: Vec<Message> = msgs
-                        .iter()
-                        .filter_map(|m| {
-                            let role = match m.get("type").and_then(|v| v.as_str()) {
-                                Some("ai") => MessageRole::Assistant,
-                                Some("human") => MessageRole::User,
-                                _ => match m.get("role").and_then(|v| v.as_str()) {
-                                    Some("assistant") => MessageRole::Assistant,
-                                    Some("user") => MessageRole::User,
-                                    Some("system") => MessageRole::System,
-                                    _ => return None,
-                                },
-                            };
+            if let Ok(values) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(msgs) = values.get("messages").and_then(|v| v.as_array())
+            {
+                let messages: Vec<Message> = msgs
+                    .iter()
+                    .filter_map(|m| {
+                        let role = match m.get("type").and_then(|v| v.as_str()) {
+                            Some("ai") => MessageRole::Assistant,
+                            Some("human") => MessageRole::User,
+                            _ => match m.get("role").and_then(|v| v.as_str()) {
+                                Some("assistant") => MessageRole::Assistant,
+                                Some("user") => MessageRole::User,
+                                Some("system") => MessageRole::System,
+                                _ => return None,
+                            },
+                        };
 
-                            let content = extract_content(m)?;
-                            Some(Message::new(role, content))
-                        })
-                        .collect();
+                        let content = extract_content(m)?;
+                        Some(Message::new(role, content))
+                    })
+                    .collect();
 
-                    if !messages.is_empty() {
-                        return Some(AgentEvent::Values { messages });
-                    }
+                if !messages.is_empty() {
+                    return Some(AgentEvent::Values { messages });
                 }
             }
             None
         }
         "updates" => {
-            if let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(interrupts) = updates.get("__interrupt__").and_then(|v| v.as_array()) {
-                    let parsed_interrupts: Vec<Interrupt> = interrupts
-                        .iter()
-                        .filter_map(|int| {
-                            let value = int.get("value")?;
-                            Some(parse_interrupt(value))
-                        })
-                        .collect();
+            if let Ok(updates) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(interrupts) = updates.get("__interrupt__").and_then(|v| v.as_array())
+            {
+                let parsed_interrupts: Vec<Interrupt> = interrupts
+                    .iter()
+                    .filter_map(|int| {
+                        let value = int.get("value")?;
+                        Some(parse_interrupt(value))
+                    })
+                    .collect();
 
-                    if !parsed_interrupts.is_empty() {
-                        return Some(AgentEvent::Updates {
-                            interrupts: Some(parsed_interrupts),
-                        });
-                    }
+                if !parsed_interrupts.is_empty() {
+                    return Some(AgentEvent::Updates {
+                        interrupts: Some(parsed_interrupts),
+                    });
                 }
             }
             None
@@ -263,10 +262,10 @@ fn parse_sse_event(event_type: &str, data: &str) -> Option<AgentEvent> {
 /// Extract content from a LangGraph message (handles both string and array formats)
 fn extract_content(msg: &serde_json::Value) -> Option<String> {
     // Try string content first
-    if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-        if !content.is_empty() {
-            return Some(content.to_string());
-        }
+    if let Some(content) = msg.get("content").and_then(|v| v.as_str())
+        && !content.is_empty()
+    {
+        return Some(content.to_string());
     }
 
     // Try array of content blocks
@@ -306,7 +305,8 @@ fn parse_interrupt(value: &serde_json::Value) -> Interrupt {
             .and_then(|v| v.as_str())
             .unwrap_or("Command requires approval")
             .to_string();
-        Interrupt::command_approval(command, message)
+        // HTTP adapter doesn't have needs_continuation info, default to false
+        Interrupt::command_approval(command, message, false)
     } else {
         let question = value
             .get("question")
@@ -524,7 +524,7 @@ mod tests {
         });
         let interrupt = parse_interrupt(&value);
         match interrupt {
-            Interrupt::CommandApproval { command, message } => {
+            Interrupt::CommandApproval { command, message, .. } => {
                 assert_eq!(command, "rm -rf temp/");
                 assert_eq!(message, "Clean up temp files");
             }

@@ -8,7 +8,7 @@ use axum::{
         sse::{Event, KeepAlive},
     },
 };
-use futures::StreamExt;
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, time::Duration};
 use utoipa::ToSchema;
@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 use crate::error::ApiError;
 use crate::state::AppState;
 use infraware_engine::{AgentEvent, ResumeResponse, RunInput};
-use infraware_shared::{Message, MessageRole, ThreadId};
+use infraware_shared::{EngineStatus, Interrupt, Message, MessageRole, ThreadId};
 
 // === Input Validation Constants ===
 
@@ -37,6 +37,21 @@ const VALID_ROLES: &[&str] = &["user", "assistant", "system"];
 /// Sends periodic keep-alive messages to detect disconnected clients
 /// and prevent reverse proxies from timing out idle connections.
 const SSE_KEEP_ALIVE_SECS: u64 = 15;
+
+// === SSE Status Event Helpers ===
+
+/// Create an SSE event for EngineStatus changes.
+///
+/// Status events are emitted at key points in the stream lifecycle:
+/// - `Thinking` at stream start
+/// - `Interrupted(...)` when HITL interrupt is received
+/// - `Ready` at stream end
+fn create_status_event(status: EngineStatus) -> Event {
+    tracing::debug!(status = ?status, "Emitting EngineStatus SSE event");
+    Event::default()
+        .event("status")
+        .data(serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string()))
+}
 
 /// Request to create a thread
 #[derive(Debug, Deserialize, ToSchema)]
@@ -223,6 +238,23 @@ pub async fn stream_run(
                 }
             }
             "rejected" => ResumeResponse::rejected(),
+            "command_output" => {
+                // Command was executed in terminal PTY, output captured
+                // Expected format: two messages - first is command, second is output
+                if let Some(input) = &req.input {
+                    let messages: Vec<_> = input.messages.iter().collect();
+                    if messages.len() >= 2 {
+                        ResumeResponse::command_output(&messages[0].content, &messages[1].content)
+                    } else if let Some(msg) = messages.first() {
+                        // Fallback: single message contains output, command unknown
+                        ResumeResponse::command_output("unknown", &msg.content)
+                    } else {
+                        ResumeResponse::command_output("unknown", "")
+                    }
+                } else {
+                    ResumeResponse::command_output("unknown", "")
+                }
+            }
             _ => ResumeResponse::approved(),
         };
 
@@ -252,11 +284,29 @@ pub async fn stream_run(
         state.engine.stream_run(&thread_id, input).await?
     };
 
-    // Convert engine events to SSE events
-    let sse_stream = event_stream.map(|result| {
-        let event = match result {
+    // Convert engine events to SSE events with explicit EngineStatus events
+    //
+    // Status event flow:
+    // 1. Emit status: Thinking at stream start
+    // 2. Emit status: Interrupted(...) when HITL interrupt is received
+    // 3. Emit status: Ready at stream end or on error
+
+    // Start stream with Thinking status
+    tracing::debug!(thread_id = %thread_id, "Starting SSE stream");
+    let thinking_event = stream::once(async {
+        tracing::debug!("Emitting initial Thinking status");
+        Ok::<Event, Infallible>(create_status_event(EngineStatus::thinking()))
+    });
+
+    // Main event stream with status events injected at appropriate points
+    let main_stream = event_stream.flat_map(|result| {
+        let events: Vec<Result<Event, Infallible>> = match result {
             Ok(agent_event) => {
-                let (event_type, data) = match agent_event {
+                tracing::debug!(event = ?agent_event, "Processing AgentEvent");
+                let mut events = vec![];
+
+                // Convert agent event to SSE event
+                let (event_type, data) = match &agent_event {
                     AgentEvent::Metadata { run_id } => {
                         ("metadata", serde_json::json!({ "run_id": run_id }))
                     }
@@ -282,18 +332,19 @@ pub async fn stream_run(
                         }),
                     ),
                     AgentEvent::Updates { interrupts } => {
-                        let interrupt_data = interrupts.map(|ints| {
-                            ints.into_iter()
+                        let interrupt_data = interrupts.as_ref().map(|ints| {
+                            ints.iter()
                                 .map(|int| {
                                     serde_json::json!({
                                         "value": match int {
-                                            infraware_engine::Interrupt::CommandApproval { command, message } => {
+                                            Interrupt::CommandApproval { command, message, needs_continuation } => {
                                                 serde_json::json!({
                                                     "command": command,
-                                                    "message": message
+                                                    "message": message,
+                                                    "needs_continuation": needs_continuation
                                                 })
                                             }
-                                            infraware_engine::Interrupt::Question { question, options } => {
+                                            Interrupt::Question { question, options } => {
                                                 serde_json::json!({
                                                     "question": question,
                                                     "options": options
@@ -318,17 +369,51 @@ pub async fn stream_run(
                     AgentEvent::End => ("end", serde_json::json!({})),
                 };
 
-                Event::default()
+                tracing::debug!(event_type = event_type, "Emitting SSE event");
+                events.push(Ok(Event::default()
                     .event(event_type)
-                    .data(data.to_string())
+                    .data(data.to_string())));
+
+                // Inject status events for interrupts and end
+                match agent_event {
+                    AgentEvent::Updates {
+                        interrupts: Some(ref ints),
+                    } if !ints.is_empty() => {
+                        // Emit Interrupted status with the first interrupt
+                        if let Some(int) = ints.first() {
+                            events.push(Ok(create_status_event(EngineStatus::interrupted(
+                                int.clone(),
+                            ))));
+                        }
+                    }
+                    AgentEvent::End => {
+                        // Emit Ready status when stream ends normally
+                        events.push(Ok(create_status_event(EngineStatus::ready())));
+                    }
+                    AgentEvent::Error { .. } => {
+                        // Emit Ready status on error (workflow terminates)
+                        events.push(Ok(create_status_event(EngineStatus::ready())));
+                    }
+                    _ => {}
+                }
+
+                events
             }
-            Err(e) => Event::default()
-                .event("error")
-                .data(serde_json::json!({ "message": e.to_string() }).to_string()),
+            Err(e) => {
+                vec![
+                    Ok(Event::default()
+                        .event("error")
+                        .data(serde_json::json!({ "message": e.to_string() }).to_string())),
+                    Ok(create_status_event(EngineStatus::ready())),
+                ]
+            }
         };
 
-        Ok(event)
+        stream::iter(events)
     });
+
+    // Combine: Thinking status first, then main event stream
+    let sse_stream = thinking_event.chain(main_stream);
 
     // Configure SSE with keep-alive to detect disconnected clients
     // and prevent reverse proxies from timing out idle connections

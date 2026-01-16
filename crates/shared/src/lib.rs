@@ -6,8 +6,10 @@
 
 pub mod events;
 pub mod models;
+pub mod status;
 
 pub use events::{AgentEvent, Interrupt, MessageEvent};
 pub use models::{
     LLMQueryResult, MAX_THREAD_ID_LENGTH, Message, MessageRole, RunInput, ThreadId, ThreadIdError,
 };
+pub use status::EngineStatus;

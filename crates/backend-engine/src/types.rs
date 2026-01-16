@@ -47,6 +47,13 @@ pub enum ResumeResponse {
     Rejected,
     /// User provided an answer to a question
     Answer { text: String },
+    /// Command was executed in the terminal PTY, output captured
+    CommandOutput {
+        /// The command that was executed
+        command: String,
+        /// The captured output from PTY
+        output: String,
+    },
 }
 
 impl ResumeResponse {
@@ -60,6 +67,13 @@ impl ResumeResponse {
 
     pub fn answer(text: impl Into<String>) -> Self {
         Self::Answer { text: text.into() }
+    }
+
+    pub fn command_output(command: impl Into<String>, output: impl Into<String>) -> Self {
+        Self::CommandOutput {
+            command: command.into(),
+            output: output.into(),
+        }
     }
 }
 

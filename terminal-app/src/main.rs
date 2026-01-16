@@ -28,8 +28,16 @@ fn main() -> eframe::Result<()> {
     // Load secrets from .env.secrets file (if present)
     dotenvy::from_filename(".env.secrets").ok();
 
-    // Initialize logging
-    env_logger::init();
+    // Initialize logging with sensible defaults
+    // Priority: RUST_LOG > LOG_LEVEL > default (info)
+    env_logger::Builder::from_env(
+        env_logger::Env::new()
+            .filter_or("RUST_LOG",
+                std::env::var("LOG_LEVEL")
+                    .map(|l| format!("infraware_terminal={}", l))
+                    .unwrap_or_else(|_| "infraware_terminal=info".to_string())
+            )
+    ).init();
 
     // Set up Ctrl+C handler - intercepts SIGINT and sets flag
     // This works even when egui doesn't receive the key event
