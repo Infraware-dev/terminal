@@ -170,7 +170,7 @@ pub fn create_run_stream(
 
         // Create the agent with native tools
         let agent = create_agent(&client, &config);
-        let mut chat_history = to_chat_history(&history);
+        let chat_history = to_chat_history(&history);
 
         tracing::info!(
             thread_id = %thread_id,
@@ -600,6 +600,13 @@ pub fn create_resume_stream(
                             Message::user(format!("Approved command: {}", command)),
                             Message::assistant(&response_text),
                         ]).await;
+
+                        // If needs_continuation is false, command output is the final answer
+                        if !needs_continuation {
+                            tracing::debug!(run_id = %run_id, "Command output is final answer (needs_continuation=false), ending");
+                            yield Ok(AgentEvent::end());
+                            return;
+                        }
 
                         // Continue the LLM reasoning with the command output
                         let continuation = format!(
