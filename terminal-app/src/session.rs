@@ -252,10 +252,12 @@ impl TerminalSession {
             is_large_change
         );
 
-        // Update column X coordinates
-        self.column_x_coords = (0..cols)
-            .map(|c| c as f32 * rendering::CHAR_WIDTH)
-            .collect();
+        // Update column X coordinates - resize in place to reuse allocation
+        let new_len = cols as usize;
+        self.column_x_coords.resize(new_len, 0.0);
+        for (i, x) in self.column_x_coords.iter_mut().enumerate() {
+            *x = i as f32 * rendering::CHAR_WIDTH;
+        }
 
         // Resize terminal handler (immediate, sync)
         self.terminal_handler.resize(rows, cols);
