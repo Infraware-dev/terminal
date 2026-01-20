@@ -77,9 +77,9 @@ impl From<EngineStatus> for AppMode {
             EngineStatus::Ready => Self::Normal,
             EngineStatus::Thinking => Self::WaitingLLM,
             EngineStatus::Interrupted(interrupt) => match interrupt {
-                Interrupt::CommandApproval { command, message, .. } => {
-                    Self::AwaitingApproval { command, message }
-                }
+                Interrupt::CommandApproval {
+                    command, message, ..
+                } => Self::AwaitingApproval { command, message },
                 Interrupt::Question { question, options } => {
                     Self::AwaitingAnswer { question, options }
                 }

@@ -458,10 +458,7 @@ impl HttpLLMClient {
         if result.is_empty() {
             log::warn!("SSE stream returned EMPTY result - no AI content extracted");
         } else {
-            log::debug!(
-                "Final result preview: {}...",
-                truncate_utf8(&result, 200)
-            );
+            log::debug!("Final result preview: {}...", truncate_utf8(&result, 200));
         }
 
         // Return interrupt if detected, otherwise complete
@@ -632,7 +629,7 @@ impl HttpLLMClient {
         let Ok(values) = serde_json::from_str::<serde_json::Value>(data) else {
             log::warn!(
                 "Failed to parse 'values' event JSON: {}",
-                truncate_utf8(&data, 200)
+                truncate_utf8(data, 200)
             );
             return;
         };
@@ -1060,7 +1057,7 @@ impl LLMClientTrait for MockLLMClient {
             "Mock received command output.\nCommand: {}\nOutput ({} chars): {}...",
             command,
             output.len(),
-            truncate_utf8(&output, 100)
+            truncate_utf8(output, 100)
         )))
     }
 
