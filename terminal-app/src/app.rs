@@ -347,6 +347,21 @@ impl InfrawareApp {
                 log::info!("All sessions closed, quitting application");
                 self.should_quit = true;
             }
+
+            // IMPORTANT: Reset last_resize for remaining sessions to bypass debounce.
+            // When a pane is closed, the layout changes and remaining panes need to
+            // resize immediately to fill the new available space. Without this reset,
+            // the debounce (100ms) could block the resize, causing rendering artifacts
+            // (black squares, uncovered background).
+            let reset_time = Instant::now() - std::time::Duration::from_secs(1);
+            for session in self.sessions.values_mut() {
+                session.last_resize = reset_time;
+                session.needs_repaint = true;
+            }
+            log::debug!(
+                "Reset resize debounce for {} remaining sessions",
+                self.sessions.len()
+            );
         }
     }
 
@@ -446,6 +461,7 @@ impl InfrawareApp {
         }
 
         // Close sessions that exited
+        let sessions_closed = !sessions_to_close.is_empty();
         for session_id in sessions_to_close {
             self.close_session(session_id);
             // Note: egui_tiles pane removal is handled through the Behavior trait
@@ -461,7 +477,8 @@ impl InfrawareApp {
             self.resume_with_command_output(cmd, output);
         }
 
-        any_output
+        // Return true if there was output OR sessions were closed (forces immediate repaint)
+        any_output || sessions_closed
     }
 
     /// Send data to the active session's PTY.
@@ -1279,15 +1296,15 @@ impl InfrawareApp {
         // IMPORTANT: smooth_scroll_delta is global, so we must check hovered() first
         if response.hovered() {
             let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll_delta != 0.0 {
-                if let Some(session) = self.sessions.get_mut(&session_id) {
-                    let lines = (scroll_delta / self.char_height).round() as i32;
-                    let grid = session.terminal_handler.grid_mut();
-                    if lines > 0 {
-                        grid.scroll_view_up(lines as usize);
-                    } else if lines < 0 {
-                        grid.scroll_view_down((-lines) as usize);
-                    }
+            if scroll_delta != 0.0
+                && let Some(session) = self.sessions.get_mut(&session_id)
+            {
+                let lines = (scroll_delta / self.char_height).round() as i32;
+                let grid = session.terminal_handler.grid_mut();
+                if lines > 0 {
+                    grid.scroll_view_up(lines as usize);
+                } else if lines < 0 {
+                    grid.scroll_view_down((-lines) as usize);
                 }
             }
         }
