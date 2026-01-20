@@ -103,8 +103,8 @@ static NAMED_COLOR_TABLE: [Color32; 18] = [
     Color32::from_rgb(173, 127, 168), // BrightMagenta
     Color32::from_rgb(52, 226, 226),  // BrightCyan
     Color32::from_rgb(238, 238, 236), // BrightWhite
-    Color32::from_rgb(211, 215, 207), // Foreground
-    Color32::from_rgb(0, 0, 0),       // Background
+    Color32::from_rgb(204, 204, 204), // Foreground (#cccccc)
+    Color32::from_rgb(45, 45, 45),    // Background (#2d2d2d)
 ];
 
 impl NamedColor {

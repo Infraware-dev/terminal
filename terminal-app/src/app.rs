@@ -1248,9 +1248,17 @@ impl InfrawareApp {
         let cursor_visible = grid.cursor_visible();
         let cols = grid.size().1 as usize;
 
-        // === PHASE 2: UI Setup ===
         let available = ui.available_size();
         let size = Vec2::new(available.x, available.y);
+
+        // Check for layout desync: if the grid is smaller than the available space,
+        // we might need a reactive repaint to let the resize logic catch up.
+        let expected_cols = (available.x / self.char_width).floor() as u16;
+        let (_, current_cols) = session.terminal_handler.grid().size();
+        if current_cols < expected_cols.saturating_sub(1) {
+            ui.ctx().request_repaint();
+        }
+
         let (response, painter) = ui.allocate_painter(size, Sense::click().union(Sense::drag()));
         let rect = response.rect;
         let scrollbar_area = self.scrollbar.area(rect);
@@ -1663,22 +1671,39 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
     ) -> UiResponse {
         let session_id = *pane;
 
-        // Calculate terminal size based on pane size
-        let available = ui.available_size();
-        let cols = ((available.x / self.app.char_width) as u16).max(20);
-        let rows = ((available.y / self.app.char_height) as u16).max(5);
+        // Use a Frame with outer_margin to create the visible gap (split separator)
+        // The gap reveals the CentralPanel background (Theme::split_separator/White)
+        egui::Frame::NONE
+            .outer_margin(2.0) // 2px margin per side = 4px total gap between panes
+            .show(ui, |ui| {
+                // Calculate terminal size based on pane size (minus margin)
+                let available = ui.available_size();
+                let cols = ((available.x / self.app.char_width) as u16).max(20);
+                let rows = ((available.y / self.app.char_height) as u16).max(5);
 
-        // Check if resize is needed (triggers repaint if size changed)
-        let size_changed = self.app.resize_session_pty(session_id, cols, rows);
-        if size_changed {
-            // Force repaint when size changes to ensure layout updates immediately
-            ui.ctx().request_repaint();
-        }
+                // Check if resize is needed (triggers repaint if size changed)
+                let size_changed = self.app.resize_session_pty(session_id, cols, rows);
+                if size_changed {
+                    // Force repaint when size changes to ensure layout updates immediately
+                    ui.ctx().request_repaint();
+                }
 
-        // Render the terminal for this session
-        self.app.render_terminal(ui, session_id, self.has_focus);
+                // Render the terminal for this session
+                self.app.render_terminal(ui, session_id, self.has_focus);
+            });
 
         UiResponse::None
+    }
+
+    fn gap_width(&self, _style: &egui::Style) -> f32 {
+        4.0 // Spessore aumentato per facilitare il drag
+    }
+
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        egui_tiles::SimplificationOptions {
+            all_panes_must_have_tabs: false,
+            ..Default::default()
+        }
     }
 }
 
@@ -1770,7 +1795,7 @@ impl eframe::App for InfrawareApp {
 
         // Render UI using egui_tiles for split view support
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(self.theme.background))
+            .frame(egui::Frame::NONE.fill(self.theme.split_separator))
             .show(ctx, |ui| {
                 // Take the tree temporarily to avoid borrow conflicts
                 if let Some(mut tree) = self.tiles.take() {

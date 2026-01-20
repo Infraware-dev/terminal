@@ -204,23 +204,23 @@ impl TerminalSession {
     /// Resize PTY to match pane size.
     /// Returns true if the resize was performed, false if debounced or no change needed.
     pub fn resize_pty(&mut self, cols: u16, rows: u16, runtime_handle: &Handle) -> bool {
-        // Check if size changed
-        if self.terminal_size == (cols, rows) {
+        let (grid_rows, grid_cols) = self.terminal_handler.grid().size();
+
+        // Check if size actually changed compared to the internal Grid
+        if grid_cols == cols && grid_rows == rows {
             return false;
         }
 
-        // Calculate size delta to detect significant changes
-        let delta_rows = (rows as i32 - self.terminal_size.1 as i32).abs();
-        let delta_cols = (cols as i32 - self.terminal_size.0 as i32).abs();
+        // Calculate size delta from the current Grid size (the ultimate truth)
+        let delta_rows = (rows as i32 - grid_rows as i32).abs();
+        let delta_cols = (cols as i32 - grid_cols as i32).abs();
 
         // Bypass debounce if change is significant (e.g., pane closed/snapped).
-        // This ensures immediate resize when layout changes dramatically (closing split panes),
-        // while still debouncing small incremental changes (drag resize).
-        let is_large_change = delta_rows > 2 || delta_cols > 5;
+        // Any change > 1 is considered a layout shift that needs immediate attention.
+        let is_large_change = delta_rows > 1 || delta_cols > 1;
 
-        // Per-session debounce to avoid excessive resize operations
-        // but allow the first resize immediately (last_resize starts in the past)
-        // and bypass for large layout changes
+        // Per-session debounce to avoid excessive resize operations during smooth dragging.
+        // We bypass it for the first resize (last_resize in past) or for significant shifts.
         if !is_large_change && self.last_resize.elapsed() < crate::config::timing::RESIZE_DEBOUNCE {
             return false;
         }
@@ -229,10 +229,15 @@ impl TerminalSession {
         self.terminal_size = (cols, rows);
 
         log::debug!(
-            "Session {}: Resizing terminal to {}x{}",
+            "Session {}: Resizing Grid from {}x{} to {}x{} (delta: {}x{}, bypass: {})",
             self.id,
+            grid_cols,
+            grid_rows,
             cols,
-            rows
+            rows,
+            delta_cols,
+            delta_rows,
+            is_large_change
         );
 
         // Update column X coordinates

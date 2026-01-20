@@ -26,6 +26,8 @@ pub struct Theme {
     pub titlebar_bg: Color32,
     /// Title bar text
     pub titlebar_text: Color32,
+    /// Split separator color
+    pub split_separator: Color32,
 }
 
 impl Default for Theme {
@@ -48,6 +50,7 @@ impl Theme {
             error: Color32::from_rgb(224, 108, 117),         // #e06c75 (red)
             titlebar_bg: Color32::from_rgb(37, 37, 38),      // #252526
             titlebar_text: Color32::from_rgb(204, 204, 204), // #cccccc
+            split_separator: Color32::WHITE,                 // White separator for high visibility
         }
     }
 
