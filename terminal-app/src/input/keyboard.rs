@@ -15,6 +15,10 @@ pub enum KeyboardAction {
     Copy,
     /// Paste from clipboard (Cmd+V on macOS, Ctrl+Shift+V on Linux)
     Paste,
+    /// Split pane horizontally (Ctrl+Shift+H or Cmd+Shift+H)
+    SplitHorizontal,
+    /// Split pane vertically (Ctrl+Shift+V or Cmd+Shift+V)
+    SplitVertical,
 }
 
 /// Keyboard handler that processes egui input and returns terminal actions.
@@ -37,7 +41,14 @@ impl KeyboardHandler {
     pub fn process(&mut self, ctx: &egui::Context) -> Vec<KeyboardAction> {
         self.actions.clear();
 
-        // Process clipboard shortcuts FIRST (Cmd+C/V on macOS, Ctrl+Shift+C/V on Linux)
+        // Process split pane shortcuts FIRST (Ctrl+Shift+H/J or Cmd+Shift+H/J)
+        let split_action = Self::process_split_keys(ctx);
+        if let Some(action) = split_action {
+            self.actions.push(action);
+            return std::mem::take(&mut self.actions);
+        }
+
+        // Process clipboard shortcuts (Cmd+C/V on macOS, Ctrl+Shift+C/V on Linux)
         // These take priority over Ctrl+C (SIGINT)
         let clipboard_action = Self::process_clipboard_keys(ctx);
         if let Some(action) = clipboard_action {
@@ -110,6 +121,40 @@ impl KeyboardHandler {
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::C) {
                     log::info!("Ctrl+Shift+C detected (copy fallback)");
                     return Some(KeyboardAction::Copy);
+                }
+            }
+
+            None
+        })
+    }
+
+    /// Process split pane shortcuts.
+    ///
+    /// - Ctrl+Shift+H (or Cmd+Shift+H on macOS): Split horizontally
+    /// - Ctrl+Shift+J (or Cmd+Shift+J on macOS): Split vertically
+    fn process_split_keys(ctx: &egui::Context) -> Option<KeyboardAction> {
+        ctx.input(|i| {
+            #[cfg(target_os = "macos")]
+            {
+                if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::H) {
+                    log::info!("Cmd+Shift+H detected (split horizontal)");
+                    return Some(KeyboardAction::SplitHorizontal);
+                }
+                if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::J) {
+                    log::info!("Cmd+Shift+J detected (split vertical)");
+                    return Some(KeyboardAction::SplitVertical);
+                }
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::H) {
+                    log::info!("Ctrl+Shift+H detected (split horizontal)");
+                    return Some(KeyboardAction::SplitHorizontal);
+                }
+                if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::J) {
+                    log::info!("Ctrl+Shift+J detected (split vertical)");
+                    return Some(KeyboardAction::SplitVertical);
                 }
             }
 

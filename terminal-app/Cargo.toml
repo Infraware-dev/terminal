@@ -14,15 +14,17 @@ infraware-shared = { workspace = true }
 # GUI
 egui = "0.33.3"
 eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "x11"] }
+egui_tiles = "0.14.1"
 
 # PTY
 portable-pty = "0.9.0"
+uuid = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
 
 # LLM client
-reqwest = { version = "0.13.1", features = ["json", "stream"] }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -41,14 +43,14 @@ which = "8.0"
 hostname = "0.4"
 vte = "0.15"
 ctrlc = "3.4"
-regex = "1.11"
+regex = "1.12"
 once_cell = "1.20"
 
 # Clipboard (direct OS access, bypasses egui's delayed sync)
 arboard = "3.4"
 async-trait = { workspace = true }
 futures = { workspace = true }
-tokio-util = "0.7.17"
+tokio-util = "0.7.18"
 syntect = { version = "5.3.0", features = ["default-fancy"] }
 
 [target.'cfg(unix)'.dependencies]

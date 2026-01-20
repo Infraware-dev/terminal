@@ -51,6 +51,7 @@ impl Default for OutputCapture {
     }
 }
 
+#[allow(dead_code)] // Command execution workflow methods - used by HITL orchestrator
 impl OutputCapture {
     /// Create a new output capture instance.
     #[must_use]
@@ -103,9 +104,14 @@ impl OutputCapture {
 
     /// Check if capture is currently active.
     #[must_use]
-    #[allow(dead_code)]
     pub fn is_capturing(&self) -> bool {
         self.capturing
+    }
+
+    /// Check if there is any captured output.
+    #[must_use]
+    pub fn has_output(&self) -> bool {
+        !self.buffer.is_empty()
     }
 
     /// Get the command being executed.

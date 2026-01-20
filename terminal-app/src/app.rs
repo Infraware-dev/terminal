@@ -1,30 +1,34 @@
 //! Main application struct implementing eframe::App with full terminal emulation.
+//!
+//! Supports split view via egui_tiles for multiple terminal panes.
 
 use crate::auth::{AuthConfig, Authenticator, HttpAuthenticator};
-use crate::config::{pty as pty_config, rendering, size, timing};
+use crate::config::{rendering, timing};
 use crate::input::{
-    InputClassifier, InputType, KeyboardAction, KeyboardHandler, OutputCapture, PromptDetector,
-    TextSelection, ValidationResult, validate_command,
+    InputClassifier, InputType, KeyboardAction, KeyboardHandler, TextSelection, ValidationResult,
+    validate_command,
 };
 use crate::llm::{HttpLLMClient, LLMClientTrait, LLMQueryResult};
 use crate::orchestrators::NaturalLanguageOrchestrator;
-use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
-use crate::state::{AgentState, AppMode};
-use crate::terminal::{Color, TerminalHandler};
+use crate::session::{SessionId, TerminalSession};
+use crate::state::AppMode;
+use crate::terminal::Color;
 use crate::ui::scrollbar::{ScrollAction, Scrollbar};
 use crate::ui::{
     SPINNER_FRAMES, Theme, render_backgrounds, render_cursor, render_decorations, render_scrollbar,
-    render_text_runs,
+    render_text_runs_buffered,
 };
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Vec2, ViewportCommand};
+use egui_tiles::{Tiles, Tree, UiResponse};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex as TokioMutex;
 
 /// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
 /// ensuring the result ends at a valid char boundary.
+#[allow(dead_code)] // Used for debugging output capture
 fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -47,33 +51,18 @@ pub enum AppBackgroundEvent {
 
 /// Main terminal application with VTE-based terminal emulation.
 pub struct InfrawareApp {
-    /// Current application mode
-    mode: AppMode,
+    // === Sessions (Split View Support) ===
+    /// All terminal sessions, keyed by session ID (which is also the pane ID in egui_tiles)
+    sessions: HashMap<SessionId, TerminalSession>,
+
+    /// Currently focused session ID
+    active_session_id: SessionId,
+
+    /// Next session ID to assign (monotonically increasing)
+    next_session_id: SessionId,
 
     /// Theme configuration
     theme: Theme,
-
-    /// VTE parser for escape sequences
-    vte_parser: vte::Parser,
-
-    /// Terminal handler with grid state
-    terminal_handler: TerminalHandler,
-
-    /// PTY writer for sending input
-    pty_writer: Option<Arc<PtyWriter>>,
-
-    /// PTY output receiver channel
-    pty_output_rx: Option<mpsc::Receiver<Vec<u8>>>,
-
-    /// PTY reader (must be kept alive to keep reader thread running)
-    #[expect(dead_code, reason = "Held to keep reader thread alive via Drop")]
-    pty_reader: Option<PtyReader>,
-
-    /// PTY manager for resize
-    pty_manager: Option<Arc<TokioMutex<PtyManager>>>,
-
-    /// Current terminal size (cols, rows)
-    terminal_size: (u16, u16),
 
     /// Flag to quit application
     should_quit: bool,
@@ -88,12 +77,6 @@ pub struct InfrawareApp {
     char_width: f32,
     char_height: f32,
 
-    /// Last resize time for debouncing
-    last_resize: Instant,
-
-    /// Shell initialization done
-    shell_initialized: bool,
-
     /// Startup time for delayed init
     startup_time: Instant,
 
@@ -103,17 +86,11 @@ pub struct InfrawareApp {
     /// Last cursor blink toggle time
     last_cursor_blink: Instant,
 
-    /// When set, pause output reading to let kernel process Ctrl+C
-    output_pause_until: Option<Instant>,
-
     /// Track window focus state to detect focus gain
     had_window_focus: bool,
 
     /// Cached font for rendering (avoids per-frame allocation)
     font_id: FontId,
-
-    /// Pre-calculated X coordinates for each column (avoids per-cell multiplication)
-    column_x_coords: Vec<f32>,
 
     /// Keyboard input handler (extracted for testability)
     keyboard_handler: KeyboardHandler,
@@ -140,8 +117,11 @@ pub struct InfrawareApp {
     // === PERFORMANCE: Reusable render buffers (avoid per-frame allocations) ===
     /// Background rectangles buffer (reused each frame with .clear())
     render_bg_rects: Vec<(f32, f32, egui::Color32)>,
-    /// Text runs buffer (reused each frame with .clear())
-    render_text_runs: Vec<(f32, String, egui::Color32)>,
+    /// Text runs buffer - stores (x_offset, end_index_in_text_buffer, color)
+    /// The actual text is in render_text_buffer
+    render_text_runs: Vec<(f32, usize, egui::Color32)>,
+    /// Single text buffer for all runs in a row (avoids per-run String allocation)
+    render_text_buffer: String,
     /// Decorations buffer (reused each frame with .clear())
     render_decorations: Vec<(f32, bool, bool, egui::Color32)>,
 
@@ -153,33 +133,26 @@ pub struct InfrawareApp {
     /// Clipboard instance for immediate copy operations (bypasses egui's delayed sync)
     clipboard: Option<arboard::Clipboard>,
 
-    /// Scrollbar logic and state
+    /// Scrollbar logic and state (shared across sessions)
     scrollbar: Scrollbar,
 
     /// Authentication status message (shown at startup)
     auth_status_message: Option<String>,
 
-    /// Agent state for tracking LLM stream activity independently of AppMode.
-    /// Allows showing throbber during background processing while user interacts with shell.
-    agent_state: AgentState,
+    // === Split View (egui_tiles) ===
+    /// Tile tree for split view layout (pane ID is session ID)
+    /// Wrapped in Option to allow temporary removal for borrow-checker compatibility
+    tiles: Option<Tree<SessionId>>,
 
-    /// Interactive prompt detector for PTY output (sudo, ssh, etc.)
-    /// Used to hide throbber when shell is waiting for user input.
-    prompt_detector: PromptDetector,
-
-    /// Timestamp of last PTY activity (used to suppress throbber during command execution)
-    last_pty_activity: Instant,
-
-    /// Output capture for commands executed in PTY.
-    /// Captures output to send to backend for LLM continuation.
-    output_capture: OutputCapture,
+    /// Mapping from SessionId to TileId for pane removal
+    session_tile_ids: HashMap<SessionId, egui_tiles::TileId>,
 }
 
 impl std::fmt::Debug for InfrawareApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InfrawareApp")
-            .field("mode", &self.mode)
-            .field("terminal_size", &self.terminal_size)
+            .field("sessions", &self.sessions.len())
+            .field("active_session_id", &self.active_session_id)
             .finish()
     }
 }
@@ -190,35 +163,12 @@ impl InfrawareApp {
         let runtime = Runtime::new().expect("Failed to create tokio runtime");
         let theme = Theme::dark();
 
-        // Default terminal size from config
-        let (rows, cols) = (size::DEFAULT_ROWS, size::DEFAULT_COLS);
+        // Create initial session
+        let initial_session_id: SessionId = 0;
+        let initial_session = TerminalSession::new(initial_session_id, runtime.handle());
 
-        // Initialize PTY with consolidated channel (FASE 2 optimization)
-        // Single sync_channel instead of double channel eliminates async overhead
-        let (pty_writer, pty_output_rx, pty_reader, pty_manager) = runtime.block_on(async {
-            match PtyManager::new().await {
-                Ok(mut manager) => {
-                    log::info!("PTY initialized with shell: {}", manager.shell());
-
-                    // Create sync_channel with limited capacity for BACKPRESSURE
-                    // When channel is full, reader thread blocks -> kernel buffer fills ->
-                    // cat blocks on write() -> kernel can process Ctrl+C
-                    let (tx, rx) = mpsc::sync_channel(pty_config::CHANNEL_CAPACITY);
-
-                    let writer = manager.take_writer().await.ok();
-                    // PERFORMANCE: Reader sends directly to sync_channel (no bridge thread)
-                    // IMPORTANT: Reader must be kept alive to keep reader thread running
-                    let reader = manager.take_reader(tx).await.ok();
-
-                    let manager = Arc::new(TokioMutex::new(manager));
-                    (writer, Some(rx), reader, Some(manager))
-                }
-                Err(e) => {
-                    log::error!("Failed to initialize PTY: {}", e);
-                    (None, None, None, None)
-                }
-            }
-        });
+        let mut sessions = HashMap::new();
+        sessions.insert(initial_session_id, initial_session);
 
         // Initialize clipboard (arboard) once - keeping it alive avoids macOS issues
         let clipboard = arboard::Clipboard::new()
@@ -291,32 +241,31 @@ impl InfrawareApp {
 
         let orchestrator = Arc::new(NaturalLanguageOrchestrator::new(llm_client));
 
+        // Create tiles and track the initial pane's tile ID
+        let mut tiles = Tiles::default();
+        let initial_tile_id = tiles.insert_pane(initial_session_id);
+        let tree = Tree::new("terminal_tiles", initial_tile_id, tiles);
+
+        // Initialize session to TileId mapping
+        let mut session_tile_ids = HashMap::new();
+        session_tile_ids.insert(initial_session_id, initial_tile_id);
+
         Self {
-            mode: AppMode::Normal,
+            // Sessions
+            sessions,
+            active_session_id: initial_session_id,
+            next_session_id: 1, // Next ID after 0
             theme,
-            vte_parser: vte::Parser::new(),
-            terminal_handler: TerminalHandler::new(rows, cols),
-            pty_writer,
-            pty_output_rx,
-            pty_reader,
-            pty_manager,
-            terminal_size: (cols, rows),
             should_quit: false,
             runtime,
             theme_applied: false,
             char_width: rendering::CHAR_WIDTH,
             char_height: rendering::CHAR_HEIGHT,
-            last_resize: Instant::now(),
-            shell_initialized: false,
             startup_time: Instant::now(),
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
-            output_pause_until: None,
             had_window_focus: false,
             font_id: FontId::new(rendering::FONT_SIZE, FontFamily::Monospace),
-            column_x_coords: (0..cols)
-                .map(|c| c as f32 * rendering::CHAR_WIDTH)
-                .collect(),
             keyboard_handler: KeyboardHandler::new(),
             input_classifier: InputClassifier::new(),
             current_input_buffer: String::new(),
@@ -329,6 +278,7 @@ impl InfrawareApp {
             // Pre-allocate render buffers (reused each frame to avoid allocations)
             render_bg_rects: Vec::with_capacity(32),
             render_text_runs: Vec::with_capacity(32),
+            render_text_buffer: String::with_capacity(256),
             render_decorations: Vec::with_capacity(8),
             // Text selection (initialized on first drag)
             selection: None,
@@ -338,29 +288,81 @@ impl InfrawareApp {
             scrollbar: Scrollbar::new(),
             // Authentication status
             auth_status_message,
-            // Agent state for LLM stream tracking
-            agent_state: AgentState::new(),
-            // Interactive prompt detector
-            prompt_detector: PromptDetector::new(),
-            // Last PTY activity timestamp (start in past to not suppress initial throbber)
-            last_pty_activity: Instant::now() - std::time::Duration::from_secs(10),
-            // Output capture for PTY command execution
-            output_capture: OutputCapture::new(),
+            // Split view tiles
+            tiles: Some(tree),
+            // Session to TileId mapping (for pane removal)
+            session_tile_ids,
         }
     }
 
-    /// Initialize shell with custom prompt after startup.
-    fn initialize_shell(&mut self) {
-        if self.shell_initialized {
+    /// Get the active session (immutable).
+    fn active_session(&self) -> Option<&TerminalSession> {
+        self.sessions.get(&self.active_session_id)
+    }
+
+    /// Get the active session (mutable).
+    fn active_session_mut(&mut self) -> Option<&mut TerminalSession> {
+        self.sessions.get_mut(&self.active_session_id)
+    }
+
+    /// Create a new terminal session and return its ID.
+    fn create_session(&mut self) -> SessionId {
+        let id = self.next_session_id;
+        self.next_session_id += 1;
+
+        let session = TerminalSession::new(id, self.runtime.handle());
+        self.sessions.insert(id, session);
+
+        log::info!("Created new session {}", id);
+        id
+    }
+
+    /// Close a session by ID.
+    fn close_session(&mut self, session_id: SessionId) {
+        if self.sessions.remove(&session_id).is_some() {
+            log::info!("Closed session {}", session_id);
+
+            // Remove the pane from egui_tiles
+            if let Some(tile_id) = self.session_tile_ids.remove(&session_id)
+                && let Some(ref mut tree) = self.tiles
+            {
+                tree.tiles.remove(tile_id);
+                log::debug!("Removed tile {:?} for session {}", tile_id, session_id);
+            }
+
+            // If we closed the active session, switch to another one
+            if self.active_session_id == session_id
+                && let Some(&new_id) = self.sessions.keys().next()
+            {
+                self.active_session_id = new_id;
+                log::info!("Switched to session {}", new_id);
+            }
+
+            // If no sessions left, quit
+            if self.sessions.is_empty() {
+                log::info!("All sessions closed, quitting application");
+                self.should_quit = true;
+            }
+        }
+    }
+
+    /// Initialize shell with custom prompt for a session.
+    fn initialize_shell(&mut self, session_id: SessionId) {
+        let session = match self.sessions.get_mut(&session_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        if session.shell_initialized {
             return;
         }
 
         // Wait for shell to fully initialize
-        if self.startup_time.elapsed() < timing::SHELL_INIT_DELAY {
+        if session.startup_time.elapsed() < timing::SHELL_INIT_DELAY {
             return;
         }
 
-        self.shell_initialized = true;
+        session.shell_initialized = true;
 
         // Set custom prompt with |~| prefix (green)
         // Also inject command_not_found hooks to trigger LLM on error
@@ -374,133 +376,115 @@ impl InfrawareApp {
              clear\n"
         };
 
-        self.send_to_pty(init_commands.as_bytes());
+        session.send_to_pty(init_commands.as_bytes());
 
-        // Print welcome message with auth status
-        if let Some(ref status_msg) = self.auth_status_message {
+        // Print welcome message with auth status (only for first session)
+        if session_id == 0
+            && let Some(ref status_msg) = self.auth_status_message
+        {
             let msg = format!("\r\nInfraware Terminal Ready - {}\r\n", status_msg);
-            self.vte_parser
-                .advance(&mut self.terminal_handler, msg.as_bytes());
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, msg.as_bytes());
         }
 
-        log::info!("Shell initialized with custom prompt");
+        log::info!(
+            "Session {}: Shell initialized with custom prompt",
+            session_id
+        );
     }
 
-    /// Poll PTY output and feed to VTE parser.
+    /// Poll PTY output for all sessions.
     /// Rate-limited to allow Ctrl+C to work even with heavy output (cat /dev/zero).
     /// Returns true if any output was processed (for smart repaint).
-    fn poll_pty_output(&mut self) -> bool {
-        // If paused (after Ctrl+C), skip reading to let kernel process input
-        if let Some(until) = self.output_pause_until {
-            if Instant::now() < until {
-                return false;
+    fn poll_all_sessions(&mut self) -> bool {
+        let mut any_output = false;
+        let mut sessions_to_close = Vec::new();
+        let mut completed_commands: Vec<(SessionId, String, String)> = Vec::new();
+
+        // Collect session IDs first to avoid borrow conflicts
+        let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+
+        for session_id in session_ids {
+            let session = match self.sessions.get_mut(&session_id) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // Poll this session's PTY output
+            // Returns (had_output, command_completed) tuple
+            let (had_output, command_completed) = session.poll_pty_output();
+            if had_output {
+                any_output = true;
             }
-            self.output_pause_until = None;
-        }
 
-        let mut bytes_processed = 0;
-        // Store command output to send after releasing the rx borrow
-        let mut completed_command: Option<(String, String)> = None;
+            // Check if session should be closed
+            if session.should_close {
+                sessions_to_close.push(session_id);
+                continue;
+            }
 
-        if let Some(ref rx) = self.pty_output_rx {
-            loop {
-                if bytes_processed >= rendering::MAX_BYTES_PER_FRAME {
-                    break;
-                }
-
-                match rx.try_recv() {
-                    Ok(bytes) => {
-                        bytes_processed += bytes.len();
-
-                        // Feed output to prompt detector for interactive prompt detection
-                        self.prompt_detector.process_output(&bytes);
-
-                        // Update last PTY activity timestamp (for throbber suppression)
-                        self.last_pty_activity = Instant::now();
-
-                        // VTE 0.15+ takes &[u8] slice instead of single byte
-                        self.vte_parser.advance(&mut self.terminal_handler, &bytes);
-                        // Auto-scroll to bottom when new output arrives
-                        self.terminal_handler.grid_mut().scroll_to_bottom();
-
-                        // If executing a command, capture output
-                        if let AppMode::ExecutingCommand { ref command } = self.mode {
-                            let text = String::from_utf8_lossy(&bytes);
-                            log::debug!(
-                                "ExecutingCommand: received {} bytes for '{}'",
-                                bytes.len(),
-                                command
-                            );
-                            let command_complete = self.output_capture.append(&text);
-
-                            if command_complete {
-                                log::info!(
-                                    "Command '{}' completed (prompt detected), sending output to backend",
-                                    command
-                                );
-                                let output = self.output_capture.take_output();
-                                log::debug!(
-                                    "Captured output ({} chars): {}...",
-                                    output.len(),
-                                    truncate_utf8(&output, 100)
-                                );
-                                let cmd = command.clone();
-
-                                // Store for later - will send after releasing borrow
-                                completed_command = Some((cmd, output));
-                                // Transition mode here (doesn't require mutable borrow of self)
-                                self.mode = AppMode::WaitingLLM;
-                                log::info!("Mode transition: ExecutingCommand -> WaitingLLM");
-                                break; // Exit loop - we'll send to backend after
-                            }
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        log::info!("Shell exited, quitting application");
-                        self.should_quit = true;
-                        break;
-                    }
-                }
+            // Handle command completion for HITL flow
+            // poll_pty_output() feeds output to OutputCapture and detects prompt
+            if command_completed && let AppMode::ExecutingCommand { ref command } = session.mode {
+                let cmd = command.clone();
+                let output = session.output_capture.take_output();
+                log::info!(
+                    "Session {}: Command '{}' completed, output length: {} chars",
+                    session_id,
+                    cmd,
+                    output.len()
+                );
+                completed_commands.push((session_id, cmd, output));
+                session.mode = AppMode::WaitingLLM;
             }
         }
 
-        // Now that rx borrow is released, we can call methods that borrow self mutably
-        if let Some((cmd, output)) = completed_command {
+        // Close sessions that exited
+        for session_id in sessions_to_close {
+            self.close_session(session_id);
+            // Note: egui_tiles pane removal is handled through the Behavior trait
+        }
+
+        // Resume LLM for completed commands
+        for (session_id, cmd, output) in completed_commands {
+            log::info!(
+                "Session {}: Sending command output to backend for '{}'",
+                session_id,
+                cmd
+            );
             self.resume_with_command_output(cmd, output);
         }
 
-        bytes_processed > 0
+        any_output
     }
 
-    /// Send data to PTY synchronously (ensures immediate delivery).
-    ///
-    /// Uses the `PtyWrite` trait for dependency injection support.
+    /// Send data to the active session's PTY.
     fn send_to_pty(&self, data: &[u8]) {
-        if let Some(ref writer) = self.pty_writer {
-            log::debug!("Writing {} bytes to PTY: {:?}", data.len(), data);
-            // Use trait method for DI compatibility
-            match writer.write_bytes(data) {
-                Ok(n) => log::debug!("Wrote {} bytes to PTY", n),
-                Err(e) => log::error!("Failed to write to PTY: {}", e),
-            }
+        if let Some(session) = self.active_session() {
+            session.send_to_pty(data);
         } else {
-            log::warn!("No PTY writer available!");
+            log::warn!("No active session!");
         }
     }
 
     /// Poll background events (LLM results, etc.)
     fn poll_background_events(&mut self) {
         while let Ok(event) = self.bg_event_rx.try_recv() {
+            let session = match self.active_session_mut() {
+                Some(s) => s,
+                None => continue,
+            };
+
             log::info!(
                 "Received background event: {:?}, current mode: {:?}",
                 event,
-                self.mode.name()
+                session.mode.name()
             );
             match event {
                 AppBackgroundEvent::LlmResult(result) => {
                     // Stream ended - we received a result
-                    self.agent_state.end_stream();
+                    session.agent_state.end_stream();
                     match result {
                         LLMQueryResult::Complete(text) => {
                             log::info!(
@@ -509,10 +493,9 @@ impl InfrawareApp {
                             );
 
                             // Set mode FIRST to stop throbber immediately
-                            self.mode = AppMode::Normal;
+                            session.mode = AppMode::Normal;
 
                             // If response is empty, just transition to Normal without any output
-                            // (e.g., after command execution where user already saw the output)
                             if text.is_empty() {
                                 log::debug!("Empty response, no output to render");
                                 continue;
@@ -522,31 +505,34 @@ impl InfrawareApp {
                             let lines = self.orchestrator.render_response(&text);
                             log::debug!("Rendered {} lines to display", lines.len());
 
+                            // Re-acquire mutable borrow after orchestrator call
+                            let session = self.active_session_mut().unwrap();
+
                             // Start with newline to avoid overwriting current prompt
-                            self.vte_parser
-                                .advance(&mut self.terminal_handler, b"\r\n");
+                            session
+                                .vte_parser
+                                .advance(&mut session.terminal_handler, b"\r\n");
 
                             let last_idx = lines.len().saturating_sub(1);
                             for (i, line) in lines.iter().enumerate() {
-                                self.vte_parser
-                                    .advance(&mut self.terminal_handler, line.as_bytes());
-                                // Add newline between lines, but not after the last one
-                                // (shell's echo of \n will provide that)
+                                session
+                                    .vte_parser
+                                    .advance(&mut session.terminal_handler, line.as_bytes());
                                 if i < last_idx {
-                                    self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                                    session
+                                        .vte_parser
+                                        .advance(&mut session.terminal_handler, b"\r\n");
                                 }
                             }
 
                             // Clear shell buffer and trigger fresh prompt
-                            if let Some(ref writer) = self.pty_writer {
-                                let _ = writer.write_bytes(b"\x15\n");
-                            }
+                            session.send_to_pty(b"\x15\n");
                         }
                         LLMQueryResult::CommandApproval { command, message } => {
                             log::info!("LLM requested command approval: {}", command);
 
                             // Set mode FIRST to stop throbber immediately
-                            self.mode = AppMode::AwaitingApproval {
+                            session.mode = AppMode::AwaitingApproval {
                                 command: command.clone(),
                                 message: message.clone(),
                             };
@@ -557,14 +543,15 @@ impl InfrawareApp {
                                 "\r\n\x1b[1;33m{}\x1b[0m\r\n\r\n\x1b[1;36mCommand:\x1b[0m \x1b[1m{}\x1b[0m\r\n\r\n\x1b[90mType 'y' to approve, 'n' to reject:\x1b[0m ",
                                 message_formatted, command
                             );
-                            self.vte_parser
-                                .advance(&mut self.terminal_handler, prompt.as_bytes());
+                            session
+                                .vte_parser
+                                .advance(&mut session.terminal_handler, prompt.as_bytes());
                         }
                         LLMQueryResult::Question { question, options } => {
                             log::info!("LLM asked a question: {}", question);
 
                             // Set mode FIRST to stop throbber immediately
-                            self.mode = AppMode::AwaitingAnswer {
+                            session.mode = AppMode::AwaitingAnswer {
                                 question: question.clone(),
                                 options: options.clone(),
                             };
@@ -590,25 +577,25 @@ impl InfrawareApp {
                             }
 
                             prompt.push_str("\r\n\x1b[90mType your answer:\x1b[0m ");
-                            self.vte_parser
-                                .advance(&mut self.terminal_handler, prompt.as_bytes());
+                            session
+                                .vte_parser
+                                .advance(&mut session.terminal_handler, prompt.as_bytes());
                         }
                     }
                 }
                 AppBackgroundEvent::LlmError(err) => {
                     // Stream ended - we received an error
-                    self.agent_state.end_stream();
+                    session.agent_state.end_stream();
                     log::error!("LLM query error: {}", err);
                     // No trailing newline - shell's echo of \n provides it
                     let error_msg = format!("\x1b[31mError: {}\x1b[0m", err);
-                    self.vte_parser
-                        .advance(&mut self.terminal_handler, error_msg.as_bytes());
-                    self.mode = AppMode::Normal;
+                    session
+                        .vte_parser
+                        .advance(&mut session.terminal_handler, error_msg.as_bytes());
+                    session.mode = AppMode::Normal;
 
                     // Clear shell buffer and trigger fresh prompt
-                    if let Some(ref writer) = self.pty_writer {
-                        let _ = writer.write_bytes(b"\x15\n");
-                    }
+                    session.send_to_pty(b"\x15\n");
                 }
             }
         }
@@ -617,9 +604,12 @@ impl InfrawareApp {
     /// Start an LLM query in a background task
     fn start_llm_query(&mut self, query: String) {
         log::info!("Starting LLM query: {}", query);
-        self.mode = AppMode::WaitingLLM;
-        // Start agent stream tracking (throbber will show when PTY is quiet)
-        self.agent_state.start_stream();
+
+        // Set mode on active session
+        if let Some(session) = self.active_session_mut() {
+            session.mode = AppMode::WaitingLLM;
+            session.agent_state.start_stream();
+        }
 
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
@@ -649,77 +639,61 @@ impl InfrawareApp {
         });
     }
 
-    /// Send SIGINT to the foreground process group (non-blocking).
-    /// This bypasses PTY buffers and directly signals the process.
+    /// Send SIGINT to the active session's foreground process group.
     fn send_sigint(&self) {
-        if let Some(ref manager) = self.pty_manager {
-            // Use try_lock to avoid blocking - if locked, skip this frame
-            if let Ok(mgr) = manager.try_lock() {
-                if let Err(e) = mgr.send_sigint() {
-                    log::error!("Failed to send SIGINT: {}", e);
-                }
-            } else {
-                log::warn!("Could not lock PTY manager for SIGINT, will retry next frame");
-            }
+        if let Some(session) = self.active_session() {
+            session.send_sigint();
         }
     }
 
-    /// Resize PTY to match window size.
-    fn resize_pty(&mut self, cols: u16, rows: u16) {
-        if self.terminal_size != (cols, rows)
-            && self.last_resize.elapsed() > timing::RESIZE_DEBOUNCE
-        {
-            self.terminal_size = (cols, rows);
-            self.last_resize = Instant::now();
-
-            // Pre-calculate column X coordinates (avoids per-cell multiplication in render loop)
-            self.column_x_coords = (0..cols).map(|c| c as f32 * self.char_width).collect();
-
-            // Resize terminal handler
-            self.terminal_handler.resize(rows, cols);
-
-            // Resize PTY
-            if let Some(ref manager) = self.pty_manager {
-                let manager = manager.clone();
-                self.runtime.spawn(async move {
-                    let mut mgr = manager.lock().await;
-                    if let Err(e) = mgr.resize(rows, cols).await {
-                        log::error!("Failed to resize PTY: {}", e);
-                    }
-                });
-            }
+    /// Resize a session's PTY to match pane size.
+    /// Resize a session's PTY to match the pane size.
+    /// Returns true if the resize was performed.
+    fn resize_session_pty(&mut self, session_id: SessionId, cols: u16, rows: u16) -> bool {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            // Per-session debounce is now handled inside session.resize_pty()
+            session.resize_pty(cols, rows, self.runtime.handle())
+        } else {
+            false
         }
     }
 
     /// Handle keyboard input using the extracted KeyboardHandler.
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
-        // Intercept input if in HITL mode (approval/answer prompts)
-        // ExecutingCommand should NOT intercept - user can still type while command runs
-        if matches!(
-            self.mode,
-            AppMode::AwaitingApproval { .. } | AppMode::AwaitingAnswer { .. }
-        ) {
+        // Check if active session is in HITL mode
+        let is_hitl = self.active_session().is_some_and(|s| {
+            matches!(
+                s.mode,
+                AppMode::AwaitingApproval { .. } | AppMode::AwaitingAnswer { .. }
+            )
+        });
+
+        if is_hitl {
             self.handle_hitl_keyboard(ctx);
             return;
         }
 
-        // Process keyboard input and get actions (returns owned Vec to avoid borrow issues)
+        // Process keyboard input and get actions
         let actions = self.keyboard_handler.process(ctx);
 
         // Log current mode if there's keyboard activity
-        if !actions.is_empty() {
+        if !actions.is_empty()
+            && let Some(session) = self.active_session()
+        {
             log::debug!(
                 "Keyboard actions: {} actions, mode: {:?}",
                 actions.len(),
-                self.mode.name()
+                session.mode.name()
             );
         }
 
         // Execute each action
         for action in actions {
-            // Clear prompt detection on any user input (user is responding to prompt)
-            if matches!(action, KeyboardAction::SendBytes(_)) {
-                self.prompt_detector.clear();
+            // Clear prompt detection on any user input
+            if matches!(action, KeyboardAction::SendBytes(_))
+                && let Some(session) = self.active_session_mut()
+            {
+                session.prompt_detector.clear();
             }
 
             match action {
@@ -734,17 +708,19 @@ impl InfrawareApp {
                                 InputType::NaturalLanguage(query) => {
                                     log::info!("Input classified as NaturalLanguage: {}", query);
                                     self.current_command_buffer.clear();
-                                    // Clear the shell's input buffer (Ctrl+U kills line in readline)
-                                    // This prevents the shell from executing the typed text
+                                    // Clear the shell's input buffer
                                     self.send_to_pty(b"\x15");
                                     // Visual feedback: move to next line
-                                    self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                                    if let Some(session) = self.active_session_mut() {
+                                        session
+                                            .vte_parser
+                                            .advance(&mut session.terminal_handler, b"\r\n");
+                                    }
                                     self.start_llm_query(query);
                                     handled = true;
                                     break;
                                 }
                                 InputType::Command(_) | InputType::Empty => {
-                                    // Send to shell (PTY) - will be handled below
                                     self.current_command_buffer.clear();
                                 }
                             }
@@ -763,24 +739,33 @@ impl InfrawareApp {
                     log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
                     self.send_to_pty(&[0x03]);
 
-                    // Cancel LLM stream if active (check via cancel token presence)
+                    // Cancel LLM stream if active
                     if let Some(token) = self.llm_cancel_token.take() {
                         log::info!("Cancelling active LLM stream");
                         token.cancel();
-                        self.agent_state.end_stream();
-                        self.mode = AppMode::Normal;
+                        if let Some(session) = self.active_session_mut() {
+                            session.agent_state.end_stream();
+                            session.mode = AppMode::Normal;
+                        }
                     }
 
-                    // Pause output reading briefly to let the kernel/shell process the signal
-                    // and to give immediate visual feedback (stop scrolling)
-                    self.output_pause_until =
-                        Some(Instant::now() + std::time::Duration::from_millis(200));
+                    // Pause output reading briefly
+                    if let Some(session) = self.active_session_mut() {
+                        session.output_pause_until =
+                            Some(Instant::now() + std::time::Duration::from_millis(200));
+                    }
                 }
                 KeyboardAction::Copy => {
                     self.copy_selection_to_clipboard(ctx);
                 }
                 KeyboardAction::Paste => {
                     self.perform_paste();
+                }
+                KeyboardAction::SplitHorizontal => {
+                    self.split_horizontal();
+                }
+                KeyboardAction::SplitVertical => {
+                    self.split_vertical();
                 }
             }
         }
@@ -792,8 +777,10 @@ impl InfrawareApp {
 
         for action in actions {
             // Clear prompt detection on any user input
-            if matches!(action, KeyboardAction::SendBytes(_)) {
-                self.prompt_detector.clear();
+            if matches!(action, KeyboardAction::SendBytes(_))
+                && let Some(session) = self.active_session_mut()
+            {
+                session.prompt_detector.clear();
             }
 
             match action {
@@ -802,21 +789,30 @@ impl InfrawareApp {
                     for c in text.chars() {
                         if c == '\r' || c == '\n' {
                             // Echo newline and submit
-                            self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                            if let Some(session) = self.active_session_mut() {
+                                session
+                                    .vte_parser
+                                    .advance(&mut session.terminal_handler, b"\r\n");
+                            }
                             self.submit_hitl_input();
                         } else if c == '\x7f' || c == '\x08' {
                             // Backspace: remove from buffer and erase character on screen
-                            if self.current_input_buffer.pop().is_some() {
-                                // Move cursor back, print space, move back again
-                                self.vte_parser
-                                    .advance(&mut self.terminal_handler, b"\x08 \x08");
+                            if self.current_input_buffer.pop().is_some()
+                                && let Some(session) = self.active_session_mut()
+                            {
+                                session
+                                    .vte_parser
+                                    .advance(&mut session.terminal_handler, b"\x08 \x08");
                             }
                         } else if !c.is_control() {
                             // Echo the character to terminal and add to buffer
                             self.current_input_buffer.push(c);
                             let char_bytes = c.to_string();
-                            self.vte_parser
-                                .advance(&mut self.terminal_handler, char_bytes.as_bytes());
+                            if let Some(session) = self.active_session_mut() {
+                                session
+                                    .vte_parser
+                                    .advance(&mut session.terminal_handler, char_bytes.as_bytes());
+                            }
                         }
                     }
                 }
@@ -824,11 +820,13 @@ impl InfrawareApp {
                     log::info!("Cancelling HITL interaction");
                     self.current_input_buffer.clear();
                     // Show cancellation message
-                    self.vte_parser.advance(
-                        &mut self.terminal_handler,
-                        b"\r\n\x1b[33m(cancelled)\x1b[0m\r\n",
-                    );
-                    self.mode = AppMode::Normal;
+                    if let Some(session) = self.active_session_mut() {
+                        session.vte_parser.advance(
+                            &mut session.terminal_handler,
+                            b"\r\n\x1b[33m(cancelled)\x1b[0m\r\n",
+                        );
+                        session.mode = AppMode::Normal;
+                    }
                 }
                 _ => {}
             }
@@ -838,18 +836,22 @@ impl InfrawareApp {
     /// Submit current input buffer for the active HITL interaction.
     fn submit_hitl_input(&mut self) {
         let input = std::mem::take(&mut self.current_input_buffer);
-        let mode = self.mode.clone();
+
+        // Get mode from active session
+        let mode = match self.active_session() {
+            Some(s) => s.mode.clone(),
+            None => return,
+        };
 
         match mode {
             AppMode::AwaitingApproval { command, .. } => {
                 let approved = crate::orchestrators::HitlOrchestrator::parse_approval(&input);
                 if approved {
-                    // SECURITY: Validate command before execution to prevent dangerous operations
+                    // SECURITY: Validate command before execution
                     let validation = validate_command(&command);
 
                     if validation.is_blocked() {
                         log::warn!("Blocked dangerous command: {}", command);
-                        // Show red warning for blocked commands
                         let warning = match &validation {
                             ValidationResult::Blocked { reason } => {
                                 format!(
@@ -860,13 +862,12 @@ impl InfrawareApp {
                             }
                             _ => unreachable!(),
                         };
-                        self.vte_parser
-                            .advance(&mut self.terminal_handler, warning.as_bytes());
-                        self.mode = AppMode::Normal;
-
-                        // Trigger fresh shell prompt
-                        if let Some(ref writer) = self.pty_writer {
-                            let _ = writer.write_bytes(b"\x15\n");
+                        if let Some(session) = self.active_session_mut() {
+                            session
+                                .vte_parser
+                                .advance(&mut session.terminal_handler, warning.as_bytes());
+                            session.mode = AppMode::Normal;
+                            session.send_to_pty(b"\x15\n");
                         }
                         return;
                     }
@@ -875,51 +876,46 @@ impl InfrawareApp {
                     if let ValidationResult::Warning { reason } = &validation {
                         log::info!("Warning for command {}: {}", command, reason);
                         let warning = format!("\x1b[33mWarning: {}\x1b[0m\r\n", reason);
-                        self.vte_parser
-                            .advance(&mut self.terminal_handler, warning.as_bytes());
+                        if let Some(session) = self.active_session_mut() {
+                            session
+                                .vte_parser
+                                .advance(&mut session.terminal_handler, warning.as_bytes());
+                        }
                     }
 
                     log::info!("User approved command: {}", command);
                     // Echo approval to terminal
                     let echo = format!("Approved: {}\r\n", command);
-                    self.vte_parser
-                        .advance(&mut self.terminal_handler, echo.as_bytes());
 
-                    // Execute command in PTY and capture output.
-                    // When command completes, output will be sent to backend.
-                    if let Some(ref writer) = self.pty_writer {
+                    if let Some(session) = self.active_session_mut() {
+                        session
+                            .vte_parser
+                            .advance(&mut session.terminal_handler, echo.as_bytes());
+
                         // Start capturing output before sending command
-                        self.output_capture.start(&command);
+                        session.output_capture.start(&command);
 
                         // Send command to PTY
                         let cmd_with_newline = format!("{}\n", command);
-                        if let Err(e) = writer.write_bytes(cmd_with_newline.as_bytes()) {
-                            log::error!("Failed to send command to PTY: {}", e);
-                            self.output_capture.stop();
-                            self.mode = AppMode::Normal;
-                            return;
-                        }
+                        session.send_to_pty(cmd_with_newline.as_bytes());
 
-                        // Enter ExecutingCommand mode - will transition to WaitingLLM
-                        // when command completes and output is sent to backend
-                        self.mode = AppMode::ExecutingCommand {
+                        // Enter ExecutingCommand mode
+                        session.mode = AppMode::ExecutingCommand {
                             command: command.clone(),
                         };
                         log::debug!("Entered ExecutingCommand mode for: {}", command);
-                    } else {
-                        log::error!("No PTY writer available");
-                        self.mode = AppMode::Normal;
                     }
                 } else {
                     log::info!("User rejected command: {}", command);
                     // Show rejection message
-                    self.vte_parser.advance(
-                        &mut self.terminal_handler,
-                        b"\r\n\x1b[33mCommand rejected.\x1b[0m\r\n",
-                    );
+                    if let Some(session) = self.active_session_mut() {
+                        session.vte_parser.advance(
+                            &mut session.terminal_handler,
+                            b"\r\n\x1b[33mCommand rejected.\x1b[0m\r\n",
+                        );
+                    }
 
                     // Notify backend that command was rejected
-                    // Backend will inform LLM and complete/continue the workflow
                     self.resume_llm_rejected();
                 }
             }
@@ -928,7 +924,9 @@ impl InfrawareApp {
                 self.resume_llm_with_answer(input);
             }
             _ => {
-                self.mode = AppMode::Normal;
+                if let Some(session) = self.active_session_mut() {
+                    session.mode = AppMode::Normal;
+                }
             }
         }
     }
@@ -936,19 +934,21 @@ impl InfrawareApp {
     /// Resume LLM run after approval (sets WaitingLLM mode immediately).
     #[allow(dead_code)]
     fn resume_llm_run(&mut self) {
-        self.mode = AppMode::WaitingLLM;
+        if let Some(session) = self.active_session_mut() {
+            session.mode = AppMode::WaitingLLM;
+        }
         self.resume_llm_run_background();
     }
 
     /// Resume LLM run in background without changing mode.
-    /// Allows user to interact with shell while LLM processes.
     fn resume_llm_run_background(&mut self) {
-        // Start agent stream tracking (throbber will show when PTY is quiet)
-        self.agent_state.start_stream();
+        // Start agent stream tracking
+        if let Some(session) = self.active_session_mut() {
+            session.agent_state.start_stream();
+        }
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
-        // Create cancellation token for Ctrl+C cancellation
         let cancel_token = tokio_util::sync::CancellationToken::new();
         self.llm_cancel_token = Some(cancel_token.clone());
 
@@ -969,9 +969,10 @@ impl InfrawareApp {
 
     /// Resume LLM run with a text answer.
     fn resume_llm_with_answer(&mut self, answer: String) {
-        self.mode = AppMode::WaitingLLM;
-        // Start agent stream tracking
-        self.agent_state.start_stream();
+        if let Some(session) = self.active_session_mut() {
+            session.mode = AppMode::WaitingLLM;
+            session.agent_state.start_stream();
+        }
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
@@ -997,11 +998,12 @@ impl InfrawareApp {
     /// Resume LLM run with command output from PTY execution.
     fn resume_with_command_output(&mut self, command: String, output: String) {
         // Start agent stream tracking
-        self.agent_state.start_stream();
+        if let Some(session) = self.active_session_mut() {
+            session.agent_state.start_stream();
+        }
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
-        // Create cancellation token for Ctrl+C cancellation
         let cancel_token = tokio_util::sync::CancellationToken::new();
         self.llm_cancel_token = Some(cancel_token.clone());
 
@@ -1022,13 +1024,13 @@ impl InfrawareApp {
 
     /// Resume LLM run with rejection (user rejected the command).
     fn resume_llm_rejected(&mut self) {
-        self.mode = AppMode::WaitingLLM;
-        // Start agent stream tracking
-        self.agent_state.start_stream();
+        if let Some(session) = self.active_session_mut() {
+            session.mode = AppMode::WaitingLLM;
+            session.agent_state.start_stream();
+        }
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
-        // Create cancellation token for Ctrl+C cancellation
         let cancel_token = tokio_util::sync::CancellationToken::new();
         self.llm_cancel_token = Some(cancel_token.clone());
 
@@ -1058,18 +1060,19 @@ impl InfrawareApp {
 
     /// Convert screen coordinates to grid (row, col).
     /// Returns visible row index (0-based from top of visible area).
-    fn screen_to_grid(&self, pos: Pos2, rect: Rect) -> (usize, usize) {
+    fn screen_to_grid(&self, pos: Pos2, rect: Rect, session: &TerminalSession) -> (usize, usize) {
         let col = ((pos.x - rect.left()) / self.char_width).max(0.0) as usize;
         let row = ((pos.y - rect.top()) / self.char_height).max(0.0) as usize;
 
         // Clamp to valid range
-        let max_col = self.terminal_size.0.saturating_sub(1) as usize;
-        let max_row = self.terminal_size.1.saturating_sub(1) as usize;
+        let max_col = session.terminal_size.0.saturating_sub(1) as usize;
+        let max_row = session.terminal_size.1.saturating_sub(1) as usize;
 
         (row.min(max_row), col.min(max_col))
     }
 
     /// Check if a cell is within the current selection.
+    #[allow(dead_code)]
     fn is_cell_selected(&self, row: usize, col: usize) -> bool {
         self.selection
             .as_ref()
@@ -1077,9 +1080,6 @@ impl InfrawareApp {
     }
 
     /// Copy selected text to clipboard using arboard for immediate OS access.
-    ///
-    /// Uses arboard directly instead of egui's `ctx.copy_text()` to avoid
-    /// the delayed clipboard sync that causes "stale data" issues on macOS.
     fn copy_selection_to_clipboard(&mut self, ctx: &egui::Context) {
         log::info!(
             "copy_selection_to_clipboard called, selection: {:?}",
@@ -1101,10 +1101,14 @@ impl InfrawareApp {
                 end.col
             );
 
-            let text = self
-                .terminal_handler
-                .grid()
-                .extract_selection_text(start.row, start.col, end.row, end.col);
+            let text = if let Some(session) = self.active_session() {
+                session
+                    .terminal_handler
+                    .grid()
+                    .extract_selection_text(start.row, start.col, end.row, end.col)
+            } else {
+                return;
+            };
 
             log::info!("Extracted text: '{}' ({} chars)", text, text.len());
 
@@ -1151,7 +1155,9 @@ impl InfrawareApp {
         let cb = self.clipboard.as_mut().expect("checked above");
         match cb.get_text() {
             Ok(text) if !text.is_empty() => {
-                let use_bracketed = self.terminal_handler.bracketed_paste_enabled();
+                let use_bracketed = self
+                    .active_session()
+                    .is_some_and(|s| s.terminal_handler.bracketed_paste_enabled());
 
                 let mut payload =
                     Vec::with_capacity(text.len() + if use_bracketed { 12 } else { 0 });
@@ -1189,54 +1195,72 @@ impl InfrawareApp {
         }
     }
 
-    /// Render terminal grid using custom paint.
+    /// Render terminal grid for a specific session.
     /// `has_focus` is passed to avoid redundant ctx.input() calls.
-    fn render_terminal(&mut self, ui: &mut egui::Ui, has_focus: bool) {
+    ///
+    /// PERFORMANCE OPTIMIZATIONS:
+    /// - Single session lookup at start, extract all needed data
+    /// - Zero-allocation visible_row() iteration
+    /// - Shared text buffer instead of per-row String allocations
+    /// - Cached terminal_id per session
+    /// - Optimized selection checks (early exit if no selection)
+    fn render_terminal(&mut self, ui: &mut egui::Ui, session_id: SessionId, has_focus: bool) {
+        // === PHASE 1: Extract all session data upfront (single HashMap lookup) ===
+        let session = match self.sessions.get(&session_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Extract immutable data from session (avoids repeated HashMap lookups)
+        let terminal_id = session.terminal_egui_id;
+        let column_x_coords = session.column_x_coords.clone(); // Clone once, use many times
+        let show_throbber = session.should_show_throbber();
+        let shell_initialized = session.shell_initialized;
+
+        // Extract grid state
+        let grid = session.terminal_handler.grid();
+        let scroll_offset = grid.scroll_offset();
+        let max_scroll = grid.max_scroll_offset();
+        let visible_row_count = grid.visible_row_count();
+        let (cursor_row, cursor_col) = grid.cursor_position();
+        let cursor_visible = grid.cursor_visible();
+        let cols = grid.size().1 as usize;
+
+        // === PHASE 2: UI Setup ===
         let available = ui.available_size();
-
-        // Use cached font (avoids per-frame allocation)
-        let font_id = &self.font_id;
-
-        // Use fixed ID for terminal to enable focus from update()
-        let terminal_id = egui::Id::new("terminal_main_area");
-
-        // Allocate space for painting with scroll support
         let size = Vec2::new(available.x, available.y);
         let (response, painter) = ui.allocate_painter(size, Sense::click().union(Sense::drag()));
         let rect = response.rect;
-
-        // Calculate scrollbar area for exclusion (using Scrollbar helper)
         let scrollbar_area = self.scrollbar.area(rect);
 
-        // Request keyboard focus when terminal is clicked (without drag)
+        // Request keyboard focus when terminal is clicked
         if response.clicked()
             && let Some(pos) = response.interact_pointer_pos()
             && !scrollbar_area.contains(pos)
         {
             ui.memory_mut(|mem| mem.request_focus(terminal_id));
-            // Clear selection on simple click
+            self.active_session_id = session_id;
             self.selection = None;
         }
 
-        // Handle mouse drag for text selection
+        // Handle mouse drag for text selection (re-get session for screen_to_grid)
         if response.drag_started()
             && let Some(pos) = response.interact_pointer_pos()
             && !scrollbar_area.contains(pos)
+            && let Some(session) = self.sessions.get(&session_id)
         {
-            let (row, col) = self.screen_to_grid(pos, rect);
+            let (row, col) = self.screen_to_grid(pos, rect, session);
             self.selection = Some(TextSelection::new(row, col));
-            log::debug!("Selection started at ({}, {})", row, col);
         }
 
         if response.dragged()
             && let Some(pos) = response.interact_pointer_pos()
+            && !self.scrollbar.is_dragging()
+            && let Some(session) = self.sessions.get(&session_id)
         {
-            // If we are dragging the scrollbar, don't update text selection
-            if !self.scrollbar.is_dragging() {
-                let (row, col) = self.screen_to_grid(pos, rect);
-                if let Some(ref mut sel) = self.selection {
-                    sel.update_end(row, col);
-                }
+            let (row, col) = self.screen_to_grid(pos, rect, session);
+            if let Some(ref mut sel) = self.selection {
+                sel.update_end(row, col);
             }
         }
 
@@ -1244,14 +1268,15 @@ impl InfrawareApp {
             && let Some(ref mut sel) = self.selection
         {
             sel.active = false;
-            log::debug!("Selection ended");
         }
 
         // Handle mouse wheel scrolling
         let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll_delta != 0.0 {
+        if scroll_delta != 0.0
+            && let Some(session) = self.sessions.get_mut(&session_id)
+        {
             let lines = (scroll_delta / self.char_height).round() as i32;
-            let grid = self.terminal_handler.grid_mut();
+            let grid = session.terminal_handler.grid_mut();
             if lines > 0 {
                 grid.scroll_view_up(lines as usize);
             } else if lines < 0 {
@@ -1259,100 +1284,110 @@ impl InfrawareApp {
             }
         }
 
-        // --- SCROLLBAR HANDLING ---
-        // Get scroll state (copy values to avoid borrow issues)
-        let (scroll_offset, max_scroll, visible_lines_count, cols) = {
-            let grid = self.terminal_handler.grid();
-            (
-                grid.scroll_offset(),
-                grid.max_scroll_offset(),
-                grid.visible_rows().len(),
-                grid.size().1,
-            )
-        };
-
-        // Render and handle scrollbar interaction
+        // === PHASE 3: Scrollbar handling ===
         if let Some(action) = self.scrollbar.show(
             ui,
             &painter,
             rect,
             scroll_offset,
             max_scroll,
-            visible_lines_count,
-        ) {
+            visible_row_count,
+        ) && let Some(session) = self.sessions.get_mut(&session_id)
+        {
             match action {
-                ScrollAction::Up(n) => self.terminal_handler.grid_mut().scroll_view_up(n),
-                ScrollAction::Down(n) => self.terminal_handler.grid_mut().scroll_view_down(n),
+                ScrollAction::Up(n) => session.terminal_handler.grid_mut().scroll_view_up(n),
+                ScrollAction::Down(n) => session.terminal_handler.grid_mut().scroll_view_down(n),
                 ScrollAction::To(offset) => {
-                    self.terminal_handler.grid_mut().scroll_to_offset(offset)
+                    session.terminal_handler.grid_mut().scroll_to_offset(offset)
                 }
             }
         }
 
-        // --- RENDERING PHASE ---
-        // Now re-acquire grid state for rendering (might have changed due to input)
-        let grid = self.terminal_handler.grid();
-        // Update these values for rendering
-        let scroll_offset = grid.scroll_offset();
-        let max_scroll = grid.max_scroll_offset();
-        let visible_rows = grid.visible_rows();
-        let (cursor_row, cursor_col) = grid.cursor_position();
-        let cursor_visible = grid.cursor_visible();
+        // === PHASE 4: Rendering (re-acquire session for grid access) ===
+        let session = match self.sessions.get(&session_id) {
+            Some(s) => s,
+            None => return,
+        };
+        let grid = session.terminal_handler.grid();
 
-        // Fill background
+        // Fill background once
         painter.rect_filled(rect, 0.0, self.theme.background);
-        // ... (rendering rows remains same) ...
-        for (row_idx, row) in visible_rows.iter().enumerate() {
-            let y = rect.top() + row_idx as f32 * self.char_height;
 
-            // Clear buffers for this row (O(1), reuses allocations)
+        // PERFORMANCE: Pre-compute selection bounds once if selection exists
+        let selection_bounds = self.selection.as_ref().map(|sel| sel.normalized());
+
+        // Cache font_id reference
+        let font_id = &self.font_id;
+        let char_width = self.char_width;
+        let char_height = self.char_height;
+        let theme_background = self.theme.background;
+        let theme_selection = self.theme.selection;
+
+        // === PHASE 5: Row-by-row rendering (zero-allocation iteration) ===
+        for row_idx in 0..visible_row_count {
+            let Some(row) = grid.visible_row(row_idx) else {
+                continue;
+            };
+
+            let y = rect.top() + row_idx as f32 * char_height;
+
+            // Clear buffers (O(1) - reuses capacity)
             self.render_bg_rects.clear();
             self.render_text_runs.clear();
+            self.render_text_buffer.clear();
             self.render_decorations.clear();
 
             // State for batching
             let mut bg_start: Option<(usize, Color32)> = None;
-            let mut text_run = String::new();
             let mut run_start: Option<(usize, Color32)> = None;
 
-            // SINGLE PASS: iterate cells once, collect all render data
-            // PERFORMANCE: row_len is bounded by cols, and column_x_coords has cols entries
-            let row_len = row.len().min(cols as usize);
-            let cols_usize = cols as usize;
+            let row_len = row.len().min(cols);
 
-            // PERFORMANCE: Direct indexing helper - all indices in loop are < row_len <= cols
-            let col_x = |idx: usize| -> f32 {
-                if idx < cols_usize {
-                    self.column_x_coords[idx]
+            // PERFORMANCE: Inline col_x computation
+            #[inline(always)]
+            fn col_x(idx: usize, column_x_coords: &[f32], char_width: f32) -> f32 {
+                if idx < column_x_coords.len() {
+                    column_x_coords[idx]
                 } else {
-                    idx as f32 * self.char_width
+                    idx as f32 * char_width
                 }
-            };
+            }
 
             for (col_idx, cell) in row.iter().take(row_len).enumerate() {
-                let x = col_x(col_idx);
+                // PERFORMANCE: Optimized selection check - only if selection exists
+                let is_selected = selection_bounds.as_ref().is_some_and(|(start, end)| {
+                    if row_idx < start.row || row_idx > end.row {
+                        false
+                    } else if row_idx == start.row && row_idx == end.row {
+                        col_idx >= start.col && col_idx <= end.col
+                    } else if row_idx == start.row {
+                        col_idx >= start.col
+                    } else if row_idx == end.row {
+                        col_idx <= end.col
+                    } else {
+                        true
+                    }
+                });
 
-                // --- Background batching (with selection support) ---
-                let is_selected = self.is_cell_selected(row_idx, col_idx);
+                // --- Background batching ---
                 let bg = if is_selected {
-                    // Selection takes priority over other background colors
-                    self.theme.selection
+                    theme_selection
                 } else if cell.attrs.reverse {
                     self.color_to_egui(cell.fg)
                 } else {
                     self.color_to_egui(cell.bg)
                 };
 
-                // For selection, always draw background (even if it matches theme background)
-                if is_selected || bg != self.theme.background {
+                if is_selected || bg != theme_background {
                     match bg_start {
-                        Some((_start, color)) if color == bg => {
-                            // Continue current background run
-                        }
+                        Some((_start, color)) if color == bg => {}
                         Some((start, color)) => {
-                            // Flush previous background run
-                            let width = (col_idx - start) as f32 * self.char_width;
-                            self.render_bg_rects.push((col_x(start), width, color));
+                            let width = (col_idx - start) as f32 * char_width;
+                            self.render_bg_rects.push((
+                                col_x(start, &column_x_coords, char_width),
+                                width,
+                                color,
+                            ));
                             bg_start = Some((col_idx, bg));
                         }
                         None => {
@@ -1360,20 +1395,25 @@ impl InfrawareApp {
                         }
                     }
                 } else if let Some((start, color)) = bg_start.take() {
-                    let width = (col_idx - start) as f32 * self.char_width;
-                    self.render_bg_rects.push((col_x(start), width, color));
+                    let width = (col_idx - start) as f32 * char_width;
+                    self.render_bg_rects.push((
+                        col_x(start, &column_x_coords, char_width),
+                        width,
+                        color,
+                    ));
                 }
 
-                // --- Text batching ---
+                // --- Text batching (using shared buffer) ---
                 if cell.ch == ' ' || cell.attrs.hidden {
-                    if let Some((start, color)) = run_start.take()
-                        && !text_run.is_empty()
-                    {
-                        self.render_text_runs.push((
-                            col_x(start),
-                            std::mem::take(&mut text_run),
-                            color,
-                        ));
+                    if let Some((start, color)) = run_start.take() {
+                        let end_idx = self.render_text_buffer.len();
+                        if end_idx > 0 {
+                            self.render_text_runs.push((
+                                col_x(start, &column_x_coords, char_width),
+                                end_idx,
+                                color,
+                            ));
+                        }
                     }
                 } else {
                     let mut fg = if cell.attrs.reverse {
@@ -1388,27 +1428,28 @@ impl InfrawareApp {
 
                     match run_start {
                         Some((_start, color)) if color == fg => {
-                            text_run.push(cell.ch);
+                            self.render_text_buffer.push(cell.ch);
                         }
                         Some((start, color)) => {
-                            if !text_run.is_empty() {
+                            let end_idx = self.render_text_buffer.len();
+                            if end_idx > 0 {
                                 self.render_text_runs.push((
-                                    col_x(start),
-                                    std::mem::take(&mut text_run),
+                                    col_x(start, &column_x_coords, char_width),
+                                    end_idx,
                                     color,
                                 ));
                             }
                             run_start = Some((col_idx, fg));
-                            text_run.push(cell.ch);
+                            self.render_text_buffer.push(cell.ch);
                         }
                         None => {
                             run_start = Some((col_idx, fg));
-                            text_run.push(cell.ch);
+                            self.render_text_buffer.push(cell.ch);
                         }
                     }
                 }
 
-                // --- Decorations (collect, don't batch - they're rare) ---
+                // --- Decorations ---
                 if cell.attrs.underline || cell.attrs.strikethrough {
                     let fg = if cell.attrs.reverse {
                         self.color_to_egui(cell.bg)
@@ -1416,7 +1457,7 @@ impl InfrawareApp {
                         self.color_to_egui(cell.fg)
                     };
                     self.render_decorations.push((
-                        x,
+                        col_x(col_idx, &column_x_coords, char_width),
                         cell.attrs.underline,
                         cell.attrs.strikethrough,
                         fg,
@@ -1426,88 +1467,189 @@ impl InfrawareApp {
 
             // Flush remaining background
             if let Some((start, color)) = bg_start {
-                let width = (row_len - start) as f32 * self.char_width;
-                self.render_bg_rects.push((col_x(start), width, color));
+                let width = (row_len - start) as f32 * char_width;
+                self.render_bg_rects.push((
+                    col_x(start, &column_x_coords, char_width),
+                    width,
+                    color,
+                ));
             }
 
-            // Flush remaining text (use std::mem::take to avoid clone)
-            if let Some((start, color)) = run_start
-                && !text_run.is_empty()
-            {
-                self.render_text_runs
-                    .push((col_x(start), std::mem::take(&mut text_run), color));
+            // Flush remaining text
+            if run_start.is_some() {
+                let end_idx = self.render_text_buffer.len();
+                if let Some((start, color)) = run_start
+                    && end_idx > 0
+                {
+                    self.render_text_runs.push((
+                        col_x(start, &column_x_coords, char_width),
+                        end_idx,
+                        color,
+                    ));
+                }
             }
 
-            // --- DRAW PHASE: Render in correct z-order using helper functions ---
-            render_backgrounds(&painter, rect, y, self.char_height, &self.render_bg_rects);
-            render_text_runs(&painter, rect, y, font_id, &self.render_text_runs);
+            // === DRAW PHASE ===
+            render_backgrounds(&painter, rect, y, char_height, &self.render_bg_rects);
+            render_text_runs_buffered(
+                &painter,
+                rect,
+                y,
+                font_id,
+                &self.render_text_buffer,
+                &self.render_text_runs,
+            );
             render_decorations(
                 &painter,
                 rect,
                 y,
-                self.char_width,
-                self.char_height,
+                char_width,
+                char_height,
                 &self.render_decorations,
             );
         }
 
-        // Draw Throbber when waiting for LLM response
-        // Throbber ON ⟺ EngineStatus::Thinking (mapped to AppMode::WaitingLLM)
-        // Hide throbber when: interactive prompt detected, or PTY was recently active
-        let throbber_suppressed = self.prompt_detector.is_prompt_active()
-            || self.last_pty_activity.elapsed() < std::time::Duration::from_millis(500);
-        let show_throbber = matches!(self.mode, AppMode::WaitingLLM) && !throbber_suppressed;
+        // === PHASE 6: Cursor/Throbber rendering ===
         if show_throbber && scroll_offset == 0 {
             let frame_idx =
                 (self.startup_time.elapsed().as_millis() / 250) as usize % SPINNER_FRAMES.len();
             let frame = SPINNER_FRAMES[frame_idx];
+            let row_y = rect.top() + cursor_row as f32 * char_height;
+            let spinner_x = rect.left() + cursor_col as f32 * char_width;
 
-            // Position: after cursor on current line
-            let row_y = rect.top() + cursor_row as f32 * self.char_height;
-            let spinner_x = rect.left() + cursor_col as f32 * self.char_width;
-
-            // Draw dots (no mask needed - terminal redraws each frame)
             painter.text(
                 Pos2::new(spinner_x, row_y),
                 egui::Align2::LEFT_TOP,
                 frame,
                 font_id.clone(),
-                Color32::from_rgb(0, 255, 255), // Cyan
+                Color32::from_rgb(0, 255, 255),
             );
         } else if cursor_visible
-            && self.shell_initialized
             && self.cursor_blink_visible
             && scroll_offset == 0
             && has_focus
+            && shell_initialized
         {
-            // Direct indexing with bounds check (cursor_col comes from grid, should be < cols)
             let cursor_col_idx = cursor_col as usize;
             let cursor_x = rect.left()
-                + if cursor_col_idx < self.column_x_coords.len() {
-                    self.column_x_coords[cursor_col_idx]
+                + if cursor_col_idx < column_x_coords.len() {
+                    column_x_coords[cursor_col_idx]
                 } else {
-                    cursor_col as f32 * self.char_width
+                    cursor_col as f32 * char_width
                 };
-            let cursor_y = rect.top() + cursor_row as f32 * self.char_height;
-            render_cursor(
-                &painter,
-                cursor_x,
-                cursor_y,
-                self.char_height,
-                self.theme.cursor,
-            );
+            let cursor_y = rect.top() + cursor_row as f32 * char_height;
+            render_cursor(&painter, cursor_x, cursor_y, char_height, self.theme.cursor);
         }
 
-        // Draw scrollbar if there's scrollback content
+        // === PHASE 7: Scrollbar rendering ===
         if max_scroll > 0 {
-            render_scrollbar(
-                &painter,
-                rect,
-                scroll_offset,
-                max_scroll,
-                visible_rows.len(),
+            render_scrollbar(&painter, rect, scroll_offset, max_scroll, visible_row_count);
+        }
+    }
+
+    /// Split the current pane horizontally (new pane to the right).
+    pub fn split_horizontal(&mut self) {
+        let new_session_id = self.create_session();
+
+        if let Some(ref mut tree) = self.tiles
+            && let Some(root_id) = tree.root()
+        {
+            // Insert the new pane into the tiles
+            let new_pane_id = tree.tiles.insert_pane(new_session_id);
+
+            // Track the tile ID for this session
+            self.session_tile_ids.insert(new_session_id, new_pane_id);
+
+            // Create a horizontal container with the existing content and new pane
+            let container = egui_tiles::Linear::new(
+                egui_tiles::LinearDir::Horizontal,
+                vec![root_id, new_pane_id],
+            );
+            let container_id = tree.tiles.insert_container(container);
+
+            // Replace the root with the new container
+            *tree = Tree::new(
+                "terminal_tiles",
+                container_id,
+                std::mem::take(&mut tree.tiles),
+            );
+            log::info!(
+                "Split horizontal: created session {} in new pane {:?}",
+                new_session_id,
+                new_pane_id
             );
         }
+    }
+
+    /// Split the current pane vertically (new pane below).
+    pub fn split_vertical(&mut self) {
+        let new_session_id = self.create_session();
+
+        if let Some(ref mut tree) = self.tiles
+            && let Some(root_id) = tree.root()
+        {
+            let new_pane_id = tree.tiles.insert_pane(new_session_id);
+
+            // Track the tile ID for this session
+            self.session_tile_ids.insert(new_session_id, new_pane_id);
+
+            // Create a vertical container
+            let container = egui_tiles::Linear::new(
+                egui_tiles::LinearDir::Vertical,
+                vec![root_id, new_pane_id],
+            );
+            let container_id = tree.tiles.insert_container(container);
+
+            *tree = Tree::new(
+                "terminal_tiles",
+                container_id,
+                std::mem::take(&mut tree.tiles),
+            );
+            log::info!(
+                "Split vertical: created session {} in new pane {:?}",
+                new_session_id,
+                new_pane_id
+            );
+        }
+    }
+}
+
+/// Behavior implementation for egui_tiles.
+/// Wraps InfrawareApp for rendering terminal panes.
+struct TerminalBehavior<'a> {
+    app: &'a mut InfrawareApp,
+    has_focus: bool,
+}
+
+impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
+    fn tab_title_for_pane(&mut self, pane: &SessionId) -> egui::WidgetText {
+        format!("Terminal {}", pane).into()
+    }
+
+    fn pane_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _tile_id: egui_tiles::TileId,
+        pane: &mut SessionId,
+    ) -> UiResponse {
+        let session_id = *pane;
+
+        // Calculate terminal size based on pane size
+        let available = ui.available_size();
+        let cols = ((available.x / self.app.char_width) as u16).max(20);
+        let rows = ((available.y / self.app.char_height) as u16).max(5);
+
+        // Check if resize is needed (triggers repaint if size changed)
+        let size_changed = self.app.resize_session_pty(session_id, cols, rows);
+        if size_changed {
+            // Force repaint when size changes to ensure layout updates immediately
+            ui.ctx().request_repaint();
+        }
+
+        // Render the terminal for this session
+        self.app.render_terminal(ui, session_id, self.has_focus);
+
+        UiResponse::None
     }
 }
 
@@ -1559,20 +1701,24 @@ impl eframe::App for InfrawareApp {
         }
 
         // Check for SIGINT (Ctrl+C) from system signal handler
-        // This works even when egui doesn't receive the key event
         if crate::SIGINT_RECEIVED.swap(false, std::sync::atomic::Ordering::SeqCst) {
             log::info!("System SIGINT received, sending to process group");
             self.send_sigint();
-            // Pause output reading briefly to let the kernel/shell process the signal
-            // and to give immediate visual feedback (stop scrolling)
-            self.output_pause_until = Some(Instant::now() + std::time::Duration::from_millis(200));
+            // Pause output reading briefly for active session
+            if let Some(session) = self.active_session_mut() {
+                session.output_pause_until =
+                    Some(Instant::now() + std::time::Duration::from_millis(200));
+            }
         }
 
         // Poll background events (LLM results, etc.)
         self.poll_background_events();
 
-        // Check for pending LLM query from shell hook (Command Not Found)
-        if let Some(failed_cmd) = self.terminal_handler.take_pending_llm_query() {
+        // Check for pending LLM query from shell hook (Command Not Found) - active session only
+        let pending_llm_query = self
+            .active_session_mut()
+            .and_then(|s| s.terminal_handler.take_pending_llm_query());
+        if let Some(failed_cmd) = pending_llm_query {
             log::info!("Triggering LLM for failed command: {}", failed_cmd);
             let query = format!(
                 "I tried to run '{}' but got 'command not found'. What should I do?",
@@ -1584,26 +1730,31 @@ impl eframe::App for InfrawareApp {
         // Handle keyboard FIRST - ensures Ctrl+C works even during heavy output
         self.handle_keyboard(ctx);
 
-        // Poll PTY output and feed to VTE parser (limited per frame)
-        let pty_had_data = self.poll_pty_output();
-        if pty_had_data {
-            self.last_pty_activity = Instant::now();
+        // Poll PTY output for all sessions
+        let pty_had_data = self.poll_all_sessions();
+
+        // Initialize shells for all sessions
+        let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        for session_id in session_ids {
+            self.initialize_shell(session_id);
         }
 
-        // Initialize shell with custom prompt after startup delay
-        self.initialize_shell();
-
-        // Render UI (pass has_focus to avoid redundant ctx.input() calls)
+        // Render UI using egui_tiles for split view support
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme.background))
             .show(ctx, |ui| {
-                // Calculate terminal size based on available space
-                let available = ui.available_size();
-                let cols = ((available.x / self.char_width) as u16).max(20);
-                let rows = ((available.y / self.char_height) as u16).max(5);
-                self.resize_pty(cols, rows);
+                // Take the tree temporarily to avoid borrow conflicts
+                if let Some(mut tree) = self.tiles.take() {
+                    // Use egui_tiles to render the terminal pane(s)
+                    let mut behavior = TerminalBehavior {
+                        app: self,
+                        has_focus,
+                    };
+                    tree.ui(&mut behavior, ui);
 
-                self.render_terminal(ui, has_focus);
+                    // Put the tree back
+                    self.tiles = Some(tree);
+                }
             });
 
         // REACTIVE REPAINT: Only request repaint when something actually changed
@@ -1623,8 +1774,11 @@ impl eframe::App for InfrawareApp {
             let cursor_needs_blink = time_since_blink >= blink_interval;
 
             // Check if we need to animate the throbber (4 FPS / 250ms)
-            // Throbber animates when EngineStatus::Thinking (mapped to AppMode::WaitingLLM)
-            let is_waiting_llm = matches!(self.mode, AppMode::WaitingLLM);
+            // Any session waiting for LLM response shows throbber
+            let is_waiting_llm = self
+                .sessions
+                .values()
+                .any(|s| matches!(s.mode, AppMode::WaitingLLM));
 
             if pty_had_data || cursor_needs_blink || had_user_input {
                 // Something changed - repaint immediately
