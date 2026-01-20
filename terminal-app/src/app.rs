@@ -1619,6 +1619,11 @@ impl InfrawareApp {
             return;
         };
 
+        // IMPORTANT: Get parent BEFORE inserting the new container.
+        // After insertion, parent_of(active_tile_id) would return the new container
+        // since it also contains active_tile_id as a child.
+        let parent_id = tree.tiles.parent_of(active_tile_id);
+
         // Insert the new pane
         let new_pane_id = tree.tiles.insert_pane(new_session_id);
         self.session_tile_ids.insert(new_session_id, new_pane_id);
@@ -1627,8 +1632,8 @@ impl InfrawareApp {
         let container = egui_tiles::Linear::new(direction, vec![active_tile_id, new_pane_id]);
         let container_id = tree.tiles.insert_container(container);
 
-        // Find parent of active pane and replace it with the container
-        if let Some(parent_id) = tree.tiles.parent_of(active_tile_id) {
+        // Replace active pane with container in the tree
+        if let Some(parent_id) = parent_id {
             // Replace active_tile_id with container_id in parent's children
             if let Some(egui_tiles::Tile::Container(parent_container)) =
                 tree.tiles.get_mut(parent_id)
