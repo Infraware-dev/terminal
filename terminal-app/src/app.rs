@@ -323,11 +323,14 @@ impl InfrawareApp {
         if self.sessions.remove(&session_id).is_some() {
             log::info!("Closed session {}", session_id);
 
-            // Remove the pane from egui_tiles
+            // Remove the pane from egui_tiles using remove_recursively
+            // IMPORTANT: tree.tiles.remove() only removes from storage but leaves
+            // dangling references in the tree structure. remove_recursively() properly
+            // cleans up parent-child relationships.
             if let Some(tile_id) = self.session_tile_ids.remove(&session_id)
                 && let Some(ref mut tree) = self.tiles
             {
-                tree.tiles.remove(tile_id);
+                tree.remove_recursively(tile_id);
                 log::debug!("Removed tile {:?} for session {}", tile_id, session_id);
             }
 
