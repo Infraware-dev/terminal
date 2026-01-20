@@ -209,9 +209,19 @@ impl TerminalSession {
             return false;
         }
 
+        // Calculate size delta to detect significant changes
+        let delta_rows = (rows as i32 - self.terminal_size.1 as i32).abs();
+        let delta_cols = (cols as i32 - self.terminal_size.0 as i32).abs();
+
+        // Bypass debounce if change is significant (e.g., pane closed/snapped).
+        // This ensures immediate resize when layout changes dramatically (closing split panes),
+        // while still debouncing small incremental changes (drag resize).
+        let is_large_change = delta_rows > 2 || delta_cols > 5;
+
         // Per-session debounce to avoid excessive resize operations
         // but allow the first resize immediately (last_resize starts in the past)
-        if self.last_resize.elapsed() < crate::config::timing::RESIZE_DEBOUNCE {
+        // and bypass for large layout changes
+        if !is_large_change && self.last_resize.elapsed() < crate::config::timing::RESIZE_DEBOUNCE {
             return false;
         }
 
