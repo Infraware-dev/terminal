@@ -284,10 +284,15 @@ impl TerminalSession {
     }
 
     /// Poll PTY output and feed to VTE parser.
-    /// Returns `(had_output, command_completed)` tuple:
+    ///
+    /// # Arguments
+    /// * `byte_limit` - Maximum bytes to process this frame (for adaptive throttling)
+    ///
+    /// # Returns
+    /// `(had_output, command_completed)` tuple:
     /// - `had_output`: true if any PTY output was processed
     /// - `command_completed`: true if a command in ExecutingCommand mode finished (prompt detected)
-    pub fn poll_pty_output(&mut self) -> (bool, bool) {
+    pub fn poll_pty_output(&mut self, byte_limit: usize) -> (bool, bool) {
         // If paused (after Ctrl+C), skip reading
         if let Some(until) = self.output_pause_until {
             if Instant::now() < until {
@@ -302,7 +307,7 @@ impl TerminalSession {
 
         if let Some(ref rx) = self.pty_output_rx {
             loop {
-                if bytes_processed >= rendering::MAX_BYTES_PER_FRAME {
+                if bytes_processed >= byte_limit {
                     break;
                 }
 

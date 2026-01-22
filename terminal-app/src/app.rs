@@ -87,6 +87,9 @@ pub struct InfrawareApp {
     /// Last cursor blink toggle time
     last_cursor_blink: Instant,
 
+    /// Last keyboard input time (for adaptive PTY throttling)
+    last_keyboard_time: Instant,
+
     /// Track window focus state to detect focus gain
     had_window_focus: bool,
 
@@ -261,6 +264,8 @@ impl InfrawareApp {
             startup_time: Instant::now(),
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
+            // Initialize to past so we start in "idle" mode (higher PTY throughput)
+            last_keyboard_time: Instant::now() - std::time::Duration::from_secs(1),
             had_window_focus: false,
             font_id: FontId::new(rendering::FONT_SIZE, FontFamily::Monospace),
             keyboard_handler: KeyboardHandler::new(),
@@ -409,12 +414,23 @@ impl InfrawareApp {
 
     /// Poll PTY output for all sessions.
     /// Rate-limited to allow Ctrl+C to work even with heavy output (cat /dev/zero).
+    /// Uses adaptive throttling: lower limit during keyboard activity for Ctrl+C responsiveness,
+    /// higher limit when idle for better burst throughput (cat large_file).
     /// Returns true if any output was processed (for smart repaint).
     fn poll_all_sessions(&mut self) -> bool {
         let mut any_output = false;
         // PERFORMANCE: SmallVec avoids heap allocation for common cases
         let mut sessions_to_close: SmallVec<[SessionId; 2]> = SmallVec::new();
         let mut completed_commands: SmallVec<[(SessionId, String, String); 1]> = SmallVec::new();
+
+        // Adaptive PTY throttle: use lower limit during keyboard activity for Ctrl+C responsiveness
+        // After 200ms of no keyboard input, switch to higher throughput mode
+        let byte_limit = if self.last_keyboard_time.elapsed() < std::time::Duration::from_millis(200)
+        {
+            rendering::MAX_BYTES_PER_FRAME_ACTIVE
+        } else {
+            rendering::MAX_BYTES_PER_FRAME_IDLE
+        };
 
         // Collect session IDs first to avoid borrow conflicts
         let session_ids: SmallVec<[SessionId; 4]> = self.sessions.keys().copied().collect();
@@ -425,9 +441,9 @@ impl InfrawareApp {
                 None => continue,
             };
 
-            // Poll this session's PTY output
+            // Poll this session's PTY output with adaptive byte limit
             // Returns (had_output, command_completed) tuple
-            let (had_output, command_completed) = session.poll_pty_output();
+            let (had_output, command_completed) = session.poll_pty_output(byte_limit);
             if had_output {
                 any_output = true;
             }
@@ -692,15 +708,16 @@ impl InfrawareApp {
         // Process keyboard input and get actions
         let actions = self.keyboard_handler.process(ctx);
 
-        // Log current mode if there's keyboard activity
-        if !actions.is_empty()
-            && let Some(session) = self.active_session()
-        {
-            log::debug!(
-                "Keyboard actions: {} actions, mode: {:?}",
-                actions.len(),
-                session.mode.name()
-            );
+        // Track keyboard activity for adaptive PTY throttling
+        if !actions.is_empty() {
+            self.last_keyboard_time = Instant::now();
+            if let Some(session) = self.active_session() {
+                log::debug!(
+                    "Keyboard actions: {} actions, mode: {:?}",
+                    actions.len(),
+                    session.mode.name()
+                );
+            }
         }
 
         // Execute each action
@@ -1382,17 +1399,29 @@ impl InfrawareApp {
 
             let row_len = row.len().min(cols);
 
-            // PERFORMANCE: Inline col_x computation
+            // PERFORMANCE: Direct column lookup (bounds check removed)
+            // Safety: column_x_coords has `cols` elements, idx is always < row_len <= cols
             #[inline(always)]
-            fn col_x(idx: usize, column_x_coords: &[f32], char_width: f32) -> f32 {
-                if idx < column_x_coords.len() {
-                    column_x_coords[idx]
-                } else {
-                    idx as f32 * char_width
-                }
+            fn col_x(idx: usize, column_x_coords: &[f32]) -> f32 {
+                column_x_coords[idx]
             }
 
             for (col_idx, cell) in row.iter().take(row_len).enumerate() {
+                // PERFORMANCE: Calculate colors once per cell (was 6 calls, now 2)
+                // Handles reverse attribute by swapping fg/bg at conversion time
+                let (cell_fg, cell_bg) = if cell.attrs.reverse() {
+                    (self.color_to_egui(cell.bg), self.color_to_egui(cell.fg))
+                } else {
+                    (self.color_to_egui(cell.fg), self.color_to_egui(cell.bg))
+                };
+
+                // PERFORMANCE: Apply dim attribute once (was per-use)
+                let cell_fg = if cell.attrs.dim() {
+                    Color32::from_rgba_unmultiplied(cell_fg.r(), cell_fg.g(), cell_fg.b(), 128)
+                } else {
+                    cell_fg
+                };
+
                 // PERFORMANCE: Optimized selection check - only if selection exists
                 let is_selected = selection_bounds.as_ref().is_some_and(|(start, end)| {
                     if row_idx < start.row || row_idx > end.row {
@@ -1409,13 +1438,7 @@ impl InfrawareApp {
                 });
 
                 // --- Background batching ---
-                let bg = if is_selected {
-                    theme_selection
-                } else if cell.attrs.reverse() {
-                    self.color_to_egui(cell.fg)
-                } else {
-                    self.color_to_egui(cell.bg)
-                };
+                let bg = if is_selected { theme_selection } else { cell_bg };
 
                 if is_selected || bg != theme_background {
                     match bg_start {
@@ -1423,7 +1446,7 @@ impl InfrawareApp {
                         Some((start, color)) => {
                             let width = (col_idx - start) as f32 * char_width;
                             self.render_bg_rects.push((
-                                col_x(start, column_x_coords, char_width),
+                                col_x(start, column_x_coords),
                                 width,
                                 color,
                             ));
@@ -1436,7 +1459,7 @@ impl InfrawareApp {
                 } else if let Some((start, color)) = bg_start.take() {
                     let width = (col_idx - start) as f32 * char_width;
                     self.render_bg_rects.push((
-                        col_x(start, column_x_coords, char_width),
+                        col_x(start, column_x_coords),
                         width,
                         color,
                     ));
@@ -1448,41 +1471,31 @@ impl InfrawareApp {
                         let end_idx = self.render_text_buffer.len();
                         if end_idx > 0 {
                             self.render_text_runs.push((
-                                col_x(start, column_x_coords, char_width),
+                                col_x(start, column_x_coords),
                                 end_idx,
                                 color,
                             ));
                         }
                     }
                 } else {
-                    let mut fg = if cell.attrs.reverse() {
-                        self.color_to_egui(cell.bg)
-                    } else {
-                        self.color_to_egui(cell.fg)
-                    };
-
-                    if cell.attrs.dim() {
-                        fg = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 128);
-                    }
-
                     match run_start {
-                        Some((_start, color)) if color == fg => {
+                        Some((_start, color)) if color == cell_fg => {
                             self.render_text_buffer.push(cell.ch);
                         }
                         Some((start, color)) => {
                             let end_idx = self.render_text_buffer.len();
                             if end_idx > 0 {
                                 self.render_text_runs.push((
-                                    col_x(start, column_x_coords, char_width),
+                                    col_x(start, column_x_coords),
                                     end_idx,
                                     color,
                                 ));
                             }
-                            run_start = Some((col_idx, fg));
+                            run_start = Some((col_idx, cell_fg));
                             self.render_text_buffer.push(cell.ch);
                         }
                         None => {
-                            run_start = Some((col_idx, fg));
+                            run_start = Some((col_idx, cell_fg));
                             self.render_text_buffer.push(cell.ch);
                         }
                     }
@@ -1490,16 +1503,11 @@ impl InfrawareApp {
 
                 // --- Decorations ---
                 if cell.attrs.underline() || cell.attrs.strikethrough() {
-                    let fg = if cell.attrs.reverse() {
-                        self.color_to_egui(cell.bg)
-                    } else {
-                        self.color_to_egui(cell.fg)
-                    };
                     self.render_decorations.push((
-                        col_x(col_idx, column_x_coords, char_width),
+                        col_x(col_idx, column_x_coords),
                         cell.attrs.underline(),
                         cell.attrs.strikethrough(),
-                        fg,
+                        cell_fg,
                     ));
                 }
             }
@@ -1508,7 +1516,7 @@ impl InfrawareApp {
             if let Some((start, color)) = bg_start {
                 let width = (row_len - start) as f32 * char_width;
                 self.render_bg_rects.push((
-                    col_x(start, column_x_coords, char_width),
+                    col_x(start, column_x_coords),
                     width,
                     color,
                 ));
@@ -1521,7 +1529,7 @@ impl InfrawareApp {
                     && end_idx > 0
                 {
                     self.render_text_runs.push((
-                        col_x(start, column_x_coords, char_width),
+                        col_x(start, column_x_coords),
                         end_idx,
                         color,
                     ));

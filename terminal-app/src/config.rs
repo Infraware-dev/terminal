@@ -23,8 +23,13 @@ pub mod timing {
 
 /// Terminal rendering configuration.
 pub mod rendering {
-    /// Maximum bytes to process from PTY per frame (prevents CPU overload).
-    pub const MAX_BYTES_PER_FRAME: usize = 4096;
+    /// Maximum bytes to process from PTY per frame during keyboard activity.
+    /// Lower value ensures Ctrl+C responsiveness during fast output.
+    pub const MAX_BYTES_PER_FRAME_ACTIVE: usize = 4096;
+
+    /// Maximum bytes to process from PTY per frame when idle.
+    /// Higher value improves throughput for burst output (e.g., cat large_file).
+    pub const MAX_BYTES_PER_FRAME_IDLE: usize = 16384;
 
     /// Default font size in points.
     pub const FONT_SIZE: f32 = 14.0;
