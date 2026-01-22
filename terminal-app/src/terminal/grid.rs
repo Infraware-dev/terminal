@@ -945,33 +945,41 @@ impl TerminalGrid {
     // ========== Resize ==========
 
     /// Resize the terminal grid.
+    ///
+    /// Copies content from BOTTOM of old grid to BOTTOM of new grid.
+    /// This keeps the cursor/prompt area visible during resize.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         if rows == self.rows && cols == self.cols {
             return;
         }
 
-        // Create new grid
         let mut new_cells = Self::create_empty_grid(rows, cols);
 
-        // Copy existing content in logical order (via ring buffer)
-        // We need the index r for both self.row(r) and new_cells[r]
+        // Copy from bottom of old grid to bottom of new grid
         let old_rows = self.rows as usize;
-        let copy_rows = old_rows.min(rows as usize);
-        for (r, new_row) in new_cells.iter_mut().take(copy_rows).enumerate() {
-            if let Some(src_row) = self.row(r) {
+        let new_rows = rows as usize;
+        let copy_rows = old_rows.min(new_rows);
+        let src_start = old_rows.saturating_sub(copy_rows);
+        let dst_start = new_rows.saturating_sub(copy_rows);
+
+        for i in 0..copy_rows {
+            if let Some(src_row) = self.row(src_start + i) {
                 for (c, cell) in src_row.iter().enumerate().take(cols as usize) {
-                    new_row[c] = cell.clone();
+                    new_cells[dst_start + i][c] = cell.clone();
                 }
             }
         }
 
+        // Adjust cursor to stay at same position relative to bottom
+        let cursor_from_bottom = old_rows.saturating_sub(1).saturating_sub(self.cursor_row as usize);
+        let new_cursor = new_rows.saturating_sub(1).saturating_sub(cursor_from_bottom.min(new_rows - 1));
+
         self.cells = new_cells;
-        self.cells_offset = 0; // Reset ring buffer offset
+        self.cells_offset = 0;
+        self.scroll_offset = 0; // Always show live view after resize
         self.rows = rows;
         self.cols = cols;
-
-        // Adjust cursor if needed
-        self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
+        self.cursor_row = new_cursor as u16;
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
 
         // Adjust scroll region
