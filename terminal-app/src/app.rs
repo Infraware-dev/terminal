@@ -347,20 +347,10 @@ impl InfrawareApp {
                 self.should_quit = true;
             }
 
-            // IMPORTANT: Reset last_resize for remaining sessions to bypass debounce.
-            // When a pane is closed, the layout changes and remaining panes need to
-            // resize immediately to fill the new available space. Without this reset,
-            // the debounce (100ms) could block the resize, causing rendering artifacts
-            // (black squares, uncovered background).
-            let reset_time = Instant::now() - std::time::Duration::from_secs(1);
+            // Mark remaining sessions for repaint after pane close
             for session in self.sessions.values_mut() {
-                session.last_resize = reset_time;
                 session.needs_repaint = true;
             }
-            log::debug!(
-                "Reset resize debounce for {} remaining sessions",
-                self.sessions.len()
-            );
         }
     }
 
@@ -1748,7 +1738,7 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
         egui::Frame::NONE
             .outer_margin(2.0) // 2px margin per side = 4px total gap between panes
             .show(ui, |ui| {
-                // Calculate terminal size based on pane size (minus margin)
+                // Calculate terminal size based on pane size
                 let available = ui.available_size();
                 let cols = ((available.x / self.app.char_width) as u16).max(20);
                 let rows = ((available.y / self.app.char_height) as u16).max(5);

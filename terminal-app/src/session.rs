@@ -90,8 +90,6 @@ pub struct TerminalSession {
     /// Cached tab title (avoids format! allocation every frame)
     pub cached_title: String,
 
-    /// Last resize time for debouncing (per-session to avoid blocking other sessions)
-    pub last_resize: Instant,
 
     /// Current text selection for this session (None if no selection active)
     pub selection: Option<TextSelection>,
@@ -168,10 +166,6 @@ impl TerminalSession {
             terminal_egui_id: EguiId::new(("terminal_pane", id)),
             // Cached tab title (avoids format! allocation every frame)
             cached_title: format!("Terminal {}", id),
-            // Initialize to 1 second ago to bypass debounce on first resize.
-            // This ensures the terminal can resize immediately after creation
-            // without waiting for RESIZE_DEBOUNCE (100ms) to elapse.
-            last_resize: Instant::now() - std::time::Duration::from_secs(1),
             selection: None,
         }
     }
@@ -231,29 +225,19 @@ impl TerminalSession {
         let delta_rows = (rows as i32 - grid_rows as i32).abs();
         let delta_cols = (cols as i32 - grid_cols as i32).abs();
 
-        // Bypass debounce if change is significant (e.g., pane closed/snapped).
-        // Any change > 1 is considered a layout shift that needs immediate attention.
-        let is_large_change = delta_rows > 1 || delta_cols > 1;
-
-        // Per-session debounce to avoid excessive resize operations during smooth dragging.
-        // We bypass it for the first resize (last_resize in past) or for significant shifts.
-        if !is_large_change && self.last_resize.elapsed() < crate::config::timing::RESIZE_DEBOUNCE {
-            return false;
-        }
-
-        self.last_resize = Instant::now();
+        // No debounce - resize immediately to match available space (follows egui pattern).
+        // Content should always match the allocated space to avoid rendering artifacts.
         self.terminal_size = (cols, rows);
 
         log::debug!(
-            "Session {}: Resizing Grid from {}x{} to {}x{} (delta: {}x{}, bypass: {})",
+            "Session {}: Resizing Grid from {}x{} to {}x{} (delta: {}x{})",
             self.id,
             grid_cols,
             grid_rows,
             cols,
             rows,
             delta_cols,
-            delta_rows,
-            is_large_change
+            delta_rows
         );
 
         // Update column X coordinates - resize in place to reuse allocation

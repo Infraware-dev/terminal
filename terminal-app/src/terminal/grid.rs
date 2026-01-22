@@ -946,17 +946,27 @@ impl TerminalGrid {
 
     /// Resize the terminal grid.
     ///
-    /// Copies content from BOTTOM of old grid to BOTTOM of new grid.
-    /// This keeps the cursor/prompt area visible during resize.
+    /// For horizontal-only resize (rows unchanged): just update cols, preserve all cells.
+    /// For vertical resize: copy content from BOTTOM of old grid to BOTTOM of new grid.
     pub fn resize(&mut self, rows: u16, cols: u16) {
         if rows == self.rows && cols == self.cols {
+            return;
+        }
+
+        // Horizontal-only resize: don't recreate grid, just update cols
+        // This preserves content during shrink, restored when expanding
+        if rows == self.rows {
+            self.cols = cols;
+            self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
+            self.scroll_bottom = rows.saturating_sub(1);
+            self.tab_stops = (0..cols).filter(|c| c % 8 == 0).collect();
             return;
         }
 
         let old_rows = self.rows as usize;
         let new_rows = rows as usize;
 
-        // If shrinking, save top rows to scrollback before discarding (like Alacritty)
+        // If shrinking rows, save top rows to scrollback before discarding
         if new_rows < old_rows {
             let excess_rows = old_rows - new_rows;
             for i in 0..excess_rows {
@@ -986,7 +996,7 @@ impl TerminalGrid {
             }
         }
 
-        // If expanding, fill empty top rows from scrollback (like Alacritty)
+        // If expanding rows, fill empty top rows from scrollback
         if new_rows > old_rows && !self.scrollback.is_empty() {
             let empty_rows = dst_start;
             let fill_count = empty_rows.min(self.scrollback.len());

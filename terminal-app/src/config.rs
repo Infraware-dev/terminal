@@ -14,9 +14,6 @@ pub mod timing {
     /// Shell initialization delay after startup.
     pub const SHELL_INIT_DELAY: Duration = Duration::from_millis(500);
 
-    /// PTY resize debounce interval.
-    pub const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
-
     /// Background window repaint interval (low CPU mode).
     pub const BACKGROUND_REPAINT: Duration = Duration::from_millis(500);
 }
