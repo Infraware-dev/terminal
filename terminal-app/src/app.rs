@@ -488,7 +488,7 @@ impl InfrawareApp {
 
             // Set custom prompt with |~| prefix (#c6d0d6 = rgb 198,208,214)
             // Also inject command_not_found hooks to trigger LLM on error
-            let init_commands = if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
+            let init_commands = if session.shell == "zsh" {
                 "export PROMPT=$'%{\\e[38;2;198;208;214m%}|~| %n@%m:%~%# %{\\e[0m%}'\n\
                  command_not_found_handler() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
                  clear\n"

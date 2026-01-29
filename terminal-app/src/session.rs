@@ -54,6 +54,9 @@ pub struct TerminalSession {
     /// Current terminal size (cols, rows)
     pub terminal_size: (u16, u16),
 
+    /// Shell name that was spawned (e.g., "zsh", "bash")
+    pub shell: String,
+
     /// Shell initialization done
     pub shell_initialized: bool,
 
@@ -119,28 +122,26 @@ impl TerminalSession {
         let (rows, cols) = (size::DEFAULT_ROWS, size::DEFAULT_COLS);
 
         // Initialize PTY
-        let (pty_writer, pty_output_rx, pty_reader, pty_manager) = runtime_handle.block_on(async {
-            match PtyManager::new().await {
-                Ok(mut manager) => {
-                    log::info!(
-                        "Session {}: PTY initialized with shell: {}",
-                        id,
-                        manager.shell()
-                    );
+        let (pty_writer, pty_output_rx, pty_reader, pty_manager, shell) =
+            runtime_handle.block_on(async {
+                match PtyManager::new().await {
+                    Ok(mut manager) => {
+                        let shell = manager.shell().to_string();
+                        log::info!("Session {id}: PTY initialized with shell: {shell}");
 
-                    let (tx, rx) = mpsc::sync_channel(pty_config::CHANNEL_CAPACITY);
-                    let writer = manager.take_writer().await.ok();
-                    let reader = manager.take_reader(tx).await.ok();
-                    let manager = Arc::new(TokioMutex::new(manager));
+                        let (tx, rx) = mpsc::sync_channel(pty_config::CHANNEL_CAPACITY);
+                        let writer = manager.take_writer().await.ok();
+                        let reader = manager.take_reader(tx).await.ok();
+                        let manager = Arc::new(TokioMutex::new(manager));
 
-                    (writer, Some(rx), reader, Some(manager))
+                        (writer, Some(rx), reader, Some(manager), shell)
+                    }
+                    Err(e) => {
+                        log::error!("Session {id}: Failed to initialize PTY: {e}");
+                        (None, None, None, None, "sh".to_string())
+                    }
                 }
-                Err(e) => {
-                    log::error!("Session {}: Failed to initialize PTY: {}", id, e);
-                    (None, None, None, None)
-                }
-            }
-        });
+            });
 
         Self {
             id,
@@ -152,6 +153,7 @@ impl TerminalSession {
             pty_reader,
             pty_manager,
             terminal_size: (cols, rows),
+            shell,
             shell_initialized: false,
             startup_time: Instant::now(),
             init_commands_sent_at: None,
