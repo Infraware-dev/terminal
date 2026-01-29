@@ -18,7 +18,7 @@ use crate::ui::{
     render_text_runs_buffered,
 };
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Vec2, ViewportCommand};
-use egui_tiles::{Tiles, Tree, UiResponse};
+use egui_tiles::{EditAction, Tiles, Tree, UiResponse};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -206,6 +206,13 @@ pub struct InfrawareApp {
     /// Tab tile that should be activated in the next frame
     pending_active_tab: Option<egui_tiles::TileId>,
 
+    /// Flag indicating a tab was selected and we need to sync focus
+    ///
+    /// We need to use this, because when a tab is changed we just get a call on [`egui_tiles::Behavior::on_edit`],
+    /// but we don't know which tab was selected until the next frame. So we set this flag in `on_edit` and then
+    /// in the next frame we check it and update the active session accordingly.
+    tab_selection_pending: bool,
+
     /// Cached logo texture for tab icons
     logo_texture: Option<egui::TextureHandle>,
 }
@@ -339,6 +346,7 @@ impl InfrawareApp {
             session_tile_ids,
             pending_focus_session: None,
             pending_active_tab: None,
+            tab_selection_pending: false,
             logo_texture,
         }
     }
@@ -1890,6 +1898,7 @@ impl InfrawareApp {
                 };
                 if let Some(session_id) = Self::find_first_pane_session(&tree.tiles, next_tile_id) {
                     self.active_session_id = session_id;
+                    self.pending_focus_session = Some(session_id);
                     log::debug!("Switched to next tab, session {}", self.active_session_id);
                 }
             }
@@ -1928,6 +1937,7 @@ impl InfrawareApp {
                 };
                 if let Some(session_id) = Self::find_first_pane_session(&tree.tiles, prev_tile_id) {
                     self.active_session_id = session_id;
+                    self.pending_focus_session = Some(session_id);
                     log::debug!("Switched to prev tab, session {}", self.active_session_id);
                 }
             }
@@ -2162,6 +2172,17 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
             ..Default::default()
         }
     }
+
+    fn on_edit(&mut self, edit_action: EditAction) {
+        log::debug!("TerminalBehavior::on_edit: {edit_action:?}");
+        if matches!(edit_action, EditAction::TabSelected) {
+            // Set flag to handle tab selection in next frame
+            // We can't get the correct active tab here because egui_tiles
+            // hasn't updated the tree yet
+            self.app.tab_selection_pending = true;
+            log::debug!("on_edit: TabSelected event, set tab_selection_pending flag");
+        }
+    }
 }
 
 impl eframe::App for InfrawareApp {
@@ -2287,6 +2308,28 @@ impl eframe::App for InfrawareApp {
                     self.tiles = Some(tree);
                 }
             });
+
+        // Handle pending tab selection (from on_edit)
+        // Must happen after tree.ui() so the tree is updated
+        if self.tab_selection_pending {
+            self.tab_selection_pending = false;
+
+            if let Some(ref tree) = self.tiles
+                && let Some(root_id) = tree.root()
+                && let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+                    tree.tiles.get(root_id)
+                && let Some(active_tile_id) = tabs.active
+                && let Some(session_id) =
+                    InfrawareApp::find_first_pane_session(&tree.tiles, active_tile_id)
+                && self.active_session_id != session_id
+            {
+                self.active_session_id = session_id;
+                self.pending_focus_session = Some(session_id);
+                log::info!(
+                    "Tab selection detected: switched to session {session_id}, pending focus",
+                );
+            }
+        }
 
         // REACTIVE REPAINT: Only request repaint when something actually changed
         // This dramatically reduces CPU usage when idle (from ~50% to <5%)
