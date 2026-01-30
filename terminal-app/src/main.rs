@@ -4,6 +4,9 @@
 //! All commands are sent to bash/zsh via PTY. When "command not found" is detected,
 //! the input is sent to the LLM backend for assistance.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod app;
 mod auth;
 mod config;
