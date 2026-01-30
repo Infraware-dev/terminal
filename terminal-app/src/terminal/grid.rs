@@ -1090,36 +1090,459 @@ impl ExactSizeIterator for VisibleRowsIter<'_> {}
 mod tests {
     use super::*;
 
+    // === Construction ===
+
+    #[test]
+    fn test_new_grid_dimensions() {
+        let grid = TerminalGrid::new(24, 80);
+        assert_eq!(grid.size(), (24, 80));
+        assert_eq!(grid.cursor_position(), (0, 0));
+        assert!(grid.cursor_visible());
+        assert!(!grid.is_alt_screen());
+        assert!(grid.is_at_bottom());
+    }
+
+    // === Character Output ===
+
+    #[test]
+    fn test_put_char_advances_cursor() {
+        let mut grid = TerminalGrid::new(24, 80);
+        grid.put_char('A');
+        assert_eq!(grid.cursor_position(), (0, 1));
+        grid.put_char('B');
+        assert_eq!(grid.cursor_position(), (0, 2));
+        // Verify cell content
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].ch, 'A');
+        assert_eq!(row[1].ch, 'B');
+    }
+
+    #[test]
+    fn test_put_char_wrap_at_end_of_line() {
+        let mut grid = TerminalGrid::new(24, 5);
+        for c in "ABCDE".chars() {
+            grid.put_char(c);
+        }
+        // Cursor at last col, wrap_pending should be set
+        assert!(grid.wrap_pending);
+        // Next char triggers wrap to next line
+        grid.put_char('F');
+        assert_eq!(grid.cursor_position(), (1, 1));
+    }
+
+    // === Cursor Movement ===
+
+    #[test]
+    fn test_goto_1indexed() {
+        let mut grid = TerminalGrid::new(24, 80);
+        grid.goto(5, 10); // 1-indexed
+        assert_eq!(grid.cursor_position(), (4, 9)); // 0-indexed
+    }
+
+    #[test]
+    fn test_goto_clamps_to_bounds() {
+        let mut grid = TerminalGrid::new(10, 20);
+        grid.goto(100, 200);
+        assert_eq!(grid.cursor_position(), (9, 19));
+    }
+
+    #[test]
+    fn test_move_up_down_with_bounds() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.goto(5, 1);
+        grid.move_up(3);
+        assert_eq!(grid.cursor_position().0, 1);
+        grid.move_up(100); // Clamp to 0
+        assert_eq!(grid.cursor_position().0, 0);
+        grid.move_down(100); // Clamp to 9
+        assert_eq!(grid.cursor_position().0, 9);
+    }
+
+    #[test]
+    fn test_move_left_right_with_bounds() {
+        let mut grid = TerminalGrid::new(10, 20);
+        grid.goto(1, 10);
+        grid.move_right(5);
+        assert_eq!(grid.cursor_position().1, 14);
+        grid.move_right(100); // Clamp to 19
+        assert_eq!(grid.cursor_position().1, 19);
+        grid.move_left(100); // Clamp to 0
+        assert_eq!(grid.cursor_position().1, 0);
+    }
+
+    // === Line Operations ===
+
+    #[test]
+    fn test_carriage_return() {
+        let mut grid = TerminalGrid::new(24, 80);
+        grid.goto(1, 40);
+        grid.carriage_return();
+        assert_eq!(grid.cursor_position().1, 0);
+        // Row unchanged
+        assert_eq!(grid.cursor_position().0, 0);
+    }
+
+    #[test]
+    fn test_linefeed_normal() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.goto(3, 1);
+        grid.linefeed();
+        assert_eq!(grid.cursor_position().0, 3); // Was row 2, now row 3
+    }
+
+    #[test]
+    fn test_linefeed_at_bottom_scrolls() {
+        let mut grid = TerminalGrid::new(5, 10);
+        grid.put_char('A'); // Row 0 has 'A'
+        grid.goto(5, 1); // Last row (0-indexed: row 4)
+        grid.linefeed(); // Should scroll up
+        assert_eq!(grid.scrollback().len(), 1);
+        assert_eq!(grid.scrollback()[0][0].ch, 'A');
+    }
+
+    #[test]
+    fn test_backspace() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.goto(1, 5);
+        grid.backspace();
+        assert_eq!(grid.cursor_position().1, 3);
+        // Backspace at col 0 stays at 0
+        grid.goto(1, 1);
+        grid.backspace();
+        assert_eq!(grid.cursor_position().1, 0);
+    }
+
+    #[test]
+    fn test_tab_stops() {
+        let mut grid = TerminalGrid::new(10, 80);
+        // Default tab stops every 8 cols: 0, 8, 16, 24...
+        grid.tab();
+        assert_eq!(grid.cursor_position().1, 8);
+        grid.tab();
+        assert_eq!(grid.cursor_position().1, 16);
+    }
+
+    #[test]
+    fn test_reverse_index_at_top_scrolls_down() {
+        let mut grid = TerminalGrid::new(5, 10);
+        // Put 'A' at row 0
+        grid.put_char('A');
+        grid.goto(1, 1); // Row 0
+        grid.reverse_index(); // Should scroll down, pushing content down
+        // Row 0 should now be empty (cleared by scroll_down)
+        let row0 = grid.row(0).unwrap();
+        assert_eq!(row0[0].ch, ' ');
+    }
+
+    // === Scroll Operations ===
+
+    #[test]
+    fn test_scroll_up_ring_buffer() {
+        let mut grid = TerminalGrid::new(5, 10);
+        // Write identifiable content on row 0
+        grid.put_char('X');
+        // Scroll up - row 0 goes to scrollback
+        grid.scroll_up(1);
+        assert_eq!(grid.cells_offset, 1);
+        assert_eq!(grid.scrollback().len(), 1);
+        assert_eq!(grid.scrollback()[0][0].ch, 'X');
+    }
+
+    #[test]
+    fn test_scroll_down_ring_buffer() {
+        let mut grid = TerminalGrid::new(5, 10);
+        grid.scroll_down(1);
+        // Offset wraps around
+        assert_eq!(grid.cells_offset, grid.cells.len() - 1);
+        // Top row should be cleared
+        let row0 = grid.row(0).unwrap();
+        assert_eq!(row0[0].ch, ' ');
+    }
+
+    #[test]
+    fn test_scrollback_trimmed_at_max() {
+        let mut grid = TerminalGrid::new(5, 10);
+        for _ in 0..MAX_SCROLLBACK + 100 {
+            grid.scroll_up(1);
+        }
+        assert_eq!(grid.scrollback().len(), MAX_SCROLLBACK);
+    }
+
+    // === Scroll View ===
+
+    #[test]
+    fn test_scroll_view_up_down() {
+        let mut grid = TerminalGrid::new(5, 10);
+        // Add some scrollback
+        for _ in 0..20 {
+            grid.scroll_up(1);
+        }
+        assert!(grid.is_at_bottom());
+        grid.scroll_view_up(5);
+        assert_eq!(grid.scroll_offset(), 5);
+        assert!(!grid.is_at_bottom());
+        grid.scroll_view_down(3);
+        assert_eq!(grid.scroll_offset(), 2);
+        grid.scroll_to_bottom();
+        assert!(grid.is_at_bottom());
+    }
+
+    #[test]
+    fn test_scroll_view_clamped() {
+        let mut grid = TerminalGrid::new(5, 10);
+        for _ in 0..10 {
+            grid.scroll_up(1);
+        }
+        grid.scroll_view_up(1000);
+        assert_eq!(grid.scroll_offset(), grid.max_scroll_offset());
+    }
+
+    // === Scroll Region ===
+
+    #[test]
+    fn test_scroll_region_linefeed() {
+        let mut grid = TerminalGrid::new(10, 10);
+        grid.set_scroll_region(3, 7); // 1-indexed → rows 2-6
+        grid.goto(7, 1); // Bottom of region (0-indexed: row 6)
+        let scrollback_before = grid.scrollback().len();
+        grid.linefeed(); // Should scroll within region, not add to scrollback
+        assert_eq!(grid.scrollback().len(), scrollback_before);
+    }
+
+    // === Erase Operations ===
+
+    #[test]
+    fn test_erase_line_from_cursor() {
+        let mut grid = TerminalGrid::new(10, 10);
+        for c in "ABCDEFGHIJ".chars() {
+            grid.put_char(c);
+        }
+        grid.goto(1, 5); // Col 4 (0-indexed)
+        grid.erase_line(0); // Erase from cursor to end
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[3].ch, 'D'); // Before cursor preserved
+        assert_eq!(row[4].ch, ' '); // Cursor pos erased
+        assert_eq!(row[9].ch, ' '); // End erased
+    }
+
+    #[test]
+    fn test_erase_display_full() {
+        let mut grid = TerminalGrid::new(5, 10);
+        grid.put_char('A');
+        grid.erase_display(2); // Full screen erase
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].ch, ' ');
+        assert_eq!(grid.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn test_erase_chars() {
+        let mut grid = TerminalGrid::new(10, 10);
+        for c in "ABCDE".chars() {
+            grid.put_char(c);
+        }
+        grid.goto(1, 2); // Col 1 (0-indexed)
+        grid.erase_chars(2); // Erase 2 chars from cursor
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].ch, 'A');
+        assert_eq!(row[1].ch, ' '); // Erased
+        assert_eq!(row[2].ch, ' '); // Erased
+        assert_eq!(row[3].ch, 'D'); // Preserved
+    }
+
+    // === Insert/Delete ===
+
+    #[test]
+    fn test_delete_chars_shifts_left() {
+        let mut grid = TerminalGrid::new(10, 10);
+        for c in "ABCDE".chars() {
+            grid.put_char(c);
+        }
+        grid.goto(1, 2); // Col 1 (0-indexed)
+        grid.delete_chars(2);
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[1].ch, 'D'); // Shifted left
+        assert_eq!(row[2].ch, 'E');
+    }
+
+    #[test]
+    fn test_insert_chars_shifts_right() {
+        let mut grid = TerminalGrid::new(10, 10);
+        for c in "ABCDE".chars() {
+            grid.put_char(c);
+        }
+        grid.goto(1, 2); // Col 1 (0-indexed)
+        grid.insert_chars(2);
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].ch, 'A');
+        assert_eq!(row[1].ch, ' '); // Inserted blank
+        assert_eq!(row[2].ch, ' '); // Inserted blank
+        assert_eq!(row[3].ch, 'B'); // Original B shifted right
+    }
+
+    // === Alt Screen ===
+
     #[test]
     fn test_alt_screen_preserves_ring_buffer_offset() {
         let mut grid = TerminalGrid::new(10, 80);
-
-        // Scroll to create non-zero offset
         for _ in 0..5 {
             grid.scroll_up(1);
         }
         let offset_before = grid.cells_offset;
-        assert!(
-            offset_before > 0,
-            "Should have non-zero offset after scrolling"
-        );
+        assert!(offset_before > 0);
 
-        // Enter alt screen - offset should be reset
         grid.enter_alt_screen();
-        assert_eq!(
-            grid.cells_offset, 0,
-            "Alt screen should start with zero offset"
-        );
+        assert_eq!(grid.cells_offset, 0);
+        assert!(grid.is_alt_screen());
 
-        // Scroll in alt screen
         grid.scroll_up(3);
-        assert!(grid.cells_offset > 0, "Alt screen should allow scrolling");
-
-        // Exit alt screen - original offset should be restored
         grid.exit_alt_screen();
-        assert_eq!(
-            grid.cells_offset, offset_before,
-            "Original offset should be restored after exiting alt screen"
-        );
+        assert_eq!(grid.cells_offset, offset_before);
+        assert!(!grid.is_alt_screen());
+    }
+
+    #[test]
+    fn test_alt_screen_preserves_content() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.put_char('M'); // Main screen content
+        let main_pos = grid.cursor_position();
+
+        grid.enter_alt_screen();
+        grid.put_char('A'); // Alt screen content
+        grid.exit_alt_screen();
+
+        // Main screen content restored
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].ch, 'M');
+        assert_eq!(grid.cursor_position(), main_pos);
+    }
+
+    #[test]
+    fn test_enter_alt_screen_twice_is_noop() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.put_char('X');
+        grid.enter_alt_screen();
+        grid.put_char('Y');
+        grid.enter_alt_screen(); // Should be ignored
+        // Content should still be alt screen
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].ch, 'Y');
+    }
+
+    // === Save/Restore Cursor ===
+
+    #[test]
+    fn test_save_restore_cursor() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.goto(5, 20);
+        grid.set_bold(true);
+        grid.save_cursor();
+
+        grid.goto(1, 1);
+        grid.set_bold(false);
+        grid.restore_cursor();
+
+        assert_eq!(grid.cursor_position(), (4, 19));
+        assert!(grid.current_attrs.bold());
+    }
+
+    // === Attributes ===
+
+    #[test]
+    fn test_attributes_applied_to_cells() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.set_bold(true);
+        grid.set_fg(Color::Indexed(1));
+        grid.put_char('X');
+
+        let row = grid.row(0).unwrap();
+        assert!(row[0].attrs.bold());
+        assert_eq!(row[0].fg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn test_reset_attrs() {
+        let mut grid = TerminalGrid::new(10, 80);
+        grid.set_bold(true);
+        grid.set_italic(true);
+        grid.set_fg(Color::Indexed(5));
+        grid.reset_attrs();
+
+        assert!(!grid.current_attrs.bold());
+        assert!(!grid.current_attrs.italic());
+        assert_eq!(grid.current_fg, Color::Named(NamedColor::Foreground));
+    }
+
+    // === Visible Rows ===
+
+    #[test]
+    fn test_visible_rows_with_scrollback() {
+        let mut grid = TerminalGrid::new(5, 10);
+        // Create scrollback
+        for i in 0..3 {
+            grid.put_char((b'A' + i) as char);
+            grid.carriage_return();
+            grid.linefeed();
+        }
+        // Scroll enough to push rows into scrollback
+        for _ in 0..5 {
+            grid.scroll_up(1);
+        }
+        assert!(grid.scrollback().len() > 0);
+        assert_eq!(grid.visible_row_count(), 5);
+
+        // Scroll up into scrollback
+        grid.scroll_view_up(2);
+        let rows = grid.visible_rows();
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn test_visible_rows_iter_matches_visible_rows() {
+        let mut grid = TerminalGrid::new(5, 10);
+        for _ in 0..10 {
+            grid.scroll_up(1);
+        }
+        grid.scroll_view_up(3);
+
+        let vec_rows: Vec<_> = grid.visible_rows();
+        let iter_rows: Vec<_> = grid.visible_rows_iter().collect();
+        assert_eq!(vec_rows.len(), iter_rows.len());
+    }
+
+    // === Resize ===
+
+    #[test]
+    fn test_resize_horizontal_preserves_content() {
+        let mut grid = TerminalGrid::new(10, 20);
+        grid.put_char('A');
+        grid.resize(10, 40); // Wider
+        let row = grid.row(0).unwrap();
+        assert_eq!(row[0].ch, 'A');
+    }
+
+    #[test]
+    fn test_resize_clamps_cursor() {
+        let mut grid = TerminalGrid::new(20, 80);
+        grid.goto(15, 60);
+        grid.resize(10, 40);
+        let (row, col) = grid.cursor_position();
+        assert!(row < 10);
+        assert!(col < 40);
+    }
+
+    // === Origin Mode ===
+
+    #[test]
+    fn test_origin_mode_cursor_relative_to_region() {
+        let mut grid = TerminalGrid::new(20, 80);
+        grid.set_scroll_region(5, 15); // Rows 4-14 (0-indexed)
+        grid.set_origin_mode(true);
+        // Cursor should be at scroll_top
+        assert_eq!(grid.cursor_position().0, 4);
+        // move_up should clamp to scroll_top
+        grid.goto(3, 1);
+        grid.move_up(100);
+        assert_eq!(grid.cursor_position().0, 4);
     }
 }
