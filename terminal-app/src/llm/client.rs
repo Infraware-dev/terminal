@@ -282,7 +282,7 @@ impl HttpLLMClient {
     /// Create a new LLM thread via POST /threads
     async fn create_thread(&self) -> Result<String> {
         let url = format!("{}/threads", self.base_url);
-        log::info!("[HTTP-OUT] POST {}", url);
+        tracing::info!("[HTTP-OUT] POST {}", url);
 
         let request = CreateThreadRequest {
             metadata: serde_json::json!({}),
@@ -298,7 +298,7 @@ impl HttpLLMClient {
             .await?;
 
         let elapsed = request_start.elapsed();
-        log::info!(
+        tracing::info!(
             "[HTTP-IN] POST /threads | status={} | elapsed={}ms",
             response.status(),
             elapsed.as_millis()
@@ -307,12 +307,12 @@ impl HttpLLMClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            log::error!("Failed to create thread ({}): {}", status, error_text);
+            tracing::error!("Failed to create thread ({}): {}", status, error_text);
             anyhow::bail!("Failed to create thread ({}): {}", status, error_text);
         }
 
         let thread_response: CreateThreadResponse = response.json().await?;
-        log::info!("Created LLM thread: {}", thread_response.thread_id);
+        tracing::info!("Created LLM thread: {}", thread_response.thread_id);
 
         // Cache the thread ID
         *self.thread_id.write().await = Some(thread_response.thread_id.clone());
@@ -349,7 +349,7 @@ impl HttpLLMClient {
         cancel_token: CancellationToken,
     ) -> Result<StreamResult> {
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::info!(
+        tracing::info!(
             "[HTTP-OUT] POST {} | input={} | resume={}",
             url,
             input.is_some(),
@@ -391,12 +391,12 @@ impl HttpLLMClient {
                     result?
             }
             _ = cancel_token.cancelled() => {
-                log::info!("HTTP request cancelled before response");
+                tracing::info!("HTTP request cancelled before response");
                 anyhow::bail!("Query cancelled by user")
             }
         };
 
-        log::info!(
+        tracing::info!(
             "[HTTP-IN] POST /runs/stream | status={} | elapsed={}ms",
             response.status(),
             request_start.elapsed().as_millis()
@@ -405,11 +405,11 @@ impl HttpLLMClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            log::error!("Stream run failed ({}): {}", status, error_text);
+            tracing::error!("Stream run failed ({}): {}", status, error_text);
             anyhow::bail!("Stream run failed ({}): {}", status, error_text);
         }
 
-        log::info!("Starting SSE stream parsing...");
+        tracing::info!("Starting SSE stream parsing...");
         self.parse_sse_stream(response, cancel_token).await
     }
 
@@ -428,7 +428,7 @@ impl HttpLLMClient {
         let mut chunk_count: u32 = 0;
         let stream_start = std::time::Instant::now();
 
-        log::info!("SSE stream started, waiting for chunks...");
+        tracing::info!("SSE stream started, waiting for chunks...");
 
         loop {
             // Use timeout to detect idle streams (no data for STREAM_IDLE_TIMEOUT)
@@ -452,7 +452,7 @@ impl HttpLLMClient {
 
             // Check for cancellation FIRST (before processing chunk)
             if cancel_token.is_cancelled() {
-                log::info!("SSE stream cancelled by user after {} chunks", chunk_count);
+                tracing::info!("SSE stream cancelled by user after {} chunks", chunk_count);
                 anyhow::bail!("Query cancelled by user");
             }
 
@@ -460,7 +460,7 @@ impl HttpLLMClient {
                 Ok(chunk) => {
                     chunk_count += 1;
                     let text = String::from_utf8_lossy(&chunk);
-                    log::debug!(
+                    tracing::debug!(
                         "SSE chunk #{} received ({} bytes) after {}ms",
                         chunk_count,
                         chunk.len(),
@@ -480,7 +480,7 @@ impl HttpLLMClient {
                         // Parse SSE line
                         if let Some(event_type) = line.strip_prefix("event: ") {
                             current_event = Some(event_type.trim().to_string());
-                            log::debug!("SSE event type: {}", event_type);
+                            tracing::debug!("SSE event type: {}", event_type);
                         } else if let Some(data) = line.strip_prefix("data: ")
                             && let Some(ref event) = current_event
                         {
@@ -491,7 +491,7 @@ impl HttpLLMClient {
                                 }
                                 Ok(None) => {}
                                 Err(e) => {
-                                    log::error!("Error handling SSE event '{}': {}", event, e);
+                                    tracing::error!("Error handling SSE event '{}': {}", event, e);
                                     return Err(e);
                                 }
                             }
@@ -499,7 +499,7 @@ impl HttpLLMClient {
                     }
                 }
                 Err(e) => {
-                    log::error!(
+                    tracing::error!(
                         "SSE stream error after {} chunks ({}ms): {}",
                         chunk_count,
                         stream_start.elapsed().as_millis(),
@@ -524,26 +524,26 @@ impl HttpLLMClient {
             }
         }
 
-        log::info!(
+        tracing::info!(
             "SSE stream completed: {} chunks, {} result chars, {}ms elapsed",
             chunk_count,
             result.len(),
             stream_start.elapsed().as_millis()
         );
         if result.is_empty() {
-            log::warn!("SSE stream returned EMPTY result - no AI content extracted");
+            tracing::warn!("SSE stream returned EMPTY result - no AI content extracted");
         } else {
-            log::debug!("Final result preview: {}...", truncate_utf8(&result, 200));
+            tracing::debug!("Final result preview: {}...", truncate_utf8(&result, 200));
         }
 
         // Return interrupt if detected, otherwise complete
         match interrupt_data {
             Some(InterruptData::CommandApproval { command, message }) => {
-                log::info!("Stream interrupted for command approval: {}", command);
+                tracing::info!("Stream interrupted for command approval: {}", command);
                 Ok(StreamResult::CommandApproval { command, message })
             }
             Some(InterruptData::Question { question, options }) => {
-                log::info!("Stream interrupted with question: {}", question);
+                tracing::info!("Stream interrupted with question: {}", question);
                 Ok(StreamResult::Question { question, options })
             }
             None => Ok(StreamResult::Complete(result)),
@@ -859,21 +859,21 @@ impl HttpLLMClient {
         if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data)
             && let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str())
         {
-            log::info!("Run started: {}", run_id);
+            tracing::info!("Run started: {}", run_id);
         }
     }
 
     /// Handle "messages" SSE event - extract and accumulate AI message content
     fn handle_messages_event(data: &str, result: &mut String) {
         let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) else {
-            log::warn!("Failed to parse 'messages' event JSON");
+            tracing::warn!("Failed to parse 'messages' event JSON");
             return;
         };
         let Some(msgs) = messages.as_array() else {
-            log::debug!("'messages' event is not an array");
+            tracing::debug!("'messages' event is not an array");
             return;
         };
-        log::debug!("Processing {} items in 'messages' event", msgs.len());
+        tracing::debug!("Processing {} items in 'messages' event", msgs.len());
 
         for msg in msgs {
             if Self::is_ai_message(msg)
@@ -901,13 +901,13 @@ impl HttpLLMClient {
                 let interrupt_data = Self::parse_interrupt_value(value);
                 match &interrupt_data {
                     InterruptData::CommandApproval { command, .. } => {
-                        log::info!(
+                        tracing::info!(
                             "Command approval requested for: {} - awaiting user decision",
                             command
                         );
                     }
                     InterruptData::Question { question, .. } => {
-                        log::info!("Question received: {} - awaiting user answer", question);
+                        tracing::info!("Question received: {} - awaiting user answer", question);
                     }
                 }
                 return Ok(Some(interrupt_data));
@@ -919,20 +919,20 @@ impl HttpLLMClient {
     /// Handle "values" SSE event - extract latest AI message from state update
     fn handle_values_event(data: &str, result: &mut String) {
         let Ok(values) = serde_json::from_str::<serde_json::Value>(data) else {
-            log::warn!(
+            tracing::warn!(
                 "Failed to parse 'values' event JSON: {}",
                 truncate_utf8(data, 200)
             );
             return;
         };
         let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) else {
-            log::debug!(
+            tracing::debug!(
                 "No 'messages' array in values event, keys: {:?}",
                 values.as_object().map(|o| o.keys().collect::<Vec<_>>())
             );
             return;
         };
-        log::debug!("Processing {} messages from 'values' event", msgs.len());
+        tracing::debug!("Processing {} messages from 'values' event", msgs.len());
 
         // Get the last AI message with actual content from the values
         // Skip messages with empty content or just handoff messages
@@ -953,7 +953,7 @@ impl HttpLLMClient {
             if let Some(content) = Self::extract_message_content(msg)
                 && Self::is_valid_ai_content(&content)
             {
-                log::info!(
+                tracing::info!(
                     "Found AI message content ({} chars): {}...",
                     content.len(),
                     truncate_utf8(&content, 100)
@@ -962,12 +962,12 @@ impl HttpLLMClient {
                 result.push_str(&content);
                 break; // Found a good message, stop searching
             } else if let Some(content) = Self::extract_message_content(msg) {
-                log::debug!(
+                tracing::debug!(
                     "Skipping invalid AI content: {}...",
                     truncate_utf8(&content, 50)
                 );
             } else {
-                log::debug!("No content extracted from AI message");
+                tracing::debug!("No content extracted from AI message");
             }
         }
     }
@@ -979,7 +979,7 @@ impl HttpLLMClient {
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown error");
-            log::error!("Stream error: {}", msg);
+            tracing::error!("Stream error: {}", msg);
             anyhow::bail!("Stream error: {}", msg);
         }
         Ok(None)
@@ -1001,8 +1001,8 @@ impl HttpLLMClient {
             "updates" => return Self::handle_updates_event(data),
             "values" => Self::handle_values_event(data, result),
             "error" => return Self::handle_error_event(data),
-            "end" => log::debug!("Stream ended"),
-            _ => log::trace!("Unknown SSE event type: {}", event),
+            "end" => tracing::debug!("Stream ended"),
+            _ => tracing::trace!("Unknown SSE event type: {}", event),
         }
         Ok(None)
     }
@@ -1011,7 +1011,7 @@ impl HttpLLMClient {
 #[async_trait]
 impl LLMClientTrait for HttpLLMClient {
     async fn query(&self, text: &str) -> Result<LLMQueryResult> {
-        log::info!("LLM query: {}", text);
+        tracing::info!("LLM query: {}", text);
 
         let thread_id = self.ensure_thread().await?;
         let stream_result = self
@@ -1025,7 +1025,7 @@ impl LLMClientTrait for HttpLLMClient {
         text: &str,
         cancel_token: CancellationToken,
     ) -> Result<LLMQueryResult> {
-        log::info!("LLM query (cancellable): {}", text);
+        tracing::info!("LLM query (cancellable): {}", text);
 
         // Use streaming endpoint via threads
         let thread_id = self.ensure_thread().await?;
@@ -1047,7 +1047,7 @@ impl LLMClientTrait for HttpLLMClient {
             .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
 
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::info!("[HTTP-OUT] POST {} | answer_len={}", url, answer.len());
+        tracing::info!("[HTTP-OUT] POST {} | answer_len={}", url, answer.len());
 
         // Send user's answer as a new message along with resume command
         let request = StreamRunRequest {
@@ -1074,7 +1074,7 @@ impl LLMClientTrait for HttpLLMClient {
             .await?;
 
         let elapsed = request_start.elapsed();
-        log::info!(
+        tracing::info!(
             "[HTTP-IN] POST /runs/stream | status={} | elapsed={}ms",
             response.status(),
             elapsed.as_millis()
@@ -1083,7 +1083,7 @@ impl LLMClientTrait for HttpLLMClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            log::error!("Resume with answer failed ({}): {}", status, error_text);
+            tracing::error!("Resume with answer failed ({}): {}", status, error_text);
             anyhow::bail!("Resume with answer failed ({}): {}", status, error_text);
         }
 
@@ -1106,7 +1106,7 @@ impl LLMClientTrait for HttpLLMClient {
             .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
 
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::info!(
+        tracing::info!(
             "[HTTP-OUT] POST {} | command_output | cmd_len={} | output_len={}",
             url,
             command.len(),
@@ -1144,7 +1144,7 @@ impl LLMClientTrait for HttpLLMClient {
             .await?;
 
         let elapsed = request_start.elapsed();
-        log::info!(
+        tracing::info!(
             "[HTTP-IN] POST /runs/stream (command_output) | status={} | elapsed={}ms",
             response.status(),
             elapsed.as_millis()
@@ -1153,7 +1153,7 @@ impl LLMClientTrait for HttpLLMClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            log::error!(
+            tracing::error!(
                 "Resume with command output failed ({}): {}",
                 status,
                 error_text
@@ -1180,7 +1180,7 @@ impl LLMClientTrait for HttpLLMClient {
             .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
 
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::info!("[HTTP-OUT] POST {} | rejected", url);
+        tracing::info!("[HTTP-OUT] POST {} | rejected", url);
 
         let request = StreamRunRequest {
             assistant_id: "supervisor".to_string(),
@@ -1201,7 +1201,7 @@ impl LLMClientTrait for HttpLLMClient {
             .await?;
 
         let elapsed = request_start.elapsed();
-        log::info!(
+        tracing::info!(
             "[HTTP-IN] POST /runs/stream (rejected) | status={} | elapsed={}ms",
             response.status(),
             elapsed.as_millis()
@@ -1210,7 +1210,7 @@ impl LLMClientTrait for HttpLLMClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            log::error!("Resume rejected failed ({}): {}", status, error_text);
+            tracing::error!("Resume rejected failed ({}): {}", status, error_text);
             anyhow::bail!("Resume rejected failed ({}): {}", status, error_text);
         }
 
@@ -1391,7 +1391,7 @@ impl LLMClientTrait for MockLLMClient {
 
         for i in 0..MOCK_CHUNK_COUNT {
             if cancel_token.is_cancelled() {
-                log::info!(
+                tracing::info!(
                     "Mock LLM query cancelled after {}ms",
                     i * MOCK_CHUNK_DELAY_MS
                 );

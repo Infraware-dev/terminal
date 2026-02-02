@@ -25,7 +25,7 @@ impl ClipboardManager {
     /// Creates a new clipboard manager.
     pub fn new() -> Self {
         let clipboard = arboard::Clipboard::new()
-            .map_err(|e| log::error!("Failed to init clipboard: {}", e))
+            .map_err(|e| tracing::error!("Failed to init clipboard: {}", e))
             .ok();
 
         Self { clipboard }
@@ -34,24 +34,24 @@ impl ClipboardManager {
     /// Copies selected text from the active session to the clipboard.
     pub fn copy_selection(&mut self, ctx: &egui::Context, state: &AppState) {
         let Some(session) = state.sessions.get(&state.active_session_id) else {
-            log::info!("No active session for copy");
+            tracing::info!("No active session for copy");
             return;
         };
 
-        log::info!("copy_selection called, selection: {:?}", session.selection);
+        tracing::info!("copy_selection called, selection: {:?}", session.selection);
 
         let Some(ref sel) = session.selection else {
-            log::info!("No selection exists");
+            tracing::info!("No selection exists");
             return;
         };
 
         if sel.is_empty() {
-            log::info!("Selection is empty, nothing to copy");
+            tracing::info!("Selection is empty, nothing to copy");
             return;
         }
 
         let (start, end) = sel.normalized();
-        log::info!(
+        tracing::info!(
             "Extracting text from ({},{}) to ({},{})",
             start.row,
             start.col,
@@ -64,7 +64,7 @@ impl ClipboardManager {
             .grid()
             .extract_selection_text(start.row, start.col, end.row, end.col);
 
-        log::info!("Extracted text: '{}' ({} chars)", text, text.len());
+        tracing::info!("Extracted text: '{}' ({} chars)", text, text.len());
 
         if !text.is_empty() {
             self.set_text(&text, ctx);
@@ -76,20 +76,20 @@ impl ClipboardManager {
         if let Some(ref mut cb) = self.clipboard {
             match cb.set_text(text) {
                 Ok(()) => {
-                    log::info!(
+                    tracing::info!(
                         "Text copied to OS clipboard via arboard ({} chars)",
                         text.len()
                     );
                 }
                 Err(e) => {
-                    log::error!("Arboard copy error: {}", e);
+                    tracing::error!("Arboard copy error: {}", e);
                     // Fallback to egui if arboard fails
                     ctx.copy_text(text.to_string());
                 }
             }
         } else {
             // Fallback to egui if arboard init failed
-            log::warn!("Arboard not available, using egui fallback");
+            tracing::warn!("Arboard not available, using egui fallback");
             ctx.copy_text(text.to_string());
         }
     }
@@ -98,7 +98,7 @@ impl ClipboardManager {
     ///
     /// Returns the bytes to send to PTY, or None if clipboard is empty.
     pub fn get_paste_payload(&mut self, state: &AppState) -> Option<Vec<u8>> {
-        log::info!("get_paste_payload called");
+        tracing::info!("get_paste_payload called");
 
         let cb = self.clipboard.as_mut()?;
 
@@ -121,7 +121,7 @@ impl ClipboardManager {
                     payload.extend_from_slice(b"\x1b[201~");
                 }
 
-                log::info!(
+                tracing::info!(
                     "Pasting {} bytes to PTY (bracketed: {}, text: '{}')",
                     payload.len(),
                     use_bracketed,
@@ -135,11 +135,11 @@ impl ClipboardManager {
                 Some(payload)
             }
             Ok(_) => {
-                log::warn!("Clipboard is empty, nothing to paste");
+                tracing::warn!("Clipboard is empty, nothing to paste");
                 None
             }
             Err(e) => {
-                log::error!("Failed to read clipboard via arboard: {}", e);
+                tracing::error!("Failed to read clipboard via arboard: {}", e);
                 None
             }
         }

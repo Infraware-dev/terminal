@@ -46,20 +46,21 @@ fn main() -> eframe::Result<()> {
 
     // Initialize logging with sensible defaults
     // Priority: RUST_LOG > LOG_LEVEL > default (info)
-    env_logger::Builder::from_env(
-        env_logger::Env::new().filter_or(
-            "RUST_LOG",
-            std::env::var("LOG_LEVEL")
-                .map(|l| format!("infraware_terminal={}", l))
-                .unwrap_or_else(|_| "infraware_terminal=info".to_string()),
-        ),
-    )
-    .init();
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        std::env::var("LOG_LEVEL")
+            .map(|l| format!("infraware_terminal={}", l))
+            .unwrap_or_else(|_| "infraware_terminal=info".to_string())
+    });
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .init();
 
     // Set up Ctrl+C handler - intercepts SIGINT and sets flag
     // This works even when egui doesn't receive the key event
     ctrlc::set_handler(|| {
-        log::info!("SIGINT received from system");
+        tracing::info!("SIGINT received from system");
         SIGINT_RECEIVED.store(true, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl+C handler");

@@ -58,7 +58,7 @@ impl PromptDetector {
             .iter()
             .filter_map(|p| {
                 Regex::new(p)
-                    .map_err(|e| log::warn!("Invalid prompt pattern '{}': {}", p, e))
+                    .map_err(|e| tracing::warn!("Invalid prompt pattern '{}': {}", p, e))
                     .ok()
             })
             .collect();

@@ -79,7 +79,7 @@ impl Debug for HttpAuthenticator {
 #[async_trait]
 impl Authenticator for HttpAuthenticator {
     async fn authenticate(&self, api_key: &str) -> Result<AuthResponse> {
-        log::debug!("Authenticating with backend at {}", self.base_url);
+        tracing::debug!("Authenticating with backend at {}", self.base_url);
 
         let request = AuthRequest {
             api_key: api_key.to_string(),
@@ -94,18 +94,18 @@ impl Authenticator for HttpAuthenticator {
 
         if response.status().is_success() {
             let auth_response: AuthResponse = response.json().await?;
-            log::info!("Authentication successful: {}", auth_response.message);
+            tracing::info!("Authentication successful: {}", auth_response.message);
             Ok(auth_response)
         } else {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            log::error!("Authentication failed ({}): {}", status, error_text);
+            tracing::error!("Authentication failed ({}): {}", status, error_text);
             anyhow::bail!("Authentication failed ({}): {}", status, error_text)
         }
     }
 
     async fn check_status(&self) -> Result<bool> {
-        log::debug!("Checking auth status at {}", self.base_url);
+        tracing::debug!("Checking auth status at {}", self.base_url);
 
         let response = self
             .client
@@ -115,11 +115,11 @@ impl Authenticator for HttpAuthenticator {
 
         if response.status().is_success() {
             let status: AuthStatus = response.json().await?;
-            log::debug!("Auth status: authenticated={}", status.authenticated);
+            tracing::debug!("Auth status: authenticated={}", status.authenticated);
             Ok(status.authenticated)
         } else {
             let error_text = response.text().await.unwrap_or_default();
-            log::error!("Failed to check auth status: {}", error_text);
+            tracing::error!("Failed to check auth status: {}", error_text);
             anyhow::bail!("Failed to check auth status: {}", error_text)
         }
     }
@@ -142,7 +142,7 @@ impl MockAuthenticator {
 #[async_trait]
 impl Authenticator for MockAuthenticator {
     async fn authenticate(&self, _api_key: &str) -> Result<AuthResponse> {
-        log::debug!("Mock authentication (always succeeds)");
+        tracing::debug!("Mock authentication (always succeeds)");
         Ok(AuthResponse {
             success: true,
             message: "Mock authentication successful".to_string(),
@@ -150,7 +150,7 @@ impl Authenticator for MockAuthenticator {
     }
 
     async fn check_status(&self) -> Result<bool> {
-        log::debug!("Mock auth status check (always authenticated)");
+        tracing::debug!("Mock auth status check (always authenticated)");
         Ok(true)
     }
 }

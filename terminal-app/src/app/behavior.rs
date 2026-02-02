@@ -95,7 +95,7 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
             && self.app.active_session_id() != session_id
         {
             self.app.set_active_session_id(session_id);
-            log::debug!("Tab clicked: switched to session {}", session_id);
+            tracing::debug!("Tab clicked: switched to session {}", session_id);
 
             if let Some(session) = self.app.sessions().get(&session_id) {
                 button_response
@@ -157,10 +157,10 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
     }
 
     fn on_edit(&mut self, edit_action: EditAction) {
-        log::debug!("TerminalBehavior::on_edit: {edit_action:?}");
+        tracing::debug!("TerminalBehavior::on_edit: {edit_action:?}");
         if matches!(edit_action, EditAction::TabSelected) {
             self.app.set_tab_selection_pending(true);
-            log::debug!("on_edit: TabSelected event, set tab_selection_pending flag");
+            tracing::debug!("on_edit: TabSelected event, set tab_selection_pending flag");
         }
     }
 }

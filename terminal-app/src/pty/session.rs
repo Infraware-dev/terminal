@@ -222,20 +222,20 @@ impl PtySession {
                     // We write a single byte (Ctrl+C) to trigger SIGINT
                     let result = unsafe { libc::write(raw_fd, [0x03].as_ptr().cast(), 1) };
                     if result == 1 {
-                        log::debug!("Sent Ctrl+C (0x03) to PTY fd {}", raw_fd);
+                        tracing::debug!("Sent Ctrl+C (0x03) to PTY fd {}", raw_fd);
                         Ok(())
                     } else {
                         let err = std::io::Error::last_os_error();
-                        log::warn!("Failed to write Ctrl+C to PTY: {}", err);
+                        tracing::warn!("Failed to write Ctrl+C to PTY: {}", err);
                         Err(anyhow::anyhow!("Failed to write Ctrl+C to PTY: {}", err))
                     }
                 } else {
-                    log::warn!("No raw fd available from master PTY");
+                    tracing::warn!("No raw fd available from master PTY");
                     Ok(())
                 }
             }
             Err(_) => {
-                log::warn!("Could not lock master PTY for SIGINT");
+                tracing::warn!("Could not lock master PTY for SIGINT");
                 Ok(())
             }
         }
@@ -244,7 +244,7 @@ impl PtySession {
     #[cfg(not(unix))]
     pub fn send_sigint(&self) -> Result<()> {
         // On non-Unix, fall back to kill
-        log::warn!("SIGINT not supported on this platform, using kill");
+        tracing::warn!("SIGINT not supported on this platform, using kill");
         // Can't use async here, so just log warning
         Ok(())
     }
@@ -259,7 +259,7 @@ impl PtySession {
     /// The only failure case is when the lock is currently held by another task.
     fn resize_sync(&self, rows: u16, cols: u16) -> Result<()> {
         let master = self.master.try_lock().map_err(|_| {
-            log::debug!("PTY resize deferred - async lock held by another operation");
+            tracing::debug!("PTY resize deferred - async lock held by another operation");
             anyhow::anyhow!("Master PTY lock held, resize deferred")
         })?;
         master

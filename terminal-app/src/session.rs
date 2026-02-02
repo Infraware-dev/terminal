@@ -127,7 +127,7 @@ impl TerminalSession {
                 match PtyManager::new().await {
                     Ok(mut manager) => {
                         let shell = manager.shell().to_string();
-                        log::info!("Session {id}: PTY initialized with shell: {shell}");
+                        tracing::info!("Session {id}: PTY initialized with shell: {shell}");
 
                         let (tx, rx) = mpsc::sync_channel(pty_config::CHANNEL_CAPACITY);
                         let writer = manager.take_writer().await.ok();
@@ -137,7 +137,7 @@ impl TerminalSession {
                         (writer, Some(rx), reader, Some(manager), shell)
                     }
                     Err(e) => {
-                        log::error!("Session {id}: Failed to initialize PTY: {e}");
+                        tracing::error!("Session {id}: Failed to initialize PTY: {e}");
                         (None, None, None, None, "sh".to_string())
                     }
                 }
@@ -178,18 +178,18 @@ impl TerminalSession {
     /// Send data to PTY synchronously.
     pub fn send_to_pty(&self, data: &[u8]) {
         if let Some(ref writer) = self.pty_writer {
-            log::debug!(
+            tracing::debug!(
                 "Session {}: Writing {} bytes to PTY: {:?}",
                 self.id,
                 data.len(),
                 data
             );
             match writer.write_bytes(data) {
-                Ok(n) => log::debug!("Session {}: Wrote {} bytes to PTY", self.id, n),
-                Err(e) => log::error!("Session {}: Failed to write to PTY: {}", self.id, e),
+                Ok(n) => tracing::debug!("Session {}: Wrote {} bytes to PTY", self.id, n),
+                Err(e) => tracing::error!("Session {}: Failed to write to PTY: {}", self.id, e),
             }
         } else {
-            log::warn!("Session {}: No PTY writer available!", self.id);
+            tracing::warn!("Session {}: No PTY writer available!", self.id);
         }
     }
 
@@ -199,11 +199,11 @@ impl TerminalSession {
             return;
         };
         let Ok(mgr) = manager.try_lock() else {
-            log::warn!("Session {}: Could not lock PTY manager for SIGINT", self.id);
+            tracing::warn!("Session {}: Could not lock PTY manager for SIGINT", self.id);
             return;
         };
         if let Err(e) = mgr.send_sigint() {
-            log::error!("Session {}: Failed to send SIGINT: {}", self.id, e);
+            tracing::error!("Session {}: Failed to send SIGINT: {}", self.id, e);
         }
     }
 
@@ -235,7 +235,7 @@ impl TerminalSession {
         // Content should always match the allocated space to avoid rendering artifacts.
         self.terminal_size = (cols, rows);
 
-        log::debug!(
+        tracing::debug!(
             "Session {}: Resizing Grid from {}x{} to {}x{} (delta: {}x{})",
             self.id,
             grid_cols,
@@ -262,12 +262,12 @@ impl TerminalSession {
             runtime_handle.spawn(async move {
                 let mut mgr = manager.lock().await;
                 if let Err(e) = mgr.resize(rows, cols).await {
-                    log::error!("Failed to resize PTY: {}", e);
+                    tracing::error!("Failed to resize PTY: {}", e);
                 }
             });
         } else {
             // Grid was resized but PTY is unavailable (likely failed to initialize)
-            log::warn!("Session {}: PTY unavailable, only grid resized", self.id);
+            tracing::warn!("Session {}: PTY unavailable, only grid resized", self.id);
         }
 
         true // Grid resize always succeeds; PTY resize is best-effort async
@@ -316,7 +316,7 @@ impl TerminalSession {
                             let text = String::from_utf8_lossy(&bytes);
                             if self.output_capture.append(&text) {
                                 command_completed = true;
-                                log::debug!(
+                                tracing::debug!(
                                     "Session {}: Command completion detected via prompt",
                                     self.id
                                 );
@@ -325,7 +325,7 @@ impl TerminalSession {
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        log::info!("Session {}: Shell exited", self.id);
+                        tracing::info!("Session {}: Shell exited", self.id);
                         self.should_close = true;
                         break;
                     }

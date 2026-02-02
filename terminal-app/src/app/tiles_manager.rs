@@ -25,7 +25,7 @@ impl TilesManager {
         direction: LinearDir,
     ) {
         let Some(&active_tile_id) = session_tile_ids.get(&active_session_id) else {
-            log::warn!(
+            tracing::warn!(
                 "Split failed: no tile found for active session {}",
                 active_session_id
             );
@@ -65,7 +65,7 @@ impl TilesManager {
             LinearDir::Horizontal => "horizontal",
             LinearDir::Vertical => "vertical",
         };
-        log::info!(
+        tracing::info!(
             "Split {}: session {} in pane {:?}, container {:?}",
             dir_name,
             new_session_id,
@@ -91,7 +91,7 @@ impl TilesManager {
         // If root is already a Tabs container, add the new pane there
         if let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(root_id) {
             tabs.children.push(new_pane_id);
-            log::info!(
+            tracing::info!(
                 "Added tab to root tabs container, session {}, tile {:?}",
                 new_session_id,
                 new_pane_id
@@ -110,7 +110,7 @@ impl TilesManager {
             std::mem::take(&mut tree.tiles),
         );
 
-        log::info!(
+        tracing::info!(
             "Created root tab group, session {}, tile {:?}",
             new_session_id,
             new_pane_id
@@ -139,7 +139,7 @@ impl TilesManager {
                 && let Some(session_id) =
                     Self::find_first_pane_session(&tree_ref.tiles, next_tile_id)
             {
-                log::debug!("Switched to next tab, session {}", session_id);
+                tracing::debug!("Switched to next tab, session {}", session_id);
                 return Some(session_id);
             }
         }
@@ -171,7 +171,7 @@ impl TilesManager {
                 && let Some(session_id) =
                     Self::find_first_pane_session(&tree_ref.tiles, prev_tile_id)
             {
-                log::debug!("Switched to prev tab, session {}", session_id);
+                tracing::debug!("Switched to prev tab, session {}", session_id);
                 return Some(session_id);
             }
         }
@@ -225,7 +225,7 @@ impl TilesManager {
                 }
             }
         }
-        log::warn!(
+        tracing::warn!(
             "Failed to replace child {:?} with {:?} in container",
             old_child,
             new_child

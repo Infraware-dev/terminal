@@ -37,7 +37,7 @@ impl PtyManager {
         let shell = Self::detect_shell()?;
         let pty = Pty::new();
 
-        log::info!("Spawning PTY with shell: {}", shell);
+        tracing::info!("Spawning PTY with shell: {}", shell);
 
         // Spawn the shell with -i for interactive mode
         let session = pty
@@ -101,7 +101,7 @@ impl PtyManager {
                 pixel_width: 0,
                 pixel_height: 0,
             };
-            log::debug!("PTY resized to {}x{}", cols, rows);
+            tracing::debug!("PTY resized to {}x{}", cols, rows);
         }
         Ok(())
     }

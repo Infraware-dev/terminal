@@ -2,7 +2,7 @@
 
 use super::cell::Color;
 use super::grid::TerminalGrid;
-use log::debug;
+use tracing::debug;
 use smallvec::SmallVec;
 
 /// Terminal handler that implements vte::Perform to process escape sequences.
