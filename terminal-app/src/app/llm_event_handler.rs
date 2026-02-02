@@ -16,13 +16,13 @@ use crate::state::AppMode;
 pub struct LlmEventHandler<'a> {
     /// Application state
     state: &'a mut AppState,
-    /// LLM controller (for response renderer)
-    llm: &'a LlmController,
+    /// LLM controller (for response renderer and incremental renderer)
+    llm: &'a mut LlmController,
 }
 
 impl<'a> LlmEventHandler<'a> {
     /// Creates a new LLM event handler.
-    pub fn new(state: &'a mut AppState, llm: &'a LlmController) -> Self {
+    pub fn new(state: &'a mut AppState, llm: &'a mut LlmController) -> Self {
         Self { state, llm }
     }
 
@@ -33,13 +33,22 @@ impl<'a> LlmEventHandler<'a> {
             None => return,
         };
 
-        log::info!(
-            "Received background event: {:?}, current mode: {:?}",
-            event,
-            session.mode.name()
-        );
+        // Log non-chunk events (chunks are too frequent)
+        match &event {
+            AppBackgroundEvent::LlmChunk(_) => {
+                log::debug!("Received LLM chunk, mode: {:?}", session.mode.name());
+            }
+            _ => {
+                log::info!(
+                    "Received background event: {:?}, current mode: {:?}",
+                    event,
+                    session.mode.name()
+                );
+            }
+        }
 
         match event {
+            // Legacy non-streaming result (fallback path)
             AppBackgroundEvent::LlmResult(result) => {
                 session.agent_state.end_stream();
                 match result {
@@ -54,7 +63,44 @@ impl<'a> LlmEventHandler<'a> {
                     }
                 }
             }
+            // Streaming chunk - render incrementally
+            AppBackgroundEvent::LlmChunk(text) => {
+                self.handle_chunk(text);
+            }
+            // Streaming complete
+            AppBackgroundEvent::LlmStreamComplete => {
+                self.handle_stream_complete();
+            }
+            // Streaming HITL - command approval
+            AppBackgroundEvent::LlmCommandApproval { command, message } => {
+                // Finalize any pending output first
+                self.finalize_incremental_output();
+                let session = match self.state.active_session_mut() {
+                    Some(s) => s,
+                    None => return,
+                };
+                session.agent_state.end_stream();
+                self.handle_command_approval(command, message);
+            }
+            // Streaming HITL - question
+            AppBackgroundEvent::LlmQuestion { question, options } => {
+                // Finalize any pending output first
+                self.finalize_incremental_output();
+                let session = match self.state.active_session_mut() {
+                    Some(s) => s,
+                    None => return,
+                };
+                session.agent_state.end_stream();
+                self.handle_question(question, options);
+            }
+            // Error
             AppBackgroundEvent::LlmError(err) => {
+                // Finalize any pending output first
+                self.finalize_incremental_output();
+                let session = match self.state.active_session_mut() {
+                    Some(s) => s,
+                    None => return,
+                };
                 session.agent_state.end_stream();
                 log::error!("LLM query error: {}", err);
                 let error_msg = format!("\x1b[31mError: {}\x1b[0m", err);
@@ -65,6 +111,97 @@ impl<'a> LlmEventHandler<'a> {
                 session.send_to_pty(b"\x15\n");
             }
         }
+    }
+
+    /// Handles a streaming chunk by rendering it incrementally.
+    fn handle_chunk(&mut self, text: String) {
+        // Process chunk through incremental renderer
+        let (complete_lines, partial) = self.llm.incremental_renderer.append(&text);
+
+        let session = match self.state.active_session_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // If this is the first chunk, add a leading newline
+        if !self.llm.incremental_renderer.has_started() {
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, b"\r\n");
+            self.llm.incremental_renderer.mark_started();
+        }
+
+        // Output complete lines
+        for (i, line) in complete_lines.iter().enumerate() {
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, line.as_bytes());
+            // Add newline after each complete line (except if there's a partial after)
+            if i < complete_lines.len() - 1 || partial.is_none() {
+                session
+                    .vte_parser
+                    .advance(&mut session.terminal_handler, b"\r\n");
+            }
+        }
+
+        // If we have complete lines and a partial, add newline before partial
+        if !complete_lines.is_empty() && partial.is_some() {
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, b"\r\n");
+        }
+
+        // Show partial line (will be overwritten by next chunk)
+        if let Some(ref partial_text) = partial {
+            // Use carriage return to allow overwriting
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, partial_text.as_bytes());
+        }
+    }
+
+    /// Handles stream completion.
+    fn handle_stream_complete(&mut self) {
+        log::info!("LLM stream completed, finalizing output");
+
+        // Finalize incremental output
+        self.finalize_incremental_output();
+
+        let session = match self.state.active_session_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        session.agent_state.end_stream();
+        session.mode = AppMode::Normal;
+
+        // Clear shell buffer and trigger fresh prompt
+        session.send_to_pty(b"\x15\n");
+    }
+
+    /// Finalizes incremental renderer output.
+    fn finalize_incremental_output(&mut self) {
+        let final_lines = self.llm.incremental_renderer.finalize();
+
+        let session = match self.state.active_session_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Output any remaining buffered content
+        for (i, line) in final_lines.iter().enumerate() {
+            if i > 0 || self.llm.incremental_renderer.has_started() {
+                session
+                    .vte_parser
+                    .advance(&mut session.terminal_handler, b"\r\n");
+            }
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, line.as_bytes());
+        }
+
+        // Reset for next response
+        self.llm.incremental_renderer.reset();
     }
 
     /// Handles LLM complete response.
