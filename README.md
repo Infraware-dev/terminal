@@ -142,8 +142,8 @@ The workflow file defines the scripted investigation the agent follows.
     "my-playbook": {
       "name": "My Playbook",
       "intents": [
-        "investigate docker issues",
-        "troubleshoot container problems"
+        "can you investigate docker issues",
+        "could you troubleshoot container problems"
       ],
       "phases": [
         {
@@ -183,6 +183,9 @@ The workflow file defines the scripted investigation the agent follows.
 | `intents` | `Vec<String>` | Yes      | List of intents the playbook addresses      |
 | `phases`  | `Vec<Phase>`  | Yes      | Ordered list of phases                      |
 
+> Remember that `intents` must start with the words specified at `terminal-app/config/language.toml`, such as "can
+> you", "could you", etc.
+
 #### Phase Object
 
 | Field                  | Type                  | Required | Description                                            |
@@ -213,6 +216,21 @@ The workflow file defines the scripted investigation the agent follows.
 | `issue`      | `String` | Technical description of the problem          |
 | `impact`     | `String` | User-facing impact                            |
 | `drift_type` | `String` | Classification (e.g., "Infrastructure drift") |
+
+### Run the Backend with a Workflow file
+
+In order to run the `MockEngine` with a custom workflow file, set the
+`MOCK_WORKFLOW_FILE` environment variable to point to the JSON file and the `ENGINE_TYPE` to `mock`:
+
+```bash
+MOCK_WORKFLOW_FILE=~/Downloads/workflow.json ENGINE_TYPE=mock cargo run -p infraware-backend
+```
+
+Then use the terminal setting a mocked API key and backend URL:
+
+```bash
+ANTHROPIC_API_KEY="abcdef" INFRAWARE_BACKEND_URL="http://localhost:8080" cargo run -p infraware-terminal
+```
 
 ## License
 
