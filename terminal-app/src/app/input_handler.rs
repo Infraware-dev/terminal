@@ -114,7 +114,7 @@ impl InputHandler {
                 let input = command_buffer.trim().to_string();
                 match self.input_classifier.classify(&input) {
                     InputType::NaturalLanguage(query) => {
-                        log::info!("Input classified as NaturalLanguage: {}", query);
+                        tracing::info!("Input classified as NaturalLanguage: {}", query);
                         command_buffer.clear();
                         return Some(InputAction::StartLlmQuery(query));
                     }

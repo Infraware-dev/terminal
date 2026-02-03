@@ -111,12 +111,12 @@ impl KeyboardHandler {
             for event in &i.events {
                 match event {
                     egui::Event::Copy => {
-                        log::info!("Event::Copy detected");
+                        tracing::info!("Event::Copy detected");
                         return Some(KeyboardAction::Copy);
                     }
                     egui::Event::Paste(_) => {
                         // We detect the event but use arboard for actual paste
-                        log::info!("Event::Paste detected");
+                        tracing::info!("Event::Paste detected");
                         return Some(KeyboardAction::Paste);
                     }
                     _ => {}
@@ -127,11 +127,11 @@ impl KeyboardHandler {
             #[cfg(target_os = "macos")]
             {
                 if i.modifiers.command && i.key_pressed(Key::V) {
-                    log::info!("Cmd+V detected (macOS paste fallback)");
+                    tracing::info!("Cmd+V detected (macOS paste fallback)");
                     return Some(KeyboardAction::Paste);
                 }
                 if i.modifiers.command && i.key_pressed(Key::C) {
-                    log::info!("Cmd+C detected (macOS copy fallback)");
+                    tracing::info!("Cmd+C detected (macOS copy fallback)");
                     return Some(KeyboardAction::Copy);
                 }
             }
@@ -139,11 +139,11 @@ impl KeyboardHandler {
             #[cfg(not(target_os = "macos"))]
             {
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::V) {
-                    log::info!("Ctrl+Shift+V detected (paste fallback)");
+                    tracing::info!("Ctrl+Shift+V detected (paste fallback)");
                     return Some(KeyboardAction::Paste);
                 }
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::C) {
-                    log::info!("Ctrl+Shift+C detected (copy fallback)");
+                    tracing::info!("Ctrl+Shift+C detected (copy fallback)");
                     return Some(KeyboardAction::Copy);
                 }
             }
@@ -161,11 +161,11 @@ impl KeyboardHandler {
             #[cfg(target_os = "macos")]
             {
                 if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::H) {
-                    log::info!("Cmd+Shift+H detected (split horizontal)");
+                    tracing::info!("Cmd+Shift+H detected (split horizontal)");
                     return Some(KeyboardAction::SplitHorizontal);
                 }
                 if i.modifiers.command && i.modifiers.shift && i.key_pressed(Key::J) {
-                    log::info!("Cmd+Shift+J detected (split vertical)");
+                    tracing::info!("Cmd+Shift+J detected (split vertical)");
                     return Some(KeyboardAction::SplitVertical);
                 }
             }
@@ -173,11 +173,11 @@ impl KeyboardHandler {
             #[cfg(not(target_os = "macos"))]
             {
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::H) {
-                    log::info!("Ctrl+Shift+H detected (split horizontal)");
+                    tracing::info!("Ctrl+Shift+H detected (split horizontal)");
                     return Some(KeyboardAction::SplitHorizontal);
                 }
                 if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::J) {
-                    log::info!("Ctrl+Shift+J detected (split vertical)");
+                    tracing::info!("Ctrl+Shift+J detected (split vertical)");
                     return Some(KeyboardAction::SplitVertical);
                 }
             }
@@ -196,36 +196,36 @@ impl KeyboardHandler {
             // New Tab
             #[cfg(target_os = "macos")]
             if i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::T) {
-                log::info!("Cmd+T detected (new tab)");
+                tracing::info!("Cmd+T detected (new tab)");
                 return Some(KeyboardAction::NewTab);
             }
             #[cfg(not(target_os = "macos"))]
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::T) {
-                log::info!("Ctrl+Shift+T detected (new tab)");
+                tracing::info!("Ctrl+Shift+T detected (new tab)");
                 return Some(KeyboardAction::NewTab);
             }
 
             // Close Tab
             #[cfg(target_os = "macos")]
             if i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::W) {
-                log::info!("Cmd+W detected (close tab)");
+                tracing::info!("Cmd+W detected (close tab)");
                 return Some(KeyboardAction::CloseTab);
             }
             #[cfg(not(target_os = "macos"))]
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::W) {
-                log::info!("Ctrl+Shift+W detected (close tab)");
+                tracing::info!("Ctrl+Shift+W detected (close tab)");
                 return Some(KeyboardAction::CloseTab);
             }
 
             // Next Tab (Ctrl+Tab) - all platforms
             if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(Key::Tab) {
-                log::info!("Ctrl+Tab detected (next tab)");
+                tracing::info!("Ctrl+Tab detected (next tab)");
                 return Some(KeyboardAction::NextTab);
             }
 
             // Prev Tab (Ctrl+Shift+Tab) - all platforms
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::Tab) {
-                log::info!("Ctrl+Shift+Tab detected (prev tab)");
+                tracing::info!("Ctrl+Shift+Tab detected (prev tab)");
                 return Some(KeyboardAction::PrevTab);
             }
 
@@ -240,7 +240,7 @@ impl KeyboardHandler {
         ctx.input(|i| {
             // Ctrl+? (Ctrl+Shift+/) - enter LLM mode
             if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::Slash) {
-                log::info!("Ctrl+Shift+/ detected (enter LLM mode)");
+                tracing::info!("Ctrl+Shift+/ detected (enter LLM mode)");
                 return Some(KeyboardAction::EnterLLMMode);
             }
 
@@ -262,7 +262,7 @@ impl KeyboardHandler {
                 } = event
                 {
                     // Log key events for debugging
-                    log::debug!(
+                    tracing::debug!(
                         "Key event: {:?} pressed={} ctrl={} alt={} shift={}",
                         key,
                         pressed,
@@ -276,7 +276,7 @@ impl KeyboardHandler {
                         // Other Ctrl keys: only accept press to avoid double-fire
                         let is_ctrl_c = *key == Key::C;
                         if is_ctrl_c || *pressed {
-                            log::info!("Ctrl+{:?} detected (pressed={})", key, pressed);
+                            tracing::info!("Ctrl+{:?} detected (pressed={})", key, pressed);
                             result = match key {
                                 Key::C => Some(KeyboardAction::SendSigInt),
                                 Key::D => Some(KeyboardAction::SendBytes(vec![0x04])), // EOF

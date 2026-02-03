@@ -36,7 +36,7 @@ impl SessionManager {
         let id = state.allocate_session_id();
         let session = TerminalSession::new(id, runtime);
         state.sessions.insert(id, session);
-        log::info!("Created new session {}", id);
+        tracing::info!("Created new session {}", id);
         id
     }
 
@@ -55,7 +55,7 @@ impl SessionManager {
             return CloseResult::NotFound;
         }
 
-        log::info!("Closed session {}", session_id);
+        tracing::info!("Closed session {}", session_id);
 
         let Some(tile_id) = session_tile_ids.remove(&session_id) else {
             return Self::handle_post_close(state);
@@ -99,7 +99,7 @@ impl SessionManager {
 
         // Remove the closed tile
         tree.tiles.remove(tile_id);
-        log::debug!("Removed tile {:?} for session {}", tile_id, session_id);
+        tracing::debug!("Removed tile {:?} for session {}", tile_id, session_id);
 
         // Unwrap single remaining tab
         if should_unwrap_single_tab && let Some(remaining_tile_id) = single_remaining_tile {
@@ -109,13 +109,13 @@ impl SessionManager {
                 remaining_tile_id,
                 std::mem::take(&mut tree.tiles),
             );
-            log::info!("Unwrapped single tab to single pane view");
+            tracing::info!("Unwrapped single tab to single pane view");
         }
 
         // Update active session
         if let Some(new_session_id) = next_active_session {
             state.active_session_id = new_session_id;
-            log::info!("Switched to session {}", new_session_id);
+            tracing::info!("Switched to session {}", new_session_id);
             return CloseResult::Closed {
                 next_active: Some(new_session_id),
             };
@@ -123,7 +123,7 @@ impl SessionManager {
             && let Some(&new_id) = state.sessions.keys().next()
         {
             state.active_session_id = new_id;
-            log::info!("Fallback: switched to session {}", new_id);
+            tracing::info!("Fallback: switched to session {}", new_id);
             return CloseResult::Closed {
                 next_active: Some(new_id),
             };
@@ -135,7 +135,7 @@ impl SessionManager {
     /// Handles post-close cleanup and determines result.
     fn handle_post_close(state: &mut AppState) -> CloseResult {
         if state.sessions.is_empty() {
-            log::info!("All sessions closed, quitting application");
+            tracing::info!("All sessions closed, quitting application");
             CloseResult::LastSessionClosed
         } else {
             // Mark remaining sessions for repaint
@@ -189,7 +189,7 @@ impl SessionManager {
         }
 
         session.shell_initialized = true;
-        log::info!(
+        tracing::info!(
             "Session {}: Shell initialized with custom prompt",
             session_id
         );

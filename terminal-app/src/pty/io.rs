@@ -76,7 +76,7 @@ impl PtyReader {
                     }
                     Err(e) => {
                         if e.kind() != std::io::ErrorKind::Interrupted {
-                            log::debug!("PTY reader error: {}", e);
+                            tracing::debug!("PTY reader error: {}", e);
                             break;
                         }
                         // Interrupted, continue reading
@@ -84,7 +84,7 @@ impl PtyReader {
                 }
             }
 
-            log::debug!("PTY reader thread exiting");
+            tracing::debug!("PTY reader thread exiting");
         });
 
         Self { stop_flag }

@@ -280,7 +280,7 @@ impl InfrawareApp {
                 ))
             }
             Err(e) => {
-                log::warn!("Failed to load logo-corner.png: {}", e);
+                tracing::warn!("Failed to load logo-corner.png: {}", e);
                 None
             }
         }
@@ -291,7 +291,7 @@ impl InfrawareApp {
         if let Some(session) = self.state.active_session() {
             session.send_to_pty(data);
         } else {
-            log::warn!("No active session!");
+            tracing::warn!("No active session!");
         }
     }
 
@@ -335,7 +335,7 @@ impl InfrawareApp {
             if command_completed && let AppMode::ExecutingCommand { ref command } = session.mode {
                 let cmd = command.clone();
                 let output = session.output_capture.take_output();
-                log::info!(
+                tracing::info!(
                     "Session {}: Command '{}' completed, output length: {} chars",
                     session_id,
                     cmd,
@@ -362,7 +362,7 @@ impl InfrawareApp {
 
         // Resume LLM for completed commands
         for (session_id, cmd, output) in completed_commands {
-            log::info!(
+            tracing::info!(
                 "Session {}: Sending command output to backend for '{}'",
                 session_id,
                 cmd
@@ -408,7 +408,7 @@ impl InfrawareApp {
         if !keyboard_actions.is_empty() {
             self.timing.record_keyboard_activity();
             if let Some(session) = self.state.active_session() {
-                log::debug!(
+                tracing::debug!(
                     "Keyboard actions: {} actions, mode: {:?}",
                     keyboard_actions.len(),
                     session.mode.name()
@@ -456,7 +456,7 @@ impl InfrawareApp {
                 }
             }
             InputAction::CancelLlm => {
-                log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
+                tracing::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
                 self.send_to_pty(&[0x03]);
                 self.llm.cancel();
                 if let Some(session) = self.state.active_session_mut() {
@@ -538,7 +538,7 @@ impl InfrawareApp {
                 self.state.current_command_buffer.clear();
                 self.state.current_command_buffer.push_str("? ");
                 self.send_to_pty(b"? ");
-                log::info!("Entered LLM mode via Ctrl+?");
+                tracing::info!("Entered LLM mode via Ctrl+?");
             }
         }
     }
@@ -615,7 +615,7 @@ impl InfrawareApp {
                 }
             }
             HitlSubmission::Answer { answer } => {
-                log::info!("User answered question: {}", answer);
+                tracing::info!("User answered question: {}", answer);
                 self.llm.resume_with_answer(&self.runtime, answer);
                 if let Some(session) = self.state.active_session_mut() {
                     session.mode = AppMode::WaitingLLM;
@@ -632,7 +632,7 @@ impl InfrawareApp {
         let validation = validate_command(&command);
 
         if validation.is_blocked() {
-            log::warn!("Blocked dangerous command: {}", command);
+            tracing::warn!("Blocked dangerous command: {}", command);
             if let crate::input::ValidationResult::Blocked { reason } = &validation {
                 let warning = format!(
                     "\r\n\x1b[91mBLOCKED: {}\x1b[0m\r\n\x1b[33mCommand not executed for security reasons.\x1b[0m\r\n",
@@ -650,7 +650,7 @@ impl InfrawareApp {
         }
 
         if let crate::input::ValidationResult::Warning { reason } = &validation {
-            log::info!("Warning for command {}: {}", command, reason);
+            tracing::info!("Warning for command {}: {}", command, reason);
             let warning = format!("\x1b[33mWarning: {}\x1b[0m\r\n", reason);
             if let Some(session) = self.state.active_session_mut() {
                 session
@@ -659,7 +659,7 @@ impl InfrawareApp {
             }
         }
 
-        log::info!("User approved command: {}", command);
+        tracing::info!("User approved command: {}", command);
         let echo = format!("Approved: {}\r\n", command);
 
         if let Some(session) = self.state.active_session_mut() {
@@ -675,13 +675,13 @@ impl InfrawareApp {
             session.mode = AppMode::ExecutingCommand {
                 command: command.clone(),
             };
-            log::debug!("Entered ExecutingCommand mode for: {}", command);
+            tracing::debug!("Entered ExecutingCommand mode for: {}", command);
         }
     }
 
     /// Rejects a command.
     fn reject_command(&mut self, command: String) {
-        log::info!("User rejected command: {}", command);
+        tracing::info!("User rejected command: {}", command);
         if let Some(session) = self.state.active_session_mut() {
             session.vte_parser.advance(
                 &mut session.terminal_handler,
@@ -903,7 +903,7 @@ impl eframe::App for InfrawareApp {
         {
             ctx.memory_mut(|mem| mem.request_focus(session.terminal_egui_id));
             ctx.request_repaint();
-            log::debug!("Focused new tab session {}", session_id);
+            tracing::debug!("Focused new tab session {}", session_id);
         }
 
         // Check for quit
@@ -921,7 +921,7 @@ impl eframe::App for InfrawareApp {
 
         // Check for SIGINT from system signal handler
         if crate::SIGINT_RECEIVED.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            log::info!("System SIGINT received, sending to process group");
+            tracing::info!("System SIGINT received, sending to process group");
             self.send_sigint();
             if let Some(session) = self.state.active_session_mut() {
                 session.output_pause_until =
@@ -938,7 +938,7 @@ impl eframe::App for InfrawareApp {
             .active_session_mut()
             .and_then(|s| s.terminal_handler.take_pending_llm_query());
         if let Some(failed_cmd) = pending_llm_query {
-            log::info!("Triggering LLM for failed command: {}", failed_cmd);
+            tracing::info!("Triggering LLM for failed command: {}", failed_cmd);
             let query = format!(
                 "I tried to run '{}' but got 'command not found'. What should I do?",
                 failed_cmd
@@ -970,7 +970,7 @@ impl eframe::App for InfrawareApp {
                 tree.tiles.get_mut(root_id)
         {
             tabs.active = Some(tile_id);
-            log::debug!("Activated pending tab {:?}", tile_id);
+            tracing::debug!("Activated pending tab {:?}", tile_id);
         }
 
         // Render UI
@@ -999,7 +999,7 @@ impl eframe::App for InfrawareApp {
             {
                 self.state.active_session_id = session_id;
                 self.pending_focus_session = Some(session_id);
-                log::info!(
+                tracing::info!(
                     "Tab selection detected: switched to session {session_id}, pending focus"
                 );
             }

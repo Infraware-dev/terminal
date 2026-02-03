@@ -86,7 +86,7 @@ impl OutputCapture {
     ///
     /// Call this when the user approves a command and it's sent to the PTY.
     pub fn start(&mut self, command: &str) {
-        log::debug!("OutputCapture: Starting capture for command: {}", command);
+        tracing::debug!("OutputCapture: Starting capture for command: {}", command);
         self.buffer.clear();
         self.capturing = true;
         self.current_command = Some(command.to_string());
@@ -96,7 +96,7 @@ impl OutputCapture {
 
     /// Stop capturing and reset state.
     pub fn stop(&mut self) {
-        log::debug!("OutputCapture: Stopping capture");
+        tracing::debug!("OutputCapture: Stopping capture");
         self.capturing = false;
         self.current_command = None;
         self.lines_received = 0;
@@ -185,7 +185,7 @@ impl OutputCapture {
             .any(|pattern| pattern.is_match(&clean_line));
 
         if is_prompt {
-            log::debug!(
+            tracing::debug!(
                 "OutputCapture: Prompt detected, command complete. Last line: '{}' (clean: '{}')",
                 last_line,
                 clean_line
