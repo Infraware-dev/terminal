@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
 /// Idle timeout for SSE streams - if no data received for this duration, the stream is considered dead.
