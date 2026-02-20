@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_stream::stream;
+use futures::StreamExt;
 use infraware_shared::{AgentEvent, Message, MessageEvent, MessageRole, RunInput};
 use rig::agent::{Agent, CancelSignal, PromptHook};
 use rig::client::CompletionClient;
@@ -15,9 +16,13 @@ use rig::tool::Tool;
 use tokio::sync::{RwLock, mpsc};
 
 use super::config::RigEngineConfig;
+use super::incident;
 use super::state::{PendingInterrupt, ResumeContext, StateStore};
-use super::tools::{AskUserArgs, AskUserTool, HitlMarker, ShellCommandArgs, ShellCommandTool};
-use crate::adapters::rig::memory::{MemoryStore, SaveMemoryTool};
+use super::tools::{
+    AskUserArgs, AskUserTool, DiagnosticCommandTool, HitlMarker, ShellCommandArgs, ShellCommandTool,
+    StartIncidentArgs, StartIncidentInvestigationTool,
+};
+use crate::adapters::rig::memory::session::{MemoryStore, SaveMemoryTool};
 use crate::error::EngineError;
 use crate::traits::EventStream;
 use crate::types::ResumeResponse;
@@ -27,10 +32,10 @@ pub type RigAgent = Agent<anthropic::completion::CompletionModel>;
 
 /// Intercepted tool call from the LLM
 #[derive(Debug, Clone)]
-struct InterceptedToolCall {
-    tool_name: String,
-    tool_call_id: Option<String>,
-    args: String,
+pub(super) struct InterceptedToolCall {
+    pub(super) tool_name: String,
+    pub(super) tool_call_id: Option<String>,
+    pub(super) args: String,
 }
 
 /// Hook for intercepting tool calls and enabling HITL (Human-in-the-Loop)
@@ -39,9 +44,17 @@ struct InterceptedToolCall {
 /// For tools that require user approval (shell commands, questions),
 /// we intercept the call and cancel automatic execution.
 #[derive(Clone)]
-struct HitlHook {
+pub(super) struct HitlHook {
     /// Channel for sending intercepted tool calls back to the orchestrator
-    tool_call_tx: mpsc::UnboundedSender<InterceptedToolCall>,
+    pub(super) tool_call_tx: mpsc::UnboundedSender<InterceptedToolCall>,
+}
+
+impl std::fmt::Debug for HitlHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HitlHook")
+            .field("tool_call_tx", &"<UnboundedSender>")
+            .finish()
+    }
 }
 
 impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
@@ -58,9 +71,11 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
         let tx = self.tool_call_tx.clone();
 
         async move {
-            // Intercept shell commands and ask_user for HITL approval
+            // Intercept tools that require HITL approval/confirmation.
             if tool_name == <ShellCommandTool as Tool>::NAME
                 || tool_name == <AskUserTool as Tool>::NAME
+                || tool_name == <StartIncidentInvestigationTool as Tool>::NAME
+                || tool_name == <DiagnosticCommandTool as Tool>::NAME
             {
                 tracing::debug!(
                     tool_name = %tool_name,
@@ -114,6 +129,7 @@ pub fn create_agent(
         .tool(ShellCommandTool::new())
         .tool(AskUserTool::new())
         .tool(SaveMemoryTool::new(Arc::clone(memory_store)))
+        .tool(StartIncidentInvestigationTool)
         .build()
 }
 
@@ -131,6 +147,147 @@ fn to_chat_history(messages: &[Message]) -> Vec<RigMessage> {
             MessageRole::System => RigMessage::user(&m.content),
         })
         .collect()
+}
+
+/// Process a potentially intercepted tool call and produce the HITL interrupt and SSE event.
+///
+/// Returns `Some((interrupt, event))` when the tool was recognized and should pause for HITL.
+/// Returns `None` when the tool is unknown or the args cannot be parsed (execution continues).
+fn handle_tool_intercept(intercepted: InterceptedToolCall) -> Option<(PendingInterrupt, AgentEvent)> {
+    match intercepted.tool_name.as_str() {
+        "execute_shell_command" => {
+            let args = serde_json::from_str::<ShellCommandArgs>(&intercepted.args).ok()?;
+            let pending = PendingInterrupt::command_approval_with_tool(
+                args.command.clone(),
+                args.explanation.clone(),
+                args.needs_continuation,
+                intercepted.tool_call_id,
+                serde_json::from_str(&intercepted.args).ok(),
+            );
+            let event = AgentEvent::updates_with_interrupt(
+                HitlMarker::CommandApproval {
+                    command: args.command,
+                    message: args.explanation,
+                    needs_continuation: args.needs_continuation,
+                }
+                .into(),
+            );
+            Some((pending, event))
+        }
+        "ask_user" => {
+            let args = serde_json::from_str::<AskUserArgs>(&intercepted.args).ok()?;
+            let pending = PendingInterrupt::question_with_tool(
+                args.question.clone(),
+                args.options.clone(),
+                intercepted.tool_call_id,
+                serde_json::from_str(&intercepted.args).ok(),
+            );
+            let event = AgentEvent::updates_with_interrupt(
+                HitlMarker::Question {
+                    question: args.question,
+                    options: args.options,
+                }
+                .into(),
+            );
+            Some((pending, event))
+        }
+        "start_incident_investigation" => {
+            let args = serde_json::from_str::<StartIncidentArgs>(&intercepted.args).ok()?;
+            let pending = PendingInterrupt::incident_confirmation(args.incident_description.clone());
+            let question = format!(
+                "Start multi-agent incident investigation?\n\nIncident: {}",
+                args.incident_description
+            );
+            let event = AgentEvent::updates_with_interrupt(
+                HitlMarker::Question {
+                    question,
+                    options: Some(vec!["Yes, start investigation".into(), "No, cancel".into()]),
+                }
+                .into(),
+            );
+            Some((pending, event))
+        }
+        _ => None,
+    }
+}
+
+/// Result of a single agent continuation turn.
+enum AgentTurnOutcome {
+    ToolIntercepted { interrupt: Box<PendingInterrupt>, event: AgentEvent },
+    Response(String),
+    Error(EngineError),
+}
+
+/// Run a single agent turn and return the outcome without streaming.
+async fn run_agent_turn(
+    client: &anthropic::Client,
+    config: &RigEngineConfig,
+    memory_store: &Arc<RwLock<MemoryStore>>,
+    history: &[Message],
+    continuation: &str,
+) -> AgentTurnOutcome {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let hook = HitlHook { tool_call_tx: tx };
+
+    let agent = {
+        let memory = memory_store.read().await;
+        create_agent(client, config, memory_store, &memory)
+    };
+    let mut chat_history = to_chat_history(history);
+
+    let result = agent
+        .prompt(continuation)
+        .with_history(&mut chat_history)
+        .multi_turn(1)
+        .with_hook(hook)
+        .await;
+
+    if let Ok(intercepted) = rx.try_recv()
+        && let Some((interrupt, event)) = handle_tool_intercept(intercepted)
+    {
+        return AgentTurnOutcome::ToolIntercepted { interrupt: Box::new(interrupt), event };
+    }
+
+    match result {
+        Ok(response) => AgentTurnOutcome::Response(response),
+        Err(e) => AgentTurnOutcome::Error(EngineError::Other(anyhow::anyhow!("Agent error: {}", e))),
+    }
+}
+
+/// Emit events for a single agent continuation turn as a stream.
+///
+/// Stores any new tool interrupt, or emits the assistant response (skipping empty) and ends.
+#[expect(clippy::too_many_arguments, reason = "All fields required to drive agent + state side-effects")]
+fn handle_agent_continuation(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigEngineConfig>,
+    memory_store: Arc<RwLock<MemoryStore>>,
+    state: Arc<StateStore>,
+    thread_id: infraware_shared::ThreadId,
+    run_id: String,
+    history: Vec<Message>,
+    continuation: String,
+) -> EventStream {
+    Box::pin(stream! {
+        match run_agent_turn(&client, &config, &memory_store, &history, &continuation).await {
+            AgentTurnOutcome::ToolIntercepted { interrupt, event } => {
+                let _ = state.store_interrupt(&thread_id, *interrupt).await;
+                yield Ok(event);
+            }
+            AgentTurnOutcome::Response(response) => {
+                if !response.trim().is_empty() {
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&response)));
+                    let _ = state.add_messages(&thread_id, vec![Message::assistant(&response)]).await;
+                    yield Ok(AgentEvent::Values { messages: vec![Message::assistant(&response)] });
+                }
+                yield Ok(AgentEvent::end());
+            }
+            AgentTurnOutcome::Error(e) => {
+                tracing::error!(run_id = %run_id, "Agent continuation failed");
+                yield Err(e);
+            }
+        }
+    })
 }
 
 /// Create an event stream from a new run
@@ -214,71 +371,12 @@ pub fn create_run_stream(
                 "Tool call intercepted for HITL"
             );
 
-            match intercepted.tool_name.as_str() {
-                "execute_shell_command" => {
-                    match serde_json::from_str::<ShellCommandArgs>(&intercepted.args) {
-                        Ok(args) => {
-                            let pending = PendingInterrupt::command_approval_with_tool(
-                                args.command.clone(),
-                                args.explanation.clone(),
-                                args.needs_continuation,
-                                intercepted.tool_call_id,
-                                serde_json::from_str(&intercepted.args).ok(),
-                            );
-                            let _ = state.store_interrupt(&thread_id, pending).await;
-
-                            yield Ok(AgentEvent::updates_with_interrupt(
-                                HitlMarker::CommandApproval {
-                                    command: args.command,
-                                    message: args.explanation,
-                                    needs_continuation: args.needs_continuation,
-                                }.into()
-                            ));
-                            return;
-                        }
-                        Err(e) => {
-                            tracing::error!(error = ?e, "Failed to parse shell command args");
-                            yield Err(EngineError::Other(anyhow::anyhow!(
-                                "Invalid tool arguments: {}", e
-                            )));
-                            return;
-                        }
-                    }
-                }
-
-                "ask_user" => {
-                    match serde_json::from_str::<AskUserArgs>(&intercepted.args) {
-                        Ok(args) => {
-                            let pending = PendingInterrupt::question_with_tool(
-                                args.question.clone(),
-                                args.options.clone(),
-                                intercepted.tool_call_id,
-                                serde_json::from_str(&intercepted.args).ok(),
-                            );
-                            let _ = state.store_interrupt(&thread_id, pending).await;
-
-                            yield Ok(AgentEvent::updates_with_interrupt(
-                                HitlMarker::Question {
-                                    question: args.question,
-                                    options: args.options,
-                                }.into()
-                            ));
-                            return;
-                        }
-                        Err(e) => {
-                            tracing::error!(error = ?e, "Failed to parse ask_user args");
-                            yield Err(EngineError::Other(anyhow::anyhow!(
-                                "Invalid tool arguments: {}", e
-                            )));
-                            return;
-                        }
-                    }
-                }
-
-                unknown => {
-                    tracing::warn!(tool = %unknown, "Unknown tool intercepted");
-                }
+            if let Some((pending, event)) = handle_tool_intercept(intercepted) {
+                let _ = state.store_interrupt(&thread_id, pending).await;
+                yield Ok(event);
+                return;
             }
+            tracing::warn!("Unknown or invalid intercepted tool payload");
         }
 
         // No tool call intercepted - handle normal response
@@ -403,11 +501,6 @@ async fn check_sudo_password_required() -> bool {
 /// and ensures proper cleanup on timeout. For sudo commands, it checks if a password
 /// is required and returns `SudoPasswordRequired` if so.
 async fn execute_command(command: &str, timeout_secs: u64) -> CommandExecutionResult {
-    use std::process::Stdio;
-
-    use tokio::process::Command;
-    use tokio::time::{Duration, timeout};
-
     // Validate command before execution
     if let Err(msg) = validate_command(command) {
         return CommandExecutionResult::Completed(format!("⚠️  {}", msg));
@@ -419,58 +512,7 @@ async fn execute_command(command: &str, timeout_secs: u64) -> CommandExecutionRe
         return CommandExecutionResult::SudoPasswordRequired;
     }
 
-    // Spawn command with safety settings
-    let child = match Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(Stdio::null()) // Prevent interactive prompts
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true) // Ensure child is killed when dropped
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => {
-            return CommandExecutionResult::Completed(format!("Failed to spawn command: {}", e));
-        }
-    };
-
-    // Wait for completion with timeout (use shorter timeout for safety)
-    let effective_timeout = timeout_secs.min(60); // Cap at 60 seconds
-    let result = timeout(
-        Duration::from_secs(effective_timeout),
-        child.wait_with_output(),
-    )
-    .await;
-
-    let output_str = match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            if output.status.success() {
-                if stdout.trim().is_empty() && stderr.trim().is_empty() {
-                    "(Command executed successfully, no output)".to_string()
-                } else {
-                    format!("{}{}", stdout, stderr)
-                }
-            } else {
-                format!(
-                    "Exit code: {}\n{}{}",
-                    output.status.code().unwrap_or(-1),
-                    stdout,
-                    stderr
-                )
-            }
-        }
-        Ok(Err(e)) => format!("Failed to execute command: {}", e),
-        Err(_) => {
-            // Timeout - child will be killed by kill_on_drop
-            format!("Command timed out after {} seconds", timeout_secs)
-        }
-    };
-
-    CommandExecutionResult::Completed(output_str)
+    CommandExecutionResult::Completed(super::shell::spawn_command(command, timeout_secs).await)
 }
 
 /// Execute a shell command with sudo password
@@ -628,84 +670,14 @@ pub fn create_resume_stream(
                         let history = state.get_messages(&thread_id).await.unwrap_or_default();
                         let _ = state.add_messages(&thread_id, vec![Message::user(&continuation)]).await;
 
-                        // Setup hook for intercepting subsequent tool calls
-                        let (tx, mut rx) = mpsc::unbounded_channel();
-                        let hook = HitlHook { tool_call_tx: tx };
-
-                        let agent = {
-                            let memory = memory_store.read().await;
-                            create_agent(&client, &config, &memory_store, &memory)
-                        };
-                        let mut chat_history = to_chat_history(&history);
-
                         tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Continuing rig agent after command execution");
 
-                        let result = agent
-                            .prompt(&continuation)
-                            .with_history(&mut chat_history)
-                            .multi_turn(1)
-                            .with_hook(hook)
-                            .await;
-
-                        // Check if another tool call was intercepted
-                        if let Ok(intercepted) = rx.try_recv() {
-                            match intercepted.tool_name.as_str() {
-                                "execute_shell_command" => {
-                                    if let Ok(args) = serde_json::from_str::<ShellCommandArgs>(&intercepted.args) {
-                                        let pending = PendingInterrupt::command_approval_with_tool(
-                                            args.command.clone(),
-                                            args.explanation.clone(),
-                                            args.needs_continuation,
-                                            intercepted.tool_call_id,
-                                            serde_json::from_str(&intercepted.args).ok(),
-                                        );
-                                        let _ = state.store_interrupt(&thread_id, pending).await;
-                                        yield Ok(AgentEvent::updates_with_interrupt(
-                                            HitlMarker::CommandApproval {
-                                                command: args.command,
-                                                message: args.explanation,
-                                                needs_continuation: args.needs_continuation,
-                                            }.into()
-                                        ));
-                                        return;
-                                    }
-                                }
-                                "ask_user" => {
-                                    if let Ok(args) = serde_json::from_str::<AskUserArgs>(&intercepted.args) {
-                                        let pending = PendingInterrupt::question_with_tool(
-                                            args.question.clone(),
-                                            args.options.clone(),
-                                            intercepted.tool_call_id,
-                                            serde_json::from_str(&intercepted.args).ok(),
-                                        );
-                                        let _ = state.store_interrupt(&thread_id, pending).await;
-                                        yield Ok(AgentEvent::updates_with_interrupt(
-                                            HitlMarker::Question {
-                                                question: args.question,
-                                                options: args.options,
-                                            }.into()
-                                        ));
-                                        return;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // No further tool call - emit final response
-                        match result {
-                            Ok(response) => {
-                                yield Ok(AgentEvent::Message(MessageEvent::assistant(&response)));
-                                let _ = state.add_messages(&thread_id, vec![Message::assistant(&response)]).await;
-                                yield Ok(AgentEvent::Values {
-                                    messages: vec![Message::assistant(&response)],
-                                });
-                                yield Ok(AgentEvent::end());
-                            }
-                            Err(e) => {
-                                tracing::error!(run_id = %run_id, error = ?e, "Agent continuation failed after command");
-                                yield Err(EngineError::Other(anyhow::anyhow!("Agent error: {}", e)));
-                            }
+                        for await event in handle_agent_continuation(
+                            Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
+                            Arc::clone(&state), thread_id.clone(), run_id.clone(),
+                            history, continuation,
+                        ) {
+                            yield event;
                         }
                     }
 
@@ -772,85 +744,12 @@ pub fn create_resume_stream(
                 let history = state.get_messages(&thread_id).await.unwrap_or_default();
                 let _ = state.add_messages(&thread_id, vec![Message::user(&continuation)]).await;
 
-                // Setup hook for intercepting subsequent tool calls
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                let hook = HitlHook { tool_call_tx: tx };
-
-                let agent = {
-                    let memory = memory_store.read().await;
-                    create_agent(&client, &config, &memory_store, &memory)
-                };
-                let mut chat_history = to_chat_history(&history);
-
-                let result = agent
-                    .prompt(&continuation)
-                    .with_history(&mut chat_history)
-                    .multi_turn(1)
-                    .with_hook(hook)
-                    .await;
-
-                // Check if another tool call was intercepted
-                if let Ok(intercepted) = rx.try_recv() {
-                    match intercepted.tool_name.as_str() {
-                        "execute_shell_command" => {
-                            if let Ok(args) = serde_json::from_str::<ShellCommandArgs>(&intercepted.args) {
-                                let pending = PendingInterrupt::command_approval_with_tool(
-                                    args.command.clone(),
-                                    args.explanation.clone(),
-                                    args.needs_continuation,
-                                    intercepted.tool_call_id,
-                                    serde_json::from_str(&intercepted.args).ok(),
-                                );
-                                let _ = state.store_interrupt(&thread_id, pending).await;
-                                yield Ok(AgentEvent::updates_with_interrupt(
-                                    HitlMarker::CommandApproval {
-                                        command: args.command,
-                                        message: args.explanation,
-                                        needs_continuation: args.needs_continuation,
-                                    }.into()
-                                ));
-                                return;
-                            }
-                        }
-                        "ask_user" => {
-                            if let Ok(args) = serde_json::from_str::<AskUserArgs>(&intercepted.args) {
-                                let pending = PendingInterrupt::question_with_tool(
-                                    args.question.clone(),
-                                    args.options.clone(),
-                                    intercepted.tool_call_id,
-                                    serde_json::from_str(&intercepted.args).ok(),
-                                );
-                                let _ = state.store_interrupt(&thread_id, pending).await;
-                                yield Ok(AgentEvent::updates_with_interrupt(
-                                    HitlMarker::Question {
-                                        question: args.question,
-                                        options: args.options,
-                                    }.into()
-                                ));
-                                return;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                // No further tool call - emit final response
-                match result {
-                    Ok(response) => {
-                        let trimmed = response.trim();
-                        if !trimmed.is_empty() {
-                            yield Ok(AgentEvent::Message(MessageEvent::assistant(&response)));
-                            let _ = state.add_messages(&thread_id, vec![Message::assistant(&response)]).await;
-                            yield Ok(AgentEvent::Values {
-                                messages: vec![Message::assistant(&response)],
-                            });
-                        }
-                        yield Ok(AgentEvent::end());
-                    }
-                    Err(e) => {
-                        tracing::error!(run_id = %run_id, error = ?e, "Agent continuation failed after terminal command");
-                        yield Err(EngineError::Other(anyhow::anyhow!("Agent error: {}", e)));
-                    }
+                for await event in handle_agent_continuation(
+                    Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
+                    Arc::clone(&state), thread_id.clone(), run_id.clone(),
+                    history, continuation,
+                ) {
+                    yield event;
                 }
             }
 
@@ -864,84 +763,14 @@ pub fn create_resume_stream(
                 let history = state.get_messages(&thread_id).await.unwrap_or_default();
                 let _ = state.add_messages(&thread_id, vec![Message::user(&continuation)]).await;
 
-                // Setup hook for intercepting subsequent tool calls
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                let hook = HitlHook { tool_call_tx: tx };
-
-                let agent = {
-                    let memory = memory_store.read().await;
-                    create_agent(&client, &config, &memory_store, &memory)
-                };
-                let mut chat_history = to_chat_history(&history);
-
                 tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Resuming rig agent with answer");
 
-                let result = agent
-                    .prompt(&continuation)
-                    .with_history(&mut chat_history)
-                    .multi_turn(1)
-                    .with_hook(hook)
-                    .await;
-
-                // Check if a tool call was intercepted
-                if let Ok(intercepted) = rx.try_recv() {
-                    match intercepted.tool_name.as_str() {
-                        "execute_shell_command" => {
-                            if let Ok(args) = serde_json::from_str::<ShellCommandArgs>(&intercepted.args) {
-                                let pending = PendingInterrupt::command_approval_with_tool(
-                                    args.command.clone(),
-                                    args.explanation.clone(),
-                                    args.needs_continuation,
-                                    intercepted.tool_call_id,
-                                    serde_json::from_str(&intercepted.args).ok(),
-                                );
-                                let _ = state.store_interrupt(&thread_id, pending).await;
-                                yield Ok(AgentEvent::updates_with_interrupt(
-                                    HitlMarker::CommandApproval {
-                                        command: args.command,
-                                        message: args.explanation,
-                                        needs_continuation: args.needs_continuation,
-                                    }.into()
-                                ));
-                                return;
-                            }
-                        }
-                        "ask_user" => {
-                            if let Ok(args) = serde_json::from_str::<AskUserArgs>(&intercepted.args) {
-                                let pending = PendingInterrupt::question_with_tool(
-                                    args.question.clone(),
-                                    args.options.clone(),
-                                    intercepted.tool_call_id,
-                                    serde_json::from_str(&intercepted.args).ok(),
-                                );
-                                let _ = state.store_interrupt(&thread_id, pending).await;
-                                yield Ok(AgentEvent::updates_with_interrupt(
-                                    HitlMarker::Question {
-                                        question: args.question,
-                                        options: args.options,
-                                    }.into()
-                                ));
-                                return;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                // No tool call - handle normal response
-                match result {
-                    Ok(response) => {
-                        yield Ok(AgentEvent::Message(MessageEvent::assistant(&response)));
-                        let _ = state.add_messages(&thread_id, vec![Message::assistant(&response)]).await;
-                        yield Ok(AgentEvent::Values {
-                            messages: vec![Message::assistant(&response)],
-                        });
-                        yield Ok(AgentEvent::end());
-                    }
-                    Err(e) => {
-                        tracing::error!(run_id = %run_id, error = ?e, "Agent resume failed");
-                        yield Err(EngineError::Other(anyhow::anyhow!("Agent error: {}", e)));
-                    }
+                for await event in handle_agent_continuation(
+                    Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
+                    Arc::clone(&state), thread_id.clone(), run_id.clone(),
+                    history, continuation,
+                ) {
+                    yield event;
                 }
             }
 
@@ -971,85 +800,70 @@ pub fn create_resume_stream(
                 let history = state.get_messages(&thread_id).await.unwrap_or_default();
                 let _ = state.add_messages(&thread_id, vec![Message::user(&continuation)]).await;
 
-                // Setup hook for intercepting subsequent tool calls
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                let hook = HitlHook { tool_call_tx: tx };
-
-                let agent = {
-                    let memory = memory_store.read().await;
-                    create_agent(&client, &config, &memory_store, &memory)
-                };
-                let mut chat_history = to_chat_history(&history);
-
                 tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Continuing rig agent after sudo command");
 
-                let result = agent
-                    .prompt(&continuation)
-                    .with_history(&mut chat_history)
-                    .multi_turn(1)
-                    .with_hook(hook)
-                    .await;
+                for await event in handle_agent_continuation(
+                    Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
+                    Arc::clone(&state), thread_id.clone(), run_id.clone(),
+                    history, continuation,
+                ) {
+                    yield event;
+                }
+            }
 
-                // Check if another tool call was intercepted
-                if let Ok(intercepted) = rx.try_recv() {
-                    match intercepted.tool_name.as_str() {
-                        "execute_shell_command" => {
-                            if let Ok(args) = serde_json::from_str::<ShellCommandArgs>(&intercepted.args) {
-                                let pending = PendingInterrupt::command_approval_with_tool(
-                                    args.command.clone(),
-                                    args.explanation.clone(),
-                                    args.needs_continuation,
-                                    intercepted.tool_call_id,
-                                    serde_json::from_str(&intercepted.args).ok(),
-                                );
-                                let _ = state.store_interrupt(&thread_id, pending).await;
-                                yield Ok(AgentEvent::updates_with_interrupt(
-                                    HitlMarker::CommandApproval {
-                                        command: args.command,
-                                        message: args.explanation,
-                                        needs_continuation: args.needs_continuation,
-                                    }.into()
-                                ));
-                                return;
-                            }
-                        }
-                        "ask_user" => {
-                            if let Ok(args) = serde_json::from_str::<AskUserArgs>(&intercepted.args) {
-                                let pending = PendingInterrupt::question_with_tool(
-                                    args.question.clone(),
-                                    args.options.clone(),
-                                    intercepted.tool_call_id,
-                                    serde_json::from_str(&intercepted.args).ok(),
-                                );
-                                let _ = state.store_interrupt(&thread_id, pending).await;
-                                yield Ok(AgentEvent::updates_with_interrupt(
-                                    HitlMarker::Question {
-                                        question: args.question,
-                                        options: args.options,
-                                    }.into()
-                                ));
-                                return;
-                            }
-                        }
-                        _ => {}
-                    }
+            // Operator confirmed incident investigation — start the pipeline
+            (ResumeResponse::Answer { text }, ResumeContext::IncidentConfirmation { incident_description }) => {
+                let confirmed = text.trim().to_lowercase();
+                let is_affirmative =
+                    confirmed == "y" || confirmed == "yes" || confirmed.starts_with("yes");
+                if !is_affirmative {
+                    let msg = "Incident investigation cancelled.".to_string();
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&msg)));
+                    yield Ok(AgentEvent::end());
+                    return;
                 }
 
-                // No further tool call - emit final response
-                match result {
-                    Ok(response) => {
-                        yield Ok(AgentEvent::Message(MessageEvent::assistant(&response)));
-                        let _ = state.add_messages(&thread_id, vec![Message::assistant(&response)]).await;
-                        yield Ok(AgentEvent::Values {
-                            messages: vec![Message::assistant(&response)],
-                        });
-                        yield Ok(AgentEvent::end());
-                    }
-                    Err(e) => {
-                        tracing::error!(run_id = %run_id, error = ?e, "Agent continuation failed after sudo");
-                        yield Err(EngineError::Other(anyhow::anyhow!("Agent error: {}", e)));
-                    }
+                // Start investigation
+                let mut investigation_stream = incident::start_investigation(
+                    Arc::clone(&client),
+                    Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
+                    incident_description.clone(),
+                    run_id.clone(),
+                );
+
+                while let Some(event) = investigation_stream.next().await {
+                    yield event;
                 }
+            }
+
+            // Operator approved (or rejected) a diagnostic command
+            (ResumeResponse::Approved, ResumeContext::IncidentCommand { command, motivation, needs_continuation, risk_level, expected_diagnostic_value, context, .. }) => {
+                let mut stream = incident::resume_investigation_command(
+                    Arc::clone(&client),
+                    Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
+                    command.clone(),
+                    motivation.clone(),
+                    *needs_continuation,
+                    *risk_level,
+                    expected_diagnostic_value.clone(),
+                    context.clone(),
+                    run_id.clone(),
+                    config.timeout_secs,
+                );
+
+                while let Some(event) = stream.next().await {
+                    yield event;
+                }
+            }
+
+            (ResumeResponse::Rejected, ResumeContext::IncidentCommand { command, .. }) => {
+                let msg = format!("Diagnostic command `{}` rejected. Investigation stopped.", command);
+                yield Ok(AgentEvent::Message(MessageEvent::assistant(&msg)));
+                yield Ok(AgentEvent::end());
             }
 
             _ => {

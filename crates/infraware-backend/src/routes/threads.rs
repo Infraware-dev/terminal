@@ -361,6 +361,9 @@ pub async fn stream_run(
                         ("error", serde_json::json!({ "message": message }))
                     }
                     AgentEvent::End => ("end", serde_json::json!({})),
+                    AgentEvent::Phase { phase } => {
+                        ("phase", serde_json::json!({ "phase": phase }))
+                    }
                 };
 
                 tracing::debug!(event_type = event_type, "Emitting SSE event");
