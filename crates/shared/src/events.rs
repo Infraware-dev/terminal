@@ -4,6 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::{Message, MessageRole};
 
+/// Incident investigation pipeline phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentPhase {
+    Investigating,
+    Analyzing,
+    Reporting,
+    Completed,
+}
+
 /// Events streamed from the agent during a run
 ///
 /// # Examples
@@ -38,6 +48,11 @@ pub enum AgentEvent {
     Error { message: String },
     /// Stream ended
     End,
+    /// Incident investigation phase transition
+    Phase {
+        /// Typed incident phase
+        phase: IncidentPhase,
+    },
 }
 
 impl AgentEvent {
@@ -61,6 +76,10 @@ impl AgentEvent {
         Self::Updates {
             interrupts: Some(vec![interrupt]),
         }
+    }
+
+    pub fn phase(phase: IncidentPhase) -> Self {
+        Self::Phase { phase }
     }
 }
 
