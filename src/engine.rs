@@ -5,9 +5,10 @@
 //! - `MockEngine` - For testing
 //! - `RigEngine` - Native rig-rs agent using Anthropic Claude API (default)
 
-// Engine was a standalone library crate — allow unused public API items
-// and re-exports that are used by tests and will be used by future consumers.
-#![allow(dead_code, unused_imports)]
+// Engine was a standalone library crate — some public API items and
+// re-exports are used only by tests or will be used by future consumers.
+#![expect(dead_code, reason = "engine exposes public API surface used by tests and future consumers")]
+#![expect(unused_imports, reason = "re-exports for engine public API surface")]
 
 pub mod adapters;
 mod error;

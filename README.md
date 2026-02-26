@@ -99,8 +99,8 @@ infraware-terminal/
 │   │   ├── session_manager.rs
 │   │   ├── tiles_manager.rs
 │   │   └── ...
+│   ├── engine.rs               # Engine module root (re-exports)
 │   ├── engine/                 # Agentic engine (in-process)
-│   │   ├── mod.rs
 │   │   ├── traits.rs           # AgenticEngine, EventStream
 │   │   ├── adapters/
 │   │   │   ├── mock.rs         # MockEngine (testing)

@@ -263,7 +263,7 @@ impl LlmController {
                     return;
                 }
                 Ok(AgentEvent::Metadata { .. } | AgentEvent::Values { .. }) => {
-                    // Backend-only concerns; skip
+                    // Engine-internal events; not displayed in terminal UI
                 }
                 Err(e) => {
                     let _ = tx.send(AppBackgroundEvent::LlmError(format!("Stream error: {e}")));
