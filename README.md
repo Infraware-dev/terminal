@@ -54,37 +54,19 @@ Nel terminale, prefissa con `?` per query in linguaggio naturale:
 
 | Engine            | Uso                           | Comando                                                                                      |
 |-------------------|-------------------------------|----------------------------------------------------------------------------------------------|
-| **MockEngine**    | Testing/sviluppo (default)    | `cargo run -p infraware-backend`                                                             |
-| **HttpEngine**    | Produzione con LangGraph      | `ENGINE_TYPE=http LANGGRAPH_URL=http://localhost:2024 cargo run -p infraware-backend`        |
-| **ProcessEngine** | Bridge Python                 | `ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infraware-backend` |
-| **RigEngine**     | Agente Rust nativo con rig-rs | `ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig`     |
-
-### Produzione con LangGraph
-
-```bash
-# Terminal 1: Avvia LangGraph
-cd backend
-langgraph dev
-
-# Terminal 2: Avvia backend Rust
-ENGINE_TYPE=http LANGGRAPH_URL=http://localhost:2024 cargo run -p infraware-backend
-
-# Terminal 3: Avvia il terminal
-cargo run -p infraware-terminal
-```
+| **RigEngine**     | Agente Rust nativo (default)  | `ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend`                                    |
+| **MockEngine**    | Testing/sviluppo              | `ENGINE_TYPE=mock cargo run -p infraware-backend`                                            |
 
 ## Variabili d'Ambiente
 
 ```bash
 # Backend
-ENGINE_TYPE=mock|http|process    # Default: mock
+ENGINE_TYPE=rig|mock             # Default: rig
 PORT=8080                        # Default: 8080
+ANTHROPIC_API_KEY=sk-...         # Richiesta per RigEngine
 API_KEY=your-secret-key          # Vuoto = auth disabilitata
 RATE_LIMIT_RPM=100               # 0 = disabilitato
 MOCK_WORKFLOW_FILE=path/to/workflow.json  # MockEngine only
-
-# LangGraph (per http/process engine)
-LANGGRAPH_URL=http://localhost:2024
 
 # Terminal
 INFRAWARE_BACKEND_URL=http://localhost:8080
@@ -111,14 +93,12 @@ cargo watch -x 'run -p infraware-backend'
 
 ```
 infraware-terminal/
-├── terminal-app/           # Client terminal (egui)
+├── terminal-app/              # Client terminal (egui)
 ├── crates/
-│   ├── backend-api/        # Server REST/SSE (axum)
-│   ├── backend-engine/     # Engine trait + adapters
-│   ├── backend-state/      # State persistence
-│   └── shared/             # Tipi condivisi
-├── backend/                # Python FastAPI (legacy)
-└── bin/engine-bridge/      # Bridge Python per ProcessEngine
+│   ├── infraware-backend/     # Server REST/SSE (axum)
+│   ├── infraware-engine/      # Engine trait + adapters
+│   └── shared/                # Tipi condivisi
+└── docs/                      # Documentazione
 ```
 
 ## Documentazione

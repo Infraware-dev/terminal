@@ -27,10 +27,8 @@ cargo run -p infraware-backend       # Run backend server (port 8080)
 LOG_LEVEL=debug cargo run -p infraware-terminal  # With debug logging
 
 # Backend with different engines
-ENGINE_TYPE=mock cargo run -p infraware-backend    # MockEngine (default, for testing)
-ENGINE_TYPE=http LANGGRAPH_URL=http://localhost:2024 cargo run -p infraware-backend  # HttpEngine
-ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infraware-backend  # ProcessEngine
-ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig  # RigEngine
+ENGINE_TYPE=mock cargo run -p infraware-backend    # MockEngine (for testing)
+ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend  # RigEngine (default)
 
 # Testing
 cargo test --workspace               # All tests
@@ -60,11 +58,9 @@ curl -X POST http://localhost:8080/threads -H "Content-Type: application/json" -
 ├── terminal-app/              # egui terminal client (infraware-terminal)
 ├── crates/
 │   ├── shared/                # API contract types (infraware-shared)
-│   ├── backend-api/           # axum REST/SSE server (infraware-backend)
-│   └── backend-engine/        # AgenticEngine trait + adapters
-├── bin/engine-bridge/         # Python bridge for ProcessEngine
-├── backend/                   # Python FastAPI (legacy, being replaced)
-└── docs/plans/                # Design documents and technical debt analysis
+│   ├── infraware-backend/     # axum REST/SSE server (infraware-backend)
+│   └── infraware-engine/      # AgenticEngine trait + adapters
+└── docs/                      # Design documents and technical debt analysis
 ```
 
 ## Architecture
@@ -76,24 +72,19 @@ curl -X POST http://localhost:8080/threads -H "Content-Type: application/json" -
 └────────┬────────┘                   │                                          │
          │                            │  ┌──────────────────────────────────────┐│
     ┌────▼────┐                       │  │ AgenticEngine trait                  ││
-    │   PTY   │                       │  │ ┌────────┐ ┌────────┐ ┌────────┐    ││
-    │ Session │                       │  │ │ Mock   │ │ HTTP   │ │Process │    ││
-    └────┬────┘                       │  │ │ Engine │ │ Engine │ │Engine  │    ││
-         │                            │  │ └────────┘ └────┬───┘ └────┬───┘    ││
-    ┌────▼────┐                       │  │ ┌────────────────────────┐           ││
-    │  VTE    │                       │  │ │ RigEngine (Primary)    │           ││
-    │ Parser  │                       │  │ │ - Anthropic Claude API │           ││
-    └────┬────┘                       │  │ │ - HITL tool execution  │           ││
-         │                            │  │ │ - needs_continuation   │           ││
-    ┌────▼────┐                       │  │ └────┬─────────────┬──────┘           ││
-    │Terminal │                       │  └──────┼─────────────┼──────────────────┘│
-    │  Grid   │                       └─────────┼─────────────┼──────────────────┘
-    └─────────┘                                 │             │
-                                    ┌───────────▼──┐   ┌──────▼──────┐
-                                    │ LangGraph    │   │ Anthropic   │
-                                    │ Server       │   │ API         │
-                                    │ (HttpEngine) │   │ (RigEngine) │
-                                    └──────────────┘   └─────────────┘
+    │   PTY   │                       │  │ ┌────────┐ ┌────────────────────┐    ││
+    │ Session │                       │  │ │ Mock   │ │ RigEngine (Default)│    ││
+    └────┬────┘                       │  │ │ Engine │ │ - Anthropic Claude │    ││
+         │                            │  │ └────────┘ │ - HITL tool exec   │    ││
+    ┌────▼────┐                       │  │            │ - needs_continuation│    ││
+    │  VTE    │                       │  │            └─────────┬───────────┘    ││
+    │ Parser  │                       │  └──────────────────────┼───────────────┘│
+    └────┬────┘                       └─────────────────────────┼───────────────┘
+         │                                                      │
+    ┌────▼────┐                                          ┌──────▼──────┐
+    │Terminal │                                          │ Anthropic   │
+    │  Grid   │                                          │ API         │
+    └─────────┘                                          └─────────────┘
 ```
 
 ## Key Crates
@@ -108,10 +99,8 @@ Shared API contract types: `LLMQueryResult` (Complete/CommandApproval/Question),
 Engine abstraction with pluggable backends:
 
 - `AgenticEngine` trait: `create_thread()`, `stream_run()`, `resume_run()`, `health_check()`
-- `RigEngine` - Native Rust agent using rig-rs + Anthropic Claude API (primary engine, HITL via tool execution)
+- `RigEngine` - Native Rust agent using rig-rs + Anthropic Claude API (default engine, HITL via tool execution)
 - `MockEngine` - In-memory pattern matching (testing, no external dependencies)
-- `HttpEngine` - Direct proxy to LangGraph HTTP endpoint (alternative for LangGraph deployments)
-- `ProcessEngine` - Subprocess bridge with JSON-RPC over stdio (alternative for custom bridges)
 
 ### infraware-backend
 
@@ -233,9 +222,7 @@ ANTHROPIC_API_KEY="your-api-key"
 LOG_LEVEL="debug"  # debug, info, warn, error
 
 # Backend server
-ENGINE_TYPE="mock"              # mock, http, process, rig
-LANGGRAPH_URL="http://localhost:2024"  # for http/process engines
-BRIDGE_SCRIPT="bin/engine-bridge/main.py"  # for process engine
+ENGINE_TYPE="rig"               # rig (default), mock
 ANTHROPIC_API_KEY="sk-..."      # for rig engine (native Rust agent)
 PORT="8080"
 API_KEY=""                      # empty = auth disabled
@@ -281,7 +268,7 @@ Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace =
 
 ### New Engine Adapter
 
-1. Create `crates/backend-engine/src/adapters/your_engine.rs`
+1. Create `crates/infraware-engine/src/adapters/your_engine.rs`
 2. Implement `AgenticEngine` trait:
    ```rust
    #[async_trait]
@@ -293,7 +280,7 @@ Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace =
    }
    ```
 3. Export from `adapters/mod.rs`
-4. Add match arm in `backend-api/src/main.rs` for `ENGINE_TYPE`
+4. Add match arm in `infraware-backend/src/main.rs` for `ENGINE_TYPE`
 
 ### New API Types
 
@@ -332,9 +319,9 @@ The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude
 
 ### Files Involved
 
-- `crates/backend-engine/src/adapters/rig/orchestrator.rs` - Handles tool call interception and HITL flow
-- `crates/backend-engine/src/adapters/rig/tools/shell.rs` - ShellCommandTool with needs_continuation parameter
-- `crates/backend-engine/src/adapters/rig/tools/ask_user.rs` - AskUserTool for questions
+- `crates/infraware-engine/src/adapters/rig/orchestrator.rs` - Handles tool call interception and HITL flow
+- `crates/infraware-engine/src/adapters/rig/tools/shell.rs` - ShellCommandTool with needs_continuation parameter
+- `crates/infraware-engine/src/adapters/rig/tools/ask_user.rs` - AskUserTool for questions
 - `crates/shared/src/events.rs` - Interrupt enum with needs_continuation field
 
 ## CI Pipeline

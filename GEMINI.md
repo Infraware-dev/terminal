@@ -9,7 +9,7 @@ Infraware Terminal is a VTE-based terminal emulator built with Rust and `egui`, 
 *   **Core Feature**: Natural language command generation and execution (e.g., `? how do I revert a git commit`).
 *   **Architecture**: Monorepo with a Rust workspace containing the terminal client and backend services.
 *   **Tech Stack**: Rust (2024 edition), `egui` (GUI), `axum` (Backend API), `rig-rs` (LLM Orchestration), `tokio`.
-*   **Current Status**: Transitioning from a Python-based backend to a native Rust backend (`crates/backend-engine`).
+*   **Current Status**: Native Rust backend with rig-rs agentic engine (`crates/infraware-engine`).
 
 ## 🏗️ Architecture
 
@@ -19,19 +19,18 @@ The system consists of a terminal client and a backend service that handles LLM 
 graph TD
     Client[Terminal App (egui)] <-->|HTTP/SSE| Backend[Backend API (Axum)]
     Backend --> Engine{Agentic Engine}
-    
+
     Engine -->|Native| Rig[RigEngine (Rust + Claude)]
     Engine -->|Testing| Mock[MockEngine]
-    Engine -->|Proxy| Http[HttpEngine (LangGraph)]
-    
+
     Rig --> Anthropic[Anthropic API]
 ```
 
 ### Key Components
 
 *   **`terminal-app`**: The frontend terminal emulator using `egui`, `vte`, and `portable-pty`.
-*   **`crates/backend-api`**: The REST/SSE server (Axum) acting as the bridge between the terminal and the AI engine.
-*   **`crates/backend-engine`**: Defines the `AgenticEngine` trait and implements adapters (Rig, Mock, Http, Process).
+*   **`crates/infraware-backend`**: The REST/SSE server (Axum) acting as the bridge between the terminal and the AI engine.
+*   **`crates/infraware-engine`**: Defines the `AgenticEngine` trait and implements adapters (Rig, Mock).
 *   **`crates/shared`**: Shared types and contracts (Events, Models).
 
 ## 🛠️ Getting Started
@@ -51,7 +50,7 @@ cargo run -p infraware-backend
 
 **Rig Engine (Native Rust Agent - Requires API Key):**
 ```bash
-ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig
+ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend
 ```
 
 ### 2. Run the Terminal
@@ -71,11 +70,9 @@ In the terminal, type `?` followed by your question:
 | Path | Description |
 | :--- | :--- |
 | `terminal-app/` | Main GUI application (Rust/egui). |
-| `crates/backend-api/` | Backend server exposing HTTP/SSE endpoints. |
-| `crates/backend-engine/` | Logic for AI agents (`RigEngine`, `MockEngine`, etc.). |
+| `crates/infraware-backend/` | Backend server exposing HTTP/SSE endpoints. |
+| `crates/infraware-engine/` | Logic for AI agents (`RigEngine`, `MockEngine`). |
 | `crates/shared/` | Data models and types shared between crate members. |
-| `backend/` | Legacy Python backend (LangGraph) - primarily for reference/prototyping. |
-| `bin/engine-bridge/` | Python bridge script for `ProcessEngine`. |
 
 ## 💻 Development Workflow
 
@@ -124,7 +121,7 @@ Set these environment variables (or use `.env`):
 
 ```bash
 # Backend
-ENGINE_TYPE=mock|rig|http|process
+ENGINE_TYPE=rig|mock
 ANTHROPIC_API_KEY=sk-...       # Required for RigEngine
 PORT=8080
 LOG_LEVEL=debug

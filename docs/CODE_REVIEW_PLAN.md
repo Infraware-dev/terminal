@@ -17,7 +17,7 @@
 ## Fase 1: Fix Critici di Sicurezza
 
 ### 1.1 CORS Restrittivo
-**File**: `crates/backend-api/src/main.rs:118`
+**File**: `crates/infraware-backend/src/main.rs:118`
 
 **Problema**:
 ```rust
@@ -43,7 +43,7 @@ let cors = CorsLayer::new()
 ---
 
 ### 1.2 Autenticazione Reale
-**File**: `crates/backend-api/src/routes/auth.rs:38`
+**File**: `crates/infraware-backend/src/routes/auth.rs:38`
 
 **Problema**:
 ```rust
@@ -76,7 +76,7 @@ async fn require_auth(
 ---
 
 ### 1.3 Input Validation
-**File**: `crates/backend-api/src/routes/threads.rs:73-124`
+**File**: `crates/infraware-backend/src/routes/threads.rs:73-124`
 
 **Problema**: Nessuna validazione su input utente.
 
@@ -105,7 +105,7 @@ fn validate_run_input(input: &RunRequestBody) -> Result<(), AppError> {
 ## Fase 2: Fix Robustezza
 
 ### 2.1 Race Condition MockEngine
-**File**: `crates/backend-engine/src/adapters/mock.rs:130-136`
+**File**: `crates/infraware-engine/src/adapters/mock.rs:130-136`
 
 **Problema**: Lock rilasciato e riacquisito, altro thread può interferire.
 
@@ -121,30 +121,8 @@ if let Some(msgs) = threads.get_mut(&thread_id.0) {
 
 ---
 
-### 2.2 Timeout ProcessEngine
-**File**: `crates/backend-engine/src/adapters/process.rs`
-
-**Problema**: Solo `health_check` ha timeout, altre operazioni possono bloccarsi.
-
-**Fix**:
-```rust
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
-
-pub async fn stream_run(...) -> Result<EventStream, EngineError> {
-    tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        // operazione
-    })
-    .await
-    .map_err(|_| EngineError::Timeout("stream_run timed out".into()))?
-}
-```
-
-Aggiungere `Timeout` variant a `EngineError`.
-
----
-
-### 2.3 Health Check Status Code
-**File**: `crates/backend-api/src/routes/health.rs`
+### 2.2 Health Check Status Code
+**File**: `crates/infraware-backend/src/routes/health.rs`
 
 **Problema**: Restituisce sempre 200, anche se unhealthy.
 
@@ -212,45 +190,8 @@ impl ThreadId {
 
 ---
 
-### 3.3 Rimuovere Dead Code
-**File**: `crates/backend-engine/src/adapters/http.rs:56-57`
-
-```rust
-// Rimuovere campo non usato
-pub struct HttpEngine {
-    config: HttpEngineConfig,
-    client: Client,
-    // last_thread: Arc<RwLock<Option<String>>>,  // RIMUOVERE
-}
-```
-
----
-
-### 3.4 Configurare assistant_id
-**File**: `crates/backend-engine/src/adapters/http.rs:392`
-
-```rust
-pub struct HttpEngineConfig {
-    pub base_url: String,
-    pub timeout_secs: u64,
-    pub assistant_id: String,  // NUOVO
-}
-
-impl Default for HttpEngineConfig {
-    fn default() -> Self {
-        Self {
-            base_url: "http://localhost:2024".to_string(),
-            timeout_secs: 300,
-            assistant_id: "supervisor".to_string(),
-        }
-    }
-}
-```
-
----
-
-### 3.5 Rate Limiting
-**File**: `crates/backend-api/src/main.rs`
+### 3.3 Rate Limiting
+**File**: `crates/infraware-backend/src/main.rs`
 
 ```rust
 use tower::limit::RateLimitLayer;
@@ -266,7 +207,7 @@ Oppure usare `tower_governor` per rate limiting più sofisticato.
 ---
 
 ### 3.6 Graceful Shutdown
-**File**: `crates/backend-api/src/main.rs`
+**File**: `crates/infraware-backend/src/main.rs`
 
 ```rust
 use tokio::signal;
@@ -321,16 +262,13 @@ axum::serve(listener, app)
 
 ### Fase 2 - Robustezza ✅
 - [x] 2.1 Fix race condition MockEngine
-- [x] 2.2 Timeout ProcessEngine
-- [x] 2.3 Health check status code
+- [x] 2.2 Health check status code
 
 ### Fase 3 - Miglioramenti ✅
 - [x] 3.1 Unificare MessageEvent.role
 - [x] 3.2 Validazione ThreadId
-- [x] 3.3 Rimuovere dead code (last_thread)
-- [x] 3.4 Configurare assistant_id
-- [x] 3.5 Rate limiting
-- [x] 3.6 Graceful shutdown
+- [x] 3.3 Rate limiting
+- [x] 3.4 Graceful shutdown
 
 ### Fase 4 - Opzionali ✅
 - [x] OpenAPI documentation (utoipa)
