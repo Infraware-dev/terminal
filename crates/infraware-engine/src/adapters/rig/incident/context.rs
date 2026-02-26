@@ -91,7 +91,10 @@ pub struct TimelineEvent {
 /// Contains the RCA output required by acceptance criteria:
 /// Timeline, Root Cause, and Fix Plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[expect(dead_code, reason = "Deserialized from AnalystAgent JSON output during reporting phase")]
+#[expect(
+    dead_code,
+    reason = "Deserialized from AnalystAgent JSON output during reporting phase"
+)]
 pub struct AnalysisReport {
     /// Root cause of the incident
     pub root_cause: String,
@@ -138,7 +141,10 @@ impl IncidentContext {
     }
 
     /// Record a significant finding.
-    #[expect(dead_code, reason = "Available for InvestigatorAgent to promote command results to findings")]
+    #[expect(
+        dead_code,
+        reason = "Available for InvestigatorAgent to promote command results to findings"
+    )]
     pub fn add_finding(&mut self, finding: Finding) {
         self.findings.push(finding);
     }
@@ -186,7 +192,13 @@ mod tests {
             expected_diagnostic_value: "Service health".to_string(),
         });
         assert_eq!(ctx.findings.len(), 1);
-        assert_eq!(ctx.findings.first().expect("finding was added").significance, FindingSignificance::High);
+        assert_eq!(
+            ctx.findings
+                .first()
+                .expect("finding was added")
+                .significance,
+            FindingSignificance::High
+        );
     }
 
     #[test]
@@ -204,10 +216,7 @@ mod tests {
         let restored: IncidentContext = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.description, "ECS crash");
         assert_eq!(restored.commands_executed.len(), 1);
-        assert_eq!(
-            restored.commands_executed[0].risk_level,
-            RiskLevel::Low
-        );
+        assert_eq!(restored.commands_executed[0].risk_level, RiskLevel::Low);
     }
 
     #[test]

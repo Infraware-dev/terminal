@@ -3,8 +3,7 @@
 //! Provides `LlmController` which drives the engine directly and converts
 //! its event stream into `AppBackgroundEvent` values for the terminal UI.
 
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, mpsc};
 
 use futures::StreamExt as _;
 use tokio::runtime::Runtime;
@@ -21,7 +20,7 @@ use crate::llm::IncrementalRenderer;
 #[derive(Debug)]
 pub struct LlmController {
     engine: Arc<dyn AgenticEngine>,
-    thread_id: Option<ThreadId>,
+    thread_id: Arc<RwLock<Option<ThreadId>>>,
     /// Incremental renderer for streaming responses (markdown -> ANSI)
     pub incremental_renderer: IncrementalRenderer,
     /// Channel for background events (sender)
@@ -40,7 +39,7 @@ impl LlmController {
 
         Self {
             engine,
-            thread_id: None,
+            thread_id: Arc::new(RwLock::new(None)),
             incremental_renderer: IncrementalRenderer::new(),
             bg_event_tx,
             bg_event_rx,
@@ -66,12 +65,10 @@ impl LlmController {
             },
             _ => {
                 tracing::info!("Using MockEngine");
-                let workflow = std::env::var("MOCK_WORKFLOW_FILE")
-                    .ok()
-                    .and_then(|path| {
-                        let data = std::fs::read_to_string(&path).ok()?;
-                        serde_json::from_str(&data).ok()
-                    });
+                let workflow = std::env::var("MOCK_WORKFLOW_FILE").ok().and_then(|path| {
+                    let data = std::fs::read_to_string(&path).ok()?;
+                    serde_json::from_str(&data).ok()
+                });
                 Arc::new(MockEngine::new(workflow))
             }
         }
@@ -91,20 +88,31 @@ impl LlmController {
 
         let engine = Arc::clone(&self.engine);
         let tx = self.bg_event_tx.clone();
-        let thread_id = self.thread_id.clone();
+        let thread_id_lock = Arc::clone(&self.thread_id);
 
         runtime.spawn(async move {
-            let thread_id = match thread_id {
-                Some(id) => id,
-                None => match engine.create_thread(None).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        let _ = tx.send(AppBackgroundEvent::LlmError(format!(
-                            "Failed to create thread: {e}"
-                        )));
-                        return;
-                    }
-                },
+            // Get or create a thread
+            let thread_id = {
+                let existing = thread_id_lock
+                    .read()
+                    .expect("thread_id lock poisoned")
+                    .clone();
+                match existing {
+                    Some(id) => id,
+                    None => match engine.create_thread(None).await {
+                        Ok(id) => {
+                            *thread_id_lock.write().expect("thread_id lock poisoned") =
+                                Some(id.clone());
+                            id
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppBackgroundEvent::LlmError(format!(
+                                "Failed to create thread: {e}"
+                            )));
+                            return;
+                        }
+                    },
+                }
             };
 
             let input = RunInput::single_user_message(text);
@@ -137,7 +145,7 @@ impl LlmController {
         self.spawn_resume(runtime, ResumeResponse::answer(answer));
     }
 
-    /// Resumes LLM run with plain command approval (backend executes command).
+    /// Resumes LLM run with plain command approval (engine executes command).
     pub fn resume_approved(&mut self, runtime: &Runtime) {
         self.spawn_resume(runtime, ResumeResponse::Approved);
     }
@@ -164,11 +172,6 @@ impl LlmController {
         events
     }
 
-    /// Stores the thread ID for reuse across queries.
-    pub fn set_thread_id(&mut self, id: ThreadId) {
-        self.thread_id = Some(id);
-    }
-
     /// Spawns a background task that resumes an interrupted run.
     fn spawn_resume(&mut self, runtime: &Runtime, response: ResumeResponse) {
         if let Some(token) = self.cancel_token.take() {
@@ -182,9 +185,13 @@ impl LlmController {
 
         let engine = Arc::clone(&self.engine);
         let tx = self.bg_event_tx.clone();
-        let thread_id = self.thread_id.clone();
+        let thread_id_lock = Arc::clone(&self.thread_id);
 
         runtime.spawn(async move {
+            let thread_id = thread_id_lock
+                .read()
+                .expect("thread_id lock poisoned")
+                .clone();
             let Some(thread_id) = thread_id else {
                 let _ = tx.send(AppBackgroundEvent::LlmError(
                     "No active thread for resume".to_string(),
@@ -256,8 +263,7 @@ impl LlmController {
                     // Backend-only concerns; skip
                 }
                 Err(e) => {
-                    let _ =
-                        tx.send(AppBackgroundEvent::LlmError(format!("Stream error: {e}")));
+                    let _ = tx.send(AppBackgroundEvent::LlmError(format!("Stream error: {e}")));
                     return;
                 }
             }

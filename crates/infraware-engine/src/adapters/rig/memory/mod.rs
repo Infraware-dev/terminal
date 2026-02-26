@@ -1,4 +1,7 @@
-#![expect(clippy::mod_module_files, reason = "memory is a multi-file module requiring directory structure")]
+#![expect(
+    clippy::mod_module_files,
+    reason = "memory is a multi-file module requiring directory structure"
+)]
 //! Contextual memory system for the RigEngine
 //!
 //! Stores and retrieves past interactions (commands + NL queries) to provide
@@ -15,7 +18,6 @@ pub mod traits;
 use std::path::PathBuf;
 
 use anyhow::Result;
-
 use embeddings::NoopEmbedding;
 use intent::RegexIntentGenerator;
 use models::{DataType, InteractionRecord, SearchResult};
@@ -33,10 +35,16 @@ where
     I: IntentGenerator,
 {
     storage: S,
-    #[expect(dead_code, reason = "Embedding engine reserved for Phase 2 semantic search")]
+    #[expect(
+        dead_code,
+        reason = "Embedding engine reserved for Phase 2 semantic search"
+    )]
     embeddings: E,
     intent_gen: I,
-    #[expect(dead_code, reason = "Data directory reserved for future phase-specific storage")]
+    #[expect(
+        dead_code,
+        reason = "Data directory reserved for future phase-specific storage"
+    )]
     data_dir: PathBuf,
 }
 
@@ -107,7 +115,10 @@ mod tests {
     use super::*;
 
     fn test_config(dir: &std::path::Path) -> MemoryConfig {
-        MemoryConfig { path: dir.to_path_buf(), limit: 100 }
+        MemoryConfig {
+            path: dir.to_path_buf(),
+            limit: 100,
+        }
     }
 
     #[tokio::test]

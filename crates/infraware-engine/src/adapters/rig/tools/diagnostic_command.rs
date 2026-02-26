@@ -32,7 +32,9 @@ pub struct DiagnosticCommandArgs {
     pub motivation: String,
 
     /// Risk level of executing this command on the target system
-    #[schemars(description = "Risk level: low (read-only), medium (restarts/config reads), high (mutations/deletes)")]
+    #[schemars(
+        description = "Risk level: low (read-only), medium (restarts/config reads), high (mutations/deletes)"
+    )]
     pub risk_level: RiskLevel,
 
     /// What diagnostic value we expect to extract from the output
@@ -92,7 +94,10 @@ impl Tool for DiagnosticCommandTool {
     type Args = DiagnosticCommandArgs;
     type Output = DiagnosticCommandResult;
 
-    #[expect(clippy::manual_async_fn, reason = "rig-rs Tool trait requires impl Future return type")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn definition(&self, _prompt: String) -> impl Future<Output = ToolDefinition> + Send + Sync {
         async {
             ToolDefinition {
@@ -109,7 +114,10 @@ impl Tool for DiagnosticCommandTool {
         }
     }
 
-    #[expect(clippy::manual_async_fn, reason = "rig-rs Tool trait requires impl Future return type")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn call(
         &self,
         args: Self::Args,

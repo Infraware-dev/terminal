@@ -60,7 +60,10 @@ impl Tool for SaveReportTool {
     type Args = SaveReportArgs;
     type Output = SaveReportResult;
 
-    #[expect(clippy::manual_async_fn, reason = "rig-rs Tool trait requires impl Future return type")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn definition(&self, _prompt: String) -> impl Future<Output = ToolDefinition> + Send + Sync {
         async {
             ToolDefinition {
@@ -75,7 +78,10 @@ impl Tool for SaveReportTool {
         }
     }
 
-    #[expect(clippy::manual_async_fn, reason = "rig-rs Tool trait requires impl Future return type")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn call(
         &self,
         args: Self::Args,
@@ -87,10 +93,14 @@ impl Tool for SaveReportTool {
             let filename = format!("{today}-{}.md", args.slug.trim().replace(' ', "-"));
             let dir = ".infraware/incidents";
 
-            fs::create_dir_all(dir).await.map_err(|e| SaveReportError::Io(e.to_string()))?;
+            fs::create_dir_all(dir)
+                .await
+                .map_err(|e| SaveReportError::Io(e.to_string()))?;
 
             let path = format!("{dir}/{filename}");
-            fs::write(&path, &args.content).await.map_err(|e| SaveReportError::Io(e.to_string()))?;
+            fs::write(&path, &args.content)
+                .await
+                .map_err(|e| SaveReportError::Io(e.to_string()))?;
 
             Ok(SaveReportResult {
                 saved: true,

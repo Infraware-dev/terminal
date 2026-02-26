@@ -122,10 +122,7 @@ impl MemoryStore {
         );
         self.entries.push_back(entry);
         self.flush()?;
-        Ok(self
-            .entries
-            .back()
-            .expect("cannot be empty after add"))
+        Ok(self.entries.back().expect("cannot be empty after add"))
     }
 
     /// Serializes the current entries to the backing JSON file.

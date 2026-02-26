@@ -335,34 +335,33 @@ impl InfrawareApp {
             }
 
             // Handle command completion for HITL flow
-            if command_completed {
-                if let AppMode::ExecutingCommand {
+            if command_completed
+                && let AppMode::ExecutingCommand {
                     ref command,
                     needs_continuation,
                 } = session.mode
-                {
-                    if needs_continuation {
-                        let cmd = command.clone();
-                        let output = session.output_capture.take_output();
-                        tracing::info!(
-                            "Session {}: Command '{}' completed (needs_continuation=true), output length: {} chars",
-                            session_id,
-                            cmd,
-                            output.len()
-                        );
-                        completed_commands.push((session_id, cmd, output));
-                        session.mode = AppMode::WaitingLLM;
-                    } else {
-                        tracing::info!(
-                            "Session {}: Command '{}' completed (needs_continuation=false), returning to Normal",
-                            session_id,
-                            command
-                        );
-                        session.output_capture.take_output(); // discard
-                        session.mode = AppMode::Normal;
-                        // Clear shell buffer and trigger fresh prompt
-                        session.send_to_pty(b"\x15\n");
-                    }
+            {
+                if needs_continuation {
+                    let cmd = command.clone();
+                    let output = session.output_capture.take_output();
+                    tracing::info!(
+                        "Session {}: Command '{}' completed (needs_continuation=true), output length: {} chars",
+                        session_id,
+                        cmd,
+                        output.len()
+                    );
+                    completed_commands.push((session_id, cmd, output));
+                    session.mode = AppMode::WaitingLLM;
+                } else {
+                    tracing::info!(
+                        "Session {}: Command '{}' completed (needs_continuation=false), returning to Normal",
+                        session_id,
+                        command
+                    );
+                    session.output_capture.take_output(); // discard
+                    session.mode = AppMode::Normal;
+                    // Clear shell buffer and trigger fresh prompt
+                    session.send_to_pty(b"\x15\n");
                 }
             }
         }

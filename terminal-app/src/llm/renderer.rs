@@ -29,6 +29,7 @@ impl ResponseRenderer {
     }
 
     /// Render an LLM response with basic markdown formatting
+    #[cfg(test)]
     pub fn render(&self, text: &str) -> Vec<String> {
         let mut output = Vec::new();
         let mut in_code_block = false;
@@ -71,6 +72,7 @@ impl ResponseRenderer {
     }
 
     /// Apply basic inline formatting
+    #[cfg(test)]
     fn format_inline(&self, line: &str) -> String {
         let mut result = line.to_string();
 

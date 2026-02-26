@@ -19,8 +19,8 @@ use super::config::RigEngineConfig;
 use super::incident;
 use super::state::{PendingInterrupt, ResumeContext, StateStore};
 use super::tools::{
-    AskUserArgs, AskUserTool, DiagnosticCommandTool, HitlMarker, ShellCommandArgs, ShellCommandTool,
-    StartIncidentArgs, StartIncidentInvestigationTool,
+    AskUserArgs, AskUserTool, DiagnosticCommandTool, HitlMarker, ShellCommandArgs,
+    ShellCommandTool, StartIncidentArgs, StartIncidentInvestigationTool,
 };
 use crate::adapters::rig::memory::session::{MemoryStore, SaveMemoryTool};
 use crate::error::EngineError;
@@ -153,7 +153,9 @@ fn to_chat_history(messages: &[Message]) -> Vec<RigMessage> {
 ///
 /// Returns `Some((interrupt, event))` when the tool was recognized and should pause for HITL.
 /// Returns `None` when the tool is unknown or the args cannot be parsed (execution continues).
-fn handle_tool_intercept(intercepted: InterceptedToolCall) -> Option<(PendingInterrupt, AgentEvent)> {
+fn handle_tool_intercept(
+    intercepted: InterceptedToolCall,
+) -> Option<(PendingInterrupt, AgentEvent)> {
     match intercepted.tool_name.as_str() {
         "execute_shell_command" => {
             let args = serde_json::from_str::<ShellCommandArgs>(&intercepted.args).ok()?;
@@ -193,7 +195,8 @@ fn handle_tool_intercept(intercepted: InterceptedToolCall) -> Option<(PendingInt
         }
         "start_incident_investigation" => {
             let args = serde_json::from_str::<StartIncidentArgs>(&intercepted.args).ok()?;
-            let pending = PendingInterrupt::incident_confirmation(args.incident_description.clone());
+            let pending =
+                PendingInterrupt::incident_confirmation(args.incident_description.clone());
             let question = format!(
                 "Start multi-agent incident investigation?\n\nIncident: {}",
                 args.incident_description
@@ -213,7 +216,10 @@ fn handle_tool_intercept(intercepted: InterceptedToolCall) -> Option<(PendingInt
 
 /// Result of a single agent continuation turn.
 enum AgentTurnOutcome {
-    ToolIntercepted { interrupt: Box<PendingInterrupt>, event: AgentEvent },
+    ToolIntercepted {
+        interrupt: Box<PendingInterrupt>,
+        event: AgentEvent,
+    },
     Response(String),
     Error(EngineError),
 }
@@ -245,19 +251,27 @@ async fn run_agent_turn(
     if let Ok(intercepted) = rx.try_recv()
         && let Some((interrupt, event)) = handle_tool_intercept(intercepted)
     {
-        return AgentTurnOutcome::ToolIntercepted { interrupt: Box::new(interrupt), event };
+        return AgentTurnOutcome::ToolIntercepted {
+            interrupt: Box::new(interrupt),
+            event,
+        };
     }
 
     match result {
         Ok(response) => AgentTurnOutcome::Response(response),
-        Err(e) => AgentTurnOutcome::Error(EngineError::Other(anyhow::anyhow!("Agent error: {}", e))),
+        Err(e) => {
+            AgentTurnOutcome::Error(EngineError::Other(anyhow::anyhow!("Agent error: {}", e)))
+        }
     }
 }
 
 /// Emit events for a single agent continuation turn as a stream.
 ///
 /// Stores any new tool interrupt, or emits the assistant response (skipping empty) and ends.
-#[expect(clippy::too_many_arguments, reason = "All fields required to drive agent + state side-effects")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required to drive agent + state side-effects"
+)]
 fn handle_agent_continuation(
     client: Arc<anthropic::Client>,
     config: Arc<RigEngineConfig>,

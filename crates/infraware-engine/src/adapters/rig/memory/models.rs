@@ -1,5 +1,8 @@
 //! Data models for the memory system
-#![expect(dead_code, reason = "Phase 2 memory infrastructure - not yet connected to engine")]
+#![expect(
+    dead_code,
+    reason = "Phase 2 memory infrastructure - not yet connected to engine"
+)]
 
 use serde::{Deserialize, Serialize};
 

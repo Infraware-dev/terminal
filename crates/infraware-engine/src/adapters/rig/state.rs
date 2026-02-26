@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use infraware_shared::{Message, ThreadId};
+use tokio::sync::RwLock;
 
 use super::incident::context::{IncidentContext, RiskLevel};
-use tokio::sync::RwLock;
 
 /// In-memory state store for threads and runs
 #[derive(Debug)]
@@ -174,14 +174,19 @@ impl PendingInterrupt {
     /// Create an incident confirmation interrupt (y/n to start pipeline)
     pub fn incident_confirmation(incident_description: String) -> Self {
         Self {
-            resume_context: ResumeContext::IncidentConfirmation { incident_description },
+            resume_context: ResumeContext::IncidentConfirmation {
+                incident_description,
+            },
             tool_call_id: None,
             tool_args: None,
         }
     }
 
     /// Create an incident command interrupt (operator approves diagnostic command)
-    #[expect(clippy::too_many_arguments, reason = "All fields are required for incident context fidelity")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "All fields are required for incident context fidelity"
+    )]
     pub fn incident_command(
         command: String,
         motivation: String,

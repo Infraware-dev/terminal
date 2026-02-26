@@ -171,6 +171,10 @@ pub fn resume_investigation_command(
     clippy::too_many_arguments,
     reason = "All fields restored from stored interrupt context"
 )]
+#[expect(
+    dead_code,
+    reason = "Will be wired when PTY-based command execution is integrated"
+)]
 pub fn resume_investigation_with_output(
     client: Arc<anthropic::Client>,
     config: Arc<RigEngineConfig>,

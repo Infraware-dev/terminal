@@ -28,9 +28,7 @@ pub struct StartIncidentArgs {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum StartIncidentResult {
     /// Awaiting operator confirmation to start the multi-agent pipeline
-    PendingConfirmation {
-        incident_description: String,
-    },
+    PendingConfirmation { incident_description: String },
 }
 
 /// Error type for the incident escalation tool.
@@ -54,7 +52,10 @@ impl Tool for StartIncidentInvestigationTool {
     type Args = StartIncidentArgs;
     type Output = StartIncidentResult;
 
-    #[expect(clippy::manual_async_fn, reason = "rig-rs Tool trait requires impl Future return type")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn definition(&self, _prompt: String) -> impl Future<Output = ToolDefinition> + Send + Sync {
         async {
             ToolDefinition {
@@ -71,7 +72,10 @@ impl Tool for StartIncidentInvestigationTool {
         }
     }
 
-    #[expect(clippy::manual_async_fn, reason = "rig-rs Tool trait requires impl Future return type")]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn call(
         &self,
         args: Self::Args,

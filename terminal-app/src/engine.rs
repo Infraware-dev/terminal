@@ -2,8 +2,8 @@
 
 pub use infraware_engine::adapters::MockEngine;
 #[cfg(feature = "rig")]
-pub use infraware_engine::adapters::{RigEngine, RigEngineConfig};
+pub use infraware_engine::adapters::RigEngine;
 pub use infraware_engine::{
-    AgentEvent, AgenticEngine, EngineError, EngineStatus, EventStream, HealthStatus, IncidentPhase,
-    Interrupt, Message, MessageRole, ResumeResponse, RunInput, ThreadId,
+    AgentEvent, AgenticEngine, EngineStatus, EventStream, IncidentPhase, Interrupt, ResumeResponse,
+    RunInput, ThreadId,
 };
