@@ -96,91 +96,6 @@ impl From<&str> for ThreadId {
     }
 }
 
-/// Result of an LLM query - complete, command approval, or question
-///
-/// # Examples
-///
-/// ```
-/// use crate::engine::shared::LLMQueryResult;
-///
-/// // Complete response
-/// let complete = LLMQueryResult::complete("The answer is 42");
-/// assert!(complete.is_complete());
-/// assert_eq!(complete.as_complete(), Some("The answer is 42"));
-///
-/// // Command that needs approval
-/// let cmd = LLMQueryResult::command_approval("rm -rf /tmp/cache", "Clean cache");
-/// assert!(cmd.is_interrupt());
-///
-/// // Question with options
-/// let question = LLMQueryResult::question("Which option?", Some(vec!["A".into(), "B".into()]));
-/// assert!(question.is_interrupt());
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum LLMQueryResult {
-    /// Query completed with a final response
-    Complete { response: String },
-    /// Query interrupted - LLM wants to execute a command and needs approval (y/n)
-    CommandApproval {
-        /// The command the LLM wants to execute
-        command: String,
-        /// Description/reason from the LLM
-        message: String,
-    },
-    /// Query interrupted - LLM is asking a question (free-form text answer)
-    Question {
-        /// The question being asked
-        question: String,
-        /// Optional predefined choices
-        #[serde(skip_serializing_if = "Option::is_none")]
-        options: Option<Vec<String>>,
-    },
-}
-
-impl LLMQueryResult {
-    /// Create a Complete result
-    pub fn complete(response: impl Into<String>) -> Self {
-        Self::Complete {
-            response: response.into(),
-        }
-    }
-
-    /// Create a CommandApproval result
-    pub fn command_approval(command: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::CommandApproval {
-            command: command.into(),
-            message: message.into(),
-        }
-    }
-
-    /// Create a Question result
-    pub fn question(question: impl Into<String>, options: Option<Vec<String>>) -> Self {
-        Self::Question {
-            question: question.into(),
-            options,
-        }
-    }
-
-    /// Returns the response text if Complete, or None otherwise
-    pub fn as_complete(&self) -> Option<&str> {
-        match self {
-            Self::Complete { response } => Some(response),
-            Self::CommandApproval { .. } | Self::Question { .. } => None,
-        }
-    }
-
-    /// Returns true if this is a Complete result
-    pub fn is_complete(&self) -> bool {
-        matches!(self, Self::Complete { .. })
-    }
-
-    /// Returns true if this is an interrupt (CommandApproval or Question)
-    pub fn is_interrupt(&self) -> bool {
-        !self.is_complete()
-    }
-}
-
 /// Input for starting a run
 ///
 /// # Examples
@@ -312,29 +227,6 @@ mod tests {
             ThreadId::try_new("has@special"),
             Err(ThreadIdError::InvalidCharacters)
         );
-    }
-
-    #[test]
-    fn test_llm_query_result_complete() {
-        let result = LLMQueryResult::complete("Hello");
-        assert!(result.is_complete());
-        assert!(!result.is_interrupt());
-        assert_eq!(result.as_complete(), Some("Hello"));
-    }
-
-    #[test]
-    fn test_llm_query_result_command_approval() {
-        let result = LLMQueryResult::command_approval("ls -la", "List files");
-        assert!(!result.is_complete());
-        assert!(result.is_interrupt());
-        assert_eq!(result.as_complete(), None);
-    }
-
-    #[test]
-    fn test_llm_query_result_question() {
-        let result = LLMQueryResult::question("Which option?", Some(vec!["A".into(), "B".into()]));
-        assert!(!result.is_complete());
-        assert!(result.is_interrupt());
     }
 
     #[test]

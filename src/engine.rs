@@ -20,8 +20,8 @@ pub use adapters::MockEngine;
 pub use adapters::RigEngine;
 pub use error::EngineError;
 pub use shared::{
-    AgentEvent, EngineStatus, IncidentPhase, Interrupt, LLMQueryResult, Message, MessageEvent,
-    MessageRole, RunInput, ThreadId,
+    AgentEvent, EngineStatus, IncidentPhase, Interrupt, Message, MessageEvent, MessageRole,
+    RunInput, ThreadId,
 };
 pub use traits::{AgenticEngine, EventStream};
 pub use types::{HealthStatus, ResumeResponse};

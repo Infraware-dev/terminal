@@ -8,7 +8,5 @@ pub mod models;
 pub mod status;
 
 pub use events::{AgentEvent, IncidentPhase, Interrupt, MessageEvent};
-pub use models::{
-    LLMQueryResult, MAX_THREAD_ID_LENGTH, Message, MessageRole, RunInput, ThreadId, ThreadIdError,
-};
+pub use models::{MAX_THREAD_ID_LENGTH, Message, MessageRole, RunInput, ThreadId, ThreadIdError};
 pub use status::EngineStatus;
