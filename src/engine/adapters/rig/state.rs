@@ -160,15 +160,6 @@ impl PendingInterrupt {
         }
     }
 
-    /// Create a pending sudo password interrupt
-    pub fn sudo_password(command: String) -> Self {
-        Self {
-            resume_context: ResumeContext::SudoPassword { command },
-            tool_call_id: None,
-            tool_args: None,
-        }
-    }
-
     /// Create an incident confirmation interrupt (y/n to start pipeline)
     pub fn incident_confirmation(incident_description: String) -> Self {
         Self {
@@ -224,11 +215,6 @@ pub enum ResumeContext {
     Question {
         /// The question that was asked
         question: String,
-    },
-    /// Waiting for sudo password to execute a command
-    SudoPassword {
-        /// The command that requires sudo with password
-        command: String,
     },
     /// Waiting for operator to confirm starting the incident investigation pipeline
     IncidentConfirmation {
@@ -392,20 +378,6 @@ mod tests {
             }
             _ => panic!("Expected Question context"),
         }
-    }
-
-    #[test]
-    fn test_pending_interrupt_sudo_password() {
-        let interrupt = PendingInterrupt::sudo_password("apt update".to_string());
-
-        match interrupt.resume_context {
-            ResumeContext::SudoPassword { command } => {
-                assert_eq!(command, "apt update");
-            }
-            _ => panic!("Expected SudoPassword context"),
-        }
-        assert!(interrupt.tool_call_id.is_none());
-        assert!(interrupt.tool_args.is_none());
     }
 
     #[test]
