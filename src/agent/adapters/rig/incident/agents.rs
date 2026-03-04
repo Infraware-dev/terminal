@@ -14,9 +14,9 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
 use super::context::IncidentContext;
-use crate::engine::adapters::rig::config::RigEngineConfig;
-use crate::engine::adapters::rig::orchestrator::RigAgent;
-use crate::engine::adapters::rig::tools::{AskUserTool, DiagnosticCommandTool};
+use crate::agent::adapters::rig::config::RigAgentConfig;
+use crate::agent::adapters::rig::orchestrator::RigAgent;
+use crate::agent::adapters::rig::tools::{AskUserTool, DiagnosticCommandTool};
 
 // ---------------------------------------------------------------------------
 // SaveReportTool
@@ -90,7 +90,19 @@ impl Tool for SaveReportTool {
             use tokio::fs;
 
             let today = chrono::Utc::now().format("%Y-%m-%d");
-            let filename = format!("{today}-{}.md", args.slug.trim().replace(' ', "-"));
+            let sanitized_slug: String = args
+                .slug
+                .trim()
+                .replace(' ', "-")
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if sanitized_slug.is_empty() {
+                return Err(SaveReportError::Io(
+                    "slug is empty after sanitization".to_string(),
+                ));
+            }
+            let filename = format!("{today}-{sanitized_slug}.md");
             let dir = ".infraware/incidents";
 
             fs::create_dir_all(dir)
@@ -121,7 +133,7 @@ impl Tool for SaveReportTool {
 /// `AskUserTool` for clarifying questions.
 pub fn build_investigator(
     client: &anthropic::Client,
-    config: &RigEngineConfig,
+    config: &RigAgentConfig,
     context: &IncidentContext,
 ) -> RigAgent {
     let system_prompt = format!(
@@ -146,7 +158,7 @@ pub fn build_investigator(
 /// Produces a structured `AnalysisReport` JSON in its response.
 pub fn build_analyst(
     client: &anthropic::Client,
-    config: &RigEngineConfig,
+    config: &RigAgentConfig,
     context: &IncidentContext,
 ) -> RigAgent {
     let system_prompt = format!(
@@ -168,7 +180,7 @@ pub fn build_analyst(
 /// Equipped with `SaveReportTool` to persist the Markdown post-mortem.
 pub fn build_reporter(
     client: &anthropic::Client,
-    config: &RigEngineConfig,
+    config: &RigAgentConfig,
     context: &IncidentContext,
     analysis_json: &str,
 ) -> RigAgent {
@@ -292,7 +304,7 @@ Write a clear, structured Markdown post-mortem and save it using `save_incident_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::adapters::rig::incident::context::IncidentContext;
+    use crate::agent::adapters::rig::incident::context::IncidentContext;
 
     #[test]
     fn test_save_report_tool_name() {
@@ -321,6 +333,44 @@ mod tests {
         assert!(result.saved);
         assert!(result.path.contains("test-incident"));
         assert!(result.path.ends_with(".md"));
+
+        // Cleanup
+        let _ = fs::remove_file(&result.path);
+    }
+
+    #[tokio::test]
+    async fn test_save_report_rejects_empty_slug() {
+        let tool = SaveReportTool;
+        let args = SaveReportArgs {
+            slug: "../../..".to_string(),
+            content: "# Report".to_string(),
+        };
+
+        let result = tool.call(args).await;
+        assert!(
+            result.is_err(),
+            "Slug with only path-traversal chars should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_report_sanitizes_slug() {
+        use std::fs;
+
+        let tool = SaveReportTool;
+        let args = SaveReportArgs {
+            slug: "../../my-incident/../../hack".to_string(),
+            content: "# Report".to_string(),
+        };
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result.saved);
+        assert!(
+            !result.path.contains(".."),
+            "Path should not contain traversal: {}",
+            result.path
+        );
+        assert!(result.path.contains("my-incidenthack"));
 
         // Cleanup
         let _ = fs::remove_file(&result.path);

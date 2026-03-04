@@ -14,18 +14,18 @@ use rig::providers::anthropic;
 use rig::tool::Tool;
 use tokio::sync::{RwLock, mpsc};
 
-use super::config::RigEngineConfig;
+use super::config::RigAgentConfig;
 use super::incident;
 use super::state::{PendingInterrupt, ResumeContext, StateStore};
 use super::tools::{
-    AskUserArgs, AskUserTool, DiagnosticCommandTool, HitlMarker, ShellCommandArgs,
-    ShellCommandTool, StartIncidentArgs, StartIncidentInvestigationTool,
+    AskUserArgs, AskUserTool, HitlMarker, ShellCommandArgs, ShellCommandTool, StartIncidentArgs,
+    StartIncidentInvestigationTool,
 };
-use crate::engine::adapters::rig::memory::session::{MemoryStore, SaveMemoryTool};
-use crate::engine::error::EngineError;
-use crate::engine::shared::{AgentEvent, Message, MessageEvent, MessageRole, RunInput};
-use crate::engine::traits::EventStream;
-use crate::engine::types::ResumeResponse;
+use crate::agent::adapters::rig::memory::session::{MemoryStore, SaveMemoryTool};
+use crate::agent::error::AgentError;
+use crate::agent::shared::{AgentEvent, Message, MessageEvent, MessageRole, RunInput};
+use crate::agent::traits::EventStream;
+use crate::agent::types::ResumeResponse;
 
 /// Type alias for the base rig-core agent
 pub type RigAgent = Agent<anthropic::completion::CompletionModel>;
@@ -75,7 +75,6 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
             if tool_name == <ShellCommandTool as Tool>::NAME
                 || tool_name == <AskUserTool as Tool>::NAME
                 || tool_name == <StartIncidentInvestigationTool as Tool>::NAME
-                || tool_name == <DiagnosticCommandTool as Tool>::NAME
             {
                 tracing::debug!(
                     tool_name = %tool_name,
@@ -117,7 +116,7 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
 /// The LLM will see the tool schemas and can call them directly.
 pub fn create_agent(
     client: &anthropic::Client,
-    config: &RigEngineConfig,
+    config: &RigAgentConfig,
     memory_store: &Arc<RwLock<MemoryStore>>,
     memory: &MemoryStore,
 ) -> RigAgent {
@@ -224,13 +223,13 @@ enum AgentTurnOutcome {
         event: AgentEvent,
     },
     Response(String),
-    Error(EngineError),
+    Error(AgentError),
 }
 
 /// Run a single agent turn and return the outcome without streaming.
 async fn run_agent_turn(
     client: &anthropic::Client,
-    config: &RigEngineConfig,
+    config: &RigAgentConfig,
     memory_store: &Arc<RwLock<MemoryStore>>,
     history: &[Message],
     continuation: &str,
@@ -262,9 +261,7 @@ async fn run_agent_turn(
 
     match result {
         Ok(response) => AgentTurnOutcome::Response(response),
-        Err(e) => {
-            AgentTurnOutcome::Error(EngineError::Other(anyhow::anyhow!("Agent error: {}", e)))
-        }
+        Err(e) => AgentTurnOutcome::Error(AgentError::Other(anyhow::anyhow!("Agent error: {}", e))),
     }
 }
 
@@ -277,10 +274,10 @@ async fn run_agent_turn(
 )]
 fn handle_agent_continuation(
     client: Arc<anthropic::Client>,
-    config: Arc<RigEngineConfig>,
+    config: Arc<RigAgentConfig>,
     memory_store: Arc<RwLock<MemoryStore>>,
     state: Arc<StateStore>,
-    thread_id: crate::engine::shared::ThreadId,
+    thread_id: crate::agent::shared::ThreadId,
     run_id: String,
     history: Vec<Message>,
     continuation: String,
@@ -312,11 +309,11 @@ fn handle_agent_continuation(
 /// This function executes the agent with native tools and a `PromptHook`
 /// to intercept tool calls for HITL (Human-in-the-Loop) approval.
 pub fn create_run_stream(
-    config: Arc<RigEngineConfig>,
+    config: Arc<RigAgentConfig>,
     client: Arc<anthropic::Client>,
     memory_store: Arc<RwLock<MemoryStore>>,
     state: Arc<StateStore>,
-    thread_id: crate::engine::shared::ThreadId,
+    thread_id: crate::agent::shared::ThreadId,
     input: RunInput,
     run_id: String,
 ) -> EventStream {
@@ -343,7 +340,7 @@ pub fn create_run_stream(
             .join("\n");
 
         if prompt.trim().is_empty() {
-            yield Err(EngineError::Other(anyhow::anyhow!("No user message provided")));
+            yield Err(AgentError::Other(anyhow::anyhow!("No user message provided")));
             return;
         }
 
@@ -409,7 +406,7 @@ pub fn create_run_stream(
             }
             Err(e) => {
                 tracing::error!(run_id = %run_id, error = ?e, "Agent execution failed");
-                yield Err(EngineError::Other(anyhow::anyhow!("Agent error: {}", e)));
+                yield Err(AgentError::Other(anyhow::anyhow!("Agent error: {}", e)));
             }
         }
     })
@@ -417,24 +414,21 @@ pub fn create_run_stream(
 
 /// Create an event stream from a resumed run
 pub fn create_resume_stream(
-    config: Arc<RigEngineConfig>,
+    config: Arc<RigAgentConfig>,
     client: Arc<anthropic::Client>,
     memory_store: Arc<RwLock<MemoryStore>>,
     state: Arc<StateStore>,
-    thread_id: crate::engine::shared::ThreadId,
+    thread_id: crate::agent::shared::ThreadId,
     response: ResumeResponse,
     run_id: String,
 ) -> EventStream {
     Box::pin(stream! {
         yield Ok(AgentEvent::metadata(&run_id));
 
-        let pending = state.take_interrupt(&thread_id).await;
-        if pending.is_none() {
-            yield Err(EngineError::run_not_resumable(thread_id.as_str()));
+        let Some(pending) = state.take_interrupt(&thread_id).await else {
+            yield Err(AgentError::run_not_resumable(thread_id.as_str()));
             return;
-        }
-
-        let pending = pending.unwrap();
+        };
 
         match (&response, &pending.resume_context) {
             // Command rejected
@@ -568,7 +562,7 @@ pub fn create_resume_stream(
             }
 
             _ => {
-                yield Err(EngineError::run_not_resumable("Invalid resume response for interrupt type"));
+                yield Err(AgentError::run_not_resumable("Invalid resume response for interrupt type"));
             }
         }
     })
