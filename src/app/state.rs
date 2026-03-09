@@ -5,8 +5,12 @@
 //! testable without egui dependencies.
 
 use std::collections::HashMap;
+#[cfg(feature = "pty-test_container")]
+use std::sync::Arc;
 
-use crate::pty::PtyProvider;
+use crate::app::PtyProviderType;
+#[cfg(feature = "pty-test_container")]
+use crate::pty::SharedContainer;
 use crate::session::{SessionId, TerminalSession};
 
 /// Core application state holding sessions and control flags.
@@ -18,8 +22,13 @@ pub struct AppState {
     /// All terminal sessions, keyed by session ID
     pub sessions: HashMap<SessionId, TerminalSession>,
 
-    /// Pty provider for new sessions (e.g. local, test container)
-    pub pty_provider: PtyProvider,
+    /// Pty provider type for new sessions
+    pub pty_provider_type: PtyProviderType,
+
+    /// Shared test container (if using test container backend).
+    /// Created once at startup; cloned into each new session's `PtyProvider`.
+    #[cfg(feature = "pty-test_container")]
+    pub shared_container: Option<Arc<SharedContainer>>,
 
     /// Currently focused session ID
     pub active_session_id: SessionId,
@@ -42,7 +51,8 @@ impl AppState {
     pub fn new(
         sessions: HashMap<SessionId, TerminalSession>,
         active_session_id: SessionId,
-        pty_provider: PtyProvider,
+        pty_provider_type: PtyProviderType,
+        #[cfg(feature = "pty-test_container")] shared_container: Option<Arc<SharedContainer>>,
     ) -> Self {
         let next_session_id = sessions.keys().max().map(|&id| id + 1).unwrap_or(0);
 
@@ -50,10 +60,27 @@ impl AppState {
             sessions,
             active_session_id,
             next_session_id,
-            pty_provider,
+            pty_provider_type,
+            #[cfg(feature = "pty-test_container")]
+            shared_container,
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
             should_quit: false,
+        }
+    }
+
+    /// Builds a [`crate::pty::PtyProvider`] for creating a new session.
+    pub fn pty_provider(&self) -> crate::pty::PtyProvider {
+        match self.pty_provider_type {
+            PtyProviderType::Local => crate::pty::PtyProvider::Local,
+            #[cfg(feature = "pty-test_container")]
+            PtyProviderType::TestContainer => {
+                let shared = self
+                    .shared_container
+                    .clone()
+                    .expect("SharedContainer not initialized for TestContainer provider");
+                crate::pty::PtyProvider::TestContainer { shared }
+            }
         }
     }
 
@@ -87,7 +114,9 @@ mod tests {
             next_session_id: 1,
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
-            pty_provider: PtyProvider::Local,
+            pty_provider_type: PtyProviderType::Local,
+            #[cfg(feature = "pty-test_container")]
+            shared_container: None,
             should_quit: false,
         }
     }

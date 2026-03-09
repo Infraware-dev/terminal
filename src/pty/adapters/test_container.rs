@@ -4,6 +4,7 @@
 //! The idea is to use it in a sandboxed Debian container to allow the agent to execute commands without affecting the host system.
 
 mod container;
+mod shared;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,27 +18,27 @@ use futures::{Stream, StreamExt as _};
 use portable_pty::PtySize;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-use self::container::Container;
+pub use self::shared::SharedContainer;
 use crate::pty::io::{PtyReader, PtyWriter};
 use crate::pty::traits::PtySession;
 
 /// Boxed async output stream from the container's TTY.
 type OutputStream = Pin<Box<dyn Stream<Item = Result<LogOutput, bollard::errors::Error>> + Send>>;
 
-/// PTY session adapter that runs a Debian container using bollard.
+/// PTY session adapter backed by a `docker exec` bash process inside a
+/// [`SharedContainer`].
 ///
 /// Bridges bollard's async I/O streams to the sync [`PtyReader`]/[`PtyWriter`]
 /// types expected by [`PtySession`] using Unix socket pairs and tokio tasks.
 ///
-/// On drop, the container is stopped and removed asynchronously.
+/// The container is kept alive by the `Arc<SharedContainer>` reference; it is
+/// stopped and removed only when the last reference is dropped.
 pub struct TestContainerPtySession {
-    /// The container instance (used for resize, inspect, stop).
-    /// Wrapped in `Option` so `Drop` can take ownership for async cleanup.
-    container: Option<Container>,
-    /// Tokio runtime handle captured at construction time.
-    /// Stored explicitly because `Drop` may run outside a tokio context
-    /// (e.g., when eframe drops the app struct).
-    runtime_handle: tokio::runtime::Handle,
+    /// Shared container reference used for exec resize and kept alive
+    /// via `Arc` ref count — container is cleaned up when the last ref drops.
+    container: Arc<SharedContainer>,
+    /// Exec ID for this session's bash process (used for resize).
+    exec_id: String,
     /// Async output stream, consumed once by [`PtySession::take_reader`].
     /// Wrapped in `Mutex` to satisfy the `Sync` bound on [`PtySession`].
     output: std::sync::Mutex<Option<OutputStream>>,
@@ -47,33 +48,11 @@ pub struct TestContainerPtySession {
     sigint_handle: Arc<std::sync::Mutex<std::os::unix::net::UnixStream>>,
 }
 
-impl Drop for TestContainerPtySession {
-    fn drop(&mut self) {
-        let Some(container) = self.container.take() else {
-            return;
-        };
-        let handle = self.runtime_handle.clone();
-        // Run cleanup on a dedicated thread so `block_on` doesn't panic
-        // if we happen to be inside an async context. The join ensures
-        // cleanup finishes before the runtime (which drops after us) is
-        // torn down — without it, hyper's IO driver may be gone by the
-        // time `remove_container` fires.
-        let join_handle = std::thread::spawn(move || {
-            if let Err(e) = handle.block_on(container.stop()) {
-                tracing::error!("Failed to stop container on drop: {e}");
-            }
-        });
-        if let Err(e) = join_handle.join() {
-            tracing::error!("Container cleanup thread panicked: {e:?}");
-        }
-    }
-}
-
 impl std::fmt::Debug for TestContainerPtySession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let has_output = self.output.lock().map(|o| o.is_some()).unwrap_or(false);
         f.debug_struct("TestContainerPtySession")
-            .field("has_container", &self.container.is_some())
+            .field("exec_id", &self.exec_id)
             .field("has_output", &has_output)
             .field("has_writer", &self.writer_handle.is_some())
             .finish_non_exhaustive()
@@ -81,16 +60,16 @@ impl std::fmt::Debug for TestContainerPtySession {
 }
 
 impl TestContainerPtySession {
-    /// Creates a new PTY session by starting a Debian container.
+    /// Creates a new PTY session by spawning a bash process inside the shared container.
     ///
-    /// Sets up the container, attaches to its TTY, and creates the async→sync
+    /// Calls `exec_bash` on the shared container, then creates the async-to-sync
     /// bridge for the writer side. The reader bridge is deferred to
     /// [`PtySession::take_reader`] because it needs the caller's channel.
-    pub async fn new() -> Result<Self> {
-        let (container, handles) = Container::setup().await?;
+    pub async fn new(container: Arc<SharedContainer>) -> Result<Self> {
+        let (handles, exec_id) = container.exec_bash().await?;
 
         // Create a Unix socket pair to bridge sync PtyWriter writes to the
-        // container's async stdin. The sync end (`unix_write`) is handed to
+        // exec's async stdin. The sync end (`unix_write`) is handed to
         // PtyWriter; a background tokio task drains the async end into bollard.
         let (unix_read, unix_write) = std::os::unix::net::UnixStream::pair()
             .context("Failed to create Unix socket pair for writer bridge")?;
@@ -103,12 +82,10 @@ impl TestContainerPtySession {
         spawn_writer_bridge(unix_read, handles.input)?;
 
         // Capture the runtime handle now (we're guaranteed to be inside a
-        // tokio context during construction) so `Drop` can use it later.
-        let runtime_handle = tokio::runtime::Handle::current();
-
+        // tokio context during construction) so resize can use it later.
         Ok(Self {
-            container: Some(container),
-            runtime_handle,
+            container,
+            exec_id,
             output: std::sync::Mutex::new(Some(handles.output)),
             writer_handle: Some(unix_write),
             sigint_handle: Arc::new(std::sync::Mutex::new(sigint_writer)),
@@ -117,7 +94,7 @@ impl TestContainerPtySession {
 }
 
 /// Spawns a tokio task that forwards bytes from the sync Unix socket to the
-/// container's async stdin.
+/// exec's async stdin.
 ///
 /// ```text
 /// PtyWriter → unix_write ──→ unix_read (this task) ──→ bollard input
@@ -157,7 +134,7 @@ fn spawn_writer_bridge(
     Ok(())
 }
 
-/// Spawns a tokio task that drains the container's async output stream into
+/// Spawns a tokio task that drains the exec's async output stream into
 /// a sync channel, stopping when the stop flag is set or the stream ends.
 ///
 /// ```text
@@ -222,11 +199,9 @@ impl PtySession for TestContainerPtySession {
 
     async fn resize(&self, size: PtySize) -> Result<()> {
         self.container
-            .as_ref()
-            .context("Container already stopped")?
-            .resize(size.cols, size.rows)
+            .resize_exec(&self.exec_id, size.cols, size.rows)
             .await
-            .context("Failed to resize container TTY")
+            .context("Failed to resize exec TTY")
     }
 
     fn send_sigint(&self) -> Result<()> {

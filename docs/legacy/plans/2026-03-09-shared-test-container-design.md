@@ -1,5 +1,7 @@
 # Shared Test Container Design
 
+**Status: Implemented**
+
 ## Problem
 
 Each terminal tab creates its own Docker container when using `TestContainerPtySession`.
@@ -16,7 +18,7 @@ via `Arc<SharedContainer>`. Each tab spawns its own bash process inside the cont
 
 ### SharedContainer
 
-New struct in `src/pty/adapters/test_container/container.rs`:
+New struct in `src/pty/adapters/test_container/shared.rs`:
 
 ```rust
 pub struct SharedContainer {
@@ -40,9 +42,9 @@ pub struct SharedContainer {
 
 ### TestContainerPtySession changes
 
-- Single constructor: `new(shared: Arc<SharedContainer>) -> Result<Self>`.
+- Single constructor: `new(container: Arc<SharedContainer>) -> Result<Self>`.
 - Always stores `exec_id: String` (not optional).
-- `resize()` delegates to `shared.resize_exec(exec_id, ...)`.
+- `resize()` delegates to `container.resize_exec(exec_id, ...)`.
 - Drop just drops the `Arc<SharedContainer>` (no container stop/remove logic).
 
 ### PtyProvider changes
@@ -73,7 +75,8 @@ Cloned into `PtyProvider::TestContainer` for each new session.
 
 | File | Change |
 |------|--------|
-| `src/pty/adapters/test_container/container.rs` | Entrypoint to `sleep infinity`, remove `IoHandles` from `setup()`, remove attach, add `SharedContainer` |
+| `src/pty/adapters/test_container/container.rs` | Entrypoint to `sleep infinity`, remove `IoHandles` from `setup()`, remove attach |
+| `src/pty/adapters/test_container/shared.rs` | `SharedContainer` with `exec_bash()`, `resize_exec()`, `Drop`, and `IoHandles` |
 | `src/pty/adapters/test_container.rs` | Single constructor with `Arc<SharedContainer>`, always `exec_id`, remove Drop cleanup |
 | `src/pty/manager.rs` | `PtyProvider::TestContainer` carries `Arc<SharedContainer>` |
 | `src/app/state.rs` | Add `shared_container` field (feature-gated) |

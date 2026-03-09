@@ -46,15 +46,29 @@ use tokio::runtime::Runtime;
 
 use crate::config::{rendering, timing};
 use crate::input::{KeyboardHandler, TextSelection};
-use crate::pty::PtyProvider;
 use crate::session::{SessionId, TerminalSession};
 use crate::state::AppMode;
 use crate::ui::scrollbar::ScrollAction;
 use crate::ui::{Scrollbar, Theme};
 
+/// Selects which PTY backend to use (without carrying runtime state).
+///
+/// This is used in [`AppOptions`] (created before the tokio runtime) and [`AppState`].
+/// The actual [`crate::pty::PtyProvider`] (which may carry `Arc<SharedContainer>`)
+/// is constructed later via [`AppState::pty_provider()`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyProviderType {
+    /// Local PTY session (default).
+    Local,
+    /// Docker test container PTY session.
+    #[cfg(feature = "pty-test_container")]
+    TestContainer,
+}
+
+/// Options for creating an [`InfrawareApp`].
 pub struct AppOptions {
-    /// Pty provider
-    pub pty_provider: PtyProvider,
+    /// Pty provider type
+    pub pty_provider: PtyProviderType,
 }
 
 /// Events coming from background tasks (LLM, etc.)
@@ -232,10 +246,33 @@ impl InfrawareApp {
         // Load logo texture
         let logo_texture = Self::load_logo_texture(cc);
 
+        // Initialize shared container for test container backend
+        #[cfg(feature = "pty-test_container")]
+        let shared_container = if matches!(options.pty_provider, PtyProviderType::TestContainer) {
+            Some(
+                runtime
+                    .block_on(crate::pty::SharedContainer::setup())
+                    .expect("Failed to initialize shared Docker container"),
+            )
+        } else {
+            None
+        };
+
+        // Build PtyProvider for initial session
+        let initial_pty_provider = match options.pty_provider {
+            PtyProviderType::Local => crate::pty::PtyProvider::Local,
+            #[cfg(feature = "pty-test_container")]
+            PtyProviderType::TestContainer => crate::pty::PtyProvider::TestContainer {
+                shared: shared_container
+                    .clone()
+                    .expect("SharedContainer not initialized"),
+            },
+        };
+
         // Create initial session
         let initial_session_id: SessionId = 0;
         let initial_session =
-            TerminalSession::new(initial_session_id, runtime.handle(), options.pty_provider);
+            TerminalSession::new(initial_session_id, runtime.handle(), initial_pty_provider);
 
         let mut sessions = HashMap::new();
         sessions.insert(initial_session_id, initial_session);
@@ -252,8 +289,16 @@ impl InfrawareApp {
         let mut session_tile_ids = HashMap::new();
         session_tile_ids.insert(initial_session_id, initial_tile_id);
 
+        let state = AppState::new(
+            sessions,
+            initial_session_id,
+            options.pty_provider,
+            #[cfg(feature = "pty-test_container")]
+            shared_container,
+        );
+
         Self {
-            state: AppState::new(sessions, initial_session_id, options.pty_provider),
+            state,
             theme,
             runtime,
             theme_applied: false,

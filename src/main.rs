@@ -98,12 +98,12 @@ fn main() -> eframe::Result<()> {
 fn app_options(_args: &Args) -> AppOptions {
     #[cfg(feature = "pty-test_container")]
     let pty_provider = if _args.use_pty_test_container {
-        pty::PtyProvider::TestContainer
+        app::PtyProviderType::TestContainer
     } else {
-        pty::PtyProvider::Local
+        app::PtyProviderType::Local
     };
     #[cfg(not(feature = "pty-test_container"))]
-    let pty_provider = pty::PtyProvider::Local;
+    let pty_provider = app::PtyProviderType::Local;
 
     AppOptions { pty_provider }
 }
