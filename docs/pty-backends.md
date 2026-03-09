@@ -60,7 +60,8 @@ The test container backend runs an isolated Debian container via the Docker API 
 - **Consistent testing environment** — always a clean Debian system
 - **Security** — commands execute inside a disposable container
 
-The container uses the `debian:bookworm-slim` image and runs `/bin/bash` with TTY enabled.
+By default the container uses the `debian:bookworm-slim` image and runs `/bin/bash` with TTY enabled.
+You can override the image with the `--pty-test-container-image` flag (accepts `image:tag` format; tag defaults to `latest` when omitted).
 
 **Prerequisites:**
 
@@ -70,11 +71,14 @@ The container uses the `debian:bookworm-slim` image and runs `/bin/bash` with TT
 **Usage:**
 
 ```bash
-# Build with the test container feature
+# Build with the test container feature (default image: debian:bookworm-slim)
 cargo run --features pty-test_container -- --use-pty-test-container
 
 # Or via environment variable
 USE_PTY_TEST_CONTAINER=true cargo run --features pty-test_container
+
+# Use a custom image
+cargo run --features pty-test_container -- --use-pty-test-container --pty-test-container-image ubuntu:24.04
 ```
 
 **How it works:**
@@ -91,7 +95,7 @@ Reader path:
 
 On startup the adapter:
 
-1. Pulls `debian:bookworm-slim` (if not cached)
+1. Pulls the configured image (default: `debian:bookworm-slim`, if not cached)
 2. Creates a container with `tty=true`, `open_stdin=true`, `cmd=[/bin/bash]`
 3. Starts the container
 4. Attaches to stdin/stdout/stderr streams
@@ -104,6 +108,7 @@ When the session is killed, the container is stopped and removed.
 | Parameter | CLI Flag | Env Variable | Default |
 |-----------|----------|--------------|---------|
 | PTY backend | `--use-pty-test-container` | `USE_PTY_TEST_CONTAINER` | `false` (local) |
+| Container image | `--pty-test-container-image` | — | `debian:bookworm-slim` |
 | Log level | `--log-level` / `-l` | `RUST_LOG` or `LOG_LEVEL` | `info` |
 
 ## Feature Flags

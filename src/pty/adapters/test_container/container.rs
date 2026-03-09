@@ -14,6 +14,8 @@ use futures::StreamExt;
 pub struct Container {
     pub(super) docker: Docker,
     pub(super) name: String,
+    /// Full image reference (`image:tag`) used when creating the container.
+    pub(super) image_ref: String,
 }
 
 impl Container {
@@ -27,17 +29,22 @@ impl Container {
     /// ```text
     ///   connect_with_local_defaults()
     ///           │
-    ///      create_image()          ← pull debian:bookworm-slim
+    ///      create_image()          ← pull <image>:<tag>
     ///           │
     ///      create_container()      ← cmd=["sleep","infinity"]
     ///           │
     ///      start_container()
     /// ```
-    pub async fn setup() -> anyhow::Result<Container> {
+    pub async fn setup(image: &str, tag: &str) -> anyhow::Result<Container> {
         let docker = Docker::connect_with_local_defaults()?;
         let name = format!("infraware_{}", uuid::Uuid::new_v4());
-        let container = Container { docker, name };
-        container.pull_image().await?;
+        let image_ref = format!("{image}:{tag}");
+        let container = Container {
+            docker,
+            name,
+            image_ref,
+        };
+        container.pull_image(image, tag).await?;
         container.create_container().await?;
         container.start_container().await?;
 
@@ -70,12 +77,12 @@ impl Container {
     }
 
     /// Create the container image by pulling it from the registry if not already present.
-    async fn pull_image(&self) -> anyhow::Result<()> {
+    async fn pull_image(&self, image: &str, tag: &str) -> anyhow::Result<()> {
         let options = CreateImageOptionsBuilder::default()
-            .from_image("debian")
-            .tag("bookworm-slim")
+            .from_image(image)
+            .tag(tag)
             .build();
-        tracing::debug!("Pulling Debian image image: {options:?}");
+        tracing::debug!("Pulling container image: {options:?}");
         let mut pull_stream = self.docker.create_image(Some(options), None, None);
 
         let mut image_info = None;
@@ -106,7 +113,7 @@ impl Container {
             .build();
 
         let config = ContainerCreateBody {
-            image: Some("debian:bookworm-slim".to_string()),
+            image: Some(self.image_ref.clone()),
             cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             ..Default::default()
         };

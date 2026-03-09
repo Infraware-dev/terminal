@@ -56,13 +56,13 @@ use crate::ui::{Scrollbar, Theme};
 /// This is used in [`AppOptions`] (created before the tokio runtime) and [`AppState`].
 /// The actual [`crate::pty::PtyProvider`] (which may carry `Arc<SharedContainer>`)
 /// is constructed later via [`AppState::pty_provider()`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtyProviderType {
     /// Local PTY session (default).
     Local,
     /// Docker test container PTY session.
     #[cfg(feature = "pty-test_container")]
-    TestContainer,
+    TestContainer { image: String, tag: String },
 }
 
 /// Options for creating an [`InfrawareApp`].
@@ -248,21 +248,22 @@ impl InfrawareApp {
 
         // Initialize shared container for test container backend
         #[cfg(feature = "pty-test_container")]
-        let shared_container = if matches!(options.pty_provider, PtyProviderType::TestContainer) {
-            Some(
-                runtime
-                    .block_on(crate::pty::SharedContainer::setup())
-                    .expect("Failed to initialize shared Docker container"),
-            )
-        } else {
-            None
-        };
+        let shared_container =
+            if let PtyProviderType::TestContainer { image, tag } = options.pty_provider.clone() {
+                Some(
+                    runtime
+                        .block_on(crate::pty::SharedContainer::setup(&image, &tag))
+                        .expect("Failed to initialize shared Docker container"),
+                )
+            } else {
+                None
+            };
 
         // Build PtyProvider for initial session
-        let initial_pty_provider = match options.pty_provider {
+        let initial_pty_provider = match &options.pty_provider {
             PtyProviderType::Local => crate::pty::PtyProvider::Local,
             #[cfg(feature = "pty-test_container")]
-            PtyProviderType::TestContainer => crate::pty::PtyProvider::TestContainer {
+            PtyProviderType::TestContainer { .. } => crate::pty::PtyProvider::TestContainer {
                 shared: shared_container
                     .clone()
                     .expect("SharedContainer not initialized"),

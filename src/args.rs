@@ -10,6 +10,11 @@ pub struct Args {
     /// Application log level (trace, debug, info, warn, error). Can also be set via RUST_LOG or LOG_LEVEL environment variables.
     #[arg(long, env = "RUST_LOG", short = 'l', default_value = "info")]
     pub log_level: LogLevel,
+    /// Image name to use for the PTY test container. Tag can be specified with `image:tag` format.
+    /// If the tag is omitted, it defaults to "latest". This is only used if `--use-pty-test-container` is set.
+    #[cfg(feature = "pty-test_container")]
+    #[arg(long, default_value = "debian:bookworm-slim")]
+    pub pty_test_container_image: String,
     /// Use a test Debian image as the PTY backend instead of the host system. This is useful for testing and debugging in a consistent environment.
     #[cfg(feature = "pty-test_container")]
     #[arg(long, env = "USE_PTY_TEST_CONTAINER", default_value_t = false)]

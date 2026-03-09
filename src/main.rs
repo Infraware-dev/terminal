@@ -98,7 +98,8 @@ fn main() -> eframe::Result<()> {
 fn app_options(_args: &Args) -> AppOptions {
     #[cfg(feature = "pty-test_container")]
     let pty_provider = if _args.use_pty_test_container {
-        app::PtyProviderType::TestContainer
+        let (image, tag) = test_container_image_and_tag(_args);
+        app::PtyProviderType::TestContainer { image, tag }
     } else {
         app::PtyProviderType::Local
     };
@@ -106,4 +107,22 @@ fn app_options(_args: &Args) -> AppOptions {
     let pty_provider = app::PtyProviderType::Local;
 
     AppOptions { pty_provider }
+}
+
+/// Splits an image reference into `(image, tag)`.
+///
+/// Handles registry ports (e.g., `registry.example.com:5000/myimage:v1`)
+/// by treating only the last colon as the tag separator when the segment
+/// after it contains no `/`.
+#[cfg(feature = "pty-test_container")]
+fn test_container_image_and_tag(args: &Args) -> (String, String) {
+    let input = &args.pty_test_container_image;
+    // The tag separator is the last `:` whose right-hand side contains no `/`.
+    if let Some(pos) = input.rfind(':') {
+        let after_colon = &input[pos + 1..];
+        if !after_colon.contains('/') && !after_colon.is_empty() {
+            return (input[..pos].to_string(), after_colon.to_string());
+        }
+    }
+    (input.to_string(), "latest".to_string())
 }

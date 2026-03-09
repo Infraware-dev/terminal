@@ -37,13 +37,13 @@ impl std::fmt::Debug for SharedContainer {
 }
 
 impl SharedContainer {
-    /// Creates and starts the shared Docker container.
+    /// Creates and starts the shared Docker container with the specified image.
     ///
     /// Pulls the Debian image, creates the container with `sleep infinity`,
     /// starts it, and captures the current tokio runtime handle for later
     /// use in [`Drop`].
-    pub async fn setup() -> anyhow::Result<Arc<Self>> {
-        let container = Container::setup().await?;
+    pub async fn setup(image: &str, tag: &str) -> anyhow::Result<Arc<Self>> {
+        let container = Container::setup(image, tag).await?;
         let runtime_handle = tokio::runtime::Handle::current();
 
         Ok(Arc::new(Self {
@@ -115,9 +115,14 @@ impl Drop for SharedContainer {
             return; // Already cleaned up (shouldn't happen, but be defensive).
         }
         let docker = self.container.docker.clone();
+        let image_ref = std::mem::take(&mut self.container.image_ref);
         let handle = self.runtime_handle.clone();
         let join_handle = std::thread::spawn(move || {
-            let container = Container { docker, name };
+            let container = Container {
+                docker,
+                name,
+                image_ref,
+            };
             if let Err(e) = handle.block_on(container.stop()) {
                 tracing::error!("Failed to stop shared container on drop: {e}");
             }
