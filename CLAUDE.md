@@ -32,6 +32,9 @@ ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run  # RigEngine (default)
 # Run with Docker PTY backend (sandboxed Debian container)
 cargo run --features pty-test_container -- --use-pty-test-container
 
+# Run with a custom Docker image for the PTY backend
+cargo run --features pty-test_container -- --use-pty-test-container --pty-test-container-image ubuntu:24.04
+
 # Testing
 cargo test                           # All tests
 cargo test -- test_name              # Single test by name
@@ -254,6 +257,7 @@ MEMORY_LIMIT="200"                      # Max session memory entries
 
 # PTY Backend
 USE_PTY_TEST_CONTAINER="true"        # Use Docker container PTY (requires pty-test_container feature)
+# --pty-test-container-image IMAGE   # Docker image (default: debian:bookworm-slim, accepts image:tag)
 
 # Application
 LOG_LEVEL="debug"                    # debug, info, warn, error

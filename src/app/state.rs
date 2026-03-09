@@ -74,7 +74,7 @@ impl AppState {
         match self.pty_provider_type {
             PtyProviderType::Local => crate::pty::PtyProvider::Local,
             #[cfg(feature = "pty-test_container")]
-            PtyProviderType::TestContainer => {
+            PtyProviderType::TestContainer { .. } => {
                 let shared = self
                     .shared_container
                     .clone()
