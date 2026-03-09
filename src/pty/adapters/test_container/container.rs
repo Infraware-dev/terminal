@@ -1,31 +1,26 @@
 //! Container builder for debian latest slim container image.
 
-use std::pin::Pin;
-
 use bollard::Docker;
 use bollard::config::ContainerCreateBody;
-use bollard::container::LogOutput;
 use bollard::query_parameters::{
-    AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-    RemoveContainerOptionsBuilder, ResizeContainerTTYOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
 };
-use futures::{Stream, StreamExt};
-use tokio::io::AsyncWrite;
-
-/// Container IO streams for interacting with the container's stdin, stdout, and stderr.
-pub struct IoHandles {
-    pub input: Pin<Box<dyn AsyncWrite + Send>>,
-    pub output: Pin<Box<dyn Stream<Item = Result<LogOutput, bollard::errors::Error>> + Send>>,
-}
+use futures::StreamExt;
 
 /// Builder for creating and managing a Debian container using [bollard](https://docs.rs/bollard/latest/bollard/).
+///
+/// The container runs `sleep infinity` as its main process, keeping it alive
+/// indefinitely. Individual bash sessions are created via exec.
 pub struct Container {
-    docker: Docker,
-    name: String,
+    pub(super) docker: Docker,
+    pub(super) name: String,
 }
 
 impl Container {
-    /// Sets up a Debian container using bollard and returns a [handle to it](self::Container).
+    /// Sets up a Debian container using bollard and returns a handle to it.
+    ///
+    /// The container starts with `sleep infinity` as entrypoint; individual
+    /// bash sessions must be spawned via [`super::SharedContainer::exec_bash`].
     ///
     /// ## Summary flow
     ///
@@ -34,40 +29,19 @@ impl Container {
     ///           │
     ///      create_image()          ← pull debian:bookworm-slim
     ///           │
-    ///      create_container()      ← tty=true, open_stdin=true, cmd=[/bin/bash]
+    ///      create_container()      ← cmd=["sleep","infinity"]
     ///           │
     ///      start_container()
-    ///           │
-    ///      attach_container()      ← stdin+stdout+stderr, stream=true
-    ///           │
-    ///       ┌───┴───┐
-    ///       │       │
-    ///     output  input            ← async Stream / AsyncWrite
-    ///       │       │
-    ///     adapt   adapt            ← bridge to sync Read/Write
-    ///       │       │
-    ///    PtyReader PtyWriter       ← plug into PtySession trait
     /// ```
-    pub async fn setup() -> anyhow::Result<(Container, IoHandles)> {
+    pub async fn setup() -> anyhow::Result<Container> {
         let docker = Docker::connect_with_local_defaults()?;
         let name = format!("infraware_{}", uuid::Uuid::new_v4());
         let container = Container { docker, name };
         container.pull_image().await?;
         container.create_container().await?;
         container.start_container().await?;
-        let container_io = container.attach_container().await?;
 
-        Ok((container, container_io))
-    }
-
-    /// Resizes the container's TTY to the given dimensions.
-    pub async fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
-        let opts = ResizeContainerTTYOptionsBuilder::default()
-            .w(i32::from(cols))
-            .h(i32::from(rows))
-            .build();
-        self.docker.resize_container_tty(&self.name, opts).await?;
-        Ok(())
+        Ok(container)
     }
 
     /// Stops and removes the container to clean up resources after use.
@@ -120,9 +94,10 @@ impl Container {
         Ok(())
     }
 
-    /// Create the container with the appropriate configuration (tty, open_stdin, cmd).
+    /// Create the container with `sleep infinity` as the idle entrypoint.
     ///
-    /// Returns the container name which can be used to start and attach to the container later.
+    /// The container stays alive indefinitely; individual bash sessions are
+    /// created via `docker exec`.
     async fn create_container(&self) -> anyhow::Result<()> {
         tracing::debug!("Creating Container: {}", self.name);
 
@@ -132,9 +107,7 @@ impl Container {
 
         let config = ContainerCreateBody {
             image: Some("debian:bookworm-slim".to_string()),
-            tty: Some(true),
-            open_stdin: Some(true),
-            cmd: Some(vec!["/bin/bash".to_string()]),
+            cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             ..Default::default()
         };
 
@@ -143,33 +116,12 @@ impl Container {
         Ok(())
     }
 
-    /// Start the container so that it can be attached to for interactive command execution.
+    /// Start the container so that exec sessions can be spawned inside it.
     async fn start_container(&self) -> anyhow::Result<()> {
         tracing::debug!("Starting container: {}", self.name);
         self.docker.start_container(&self.name, None).await?;
         tracing::debug!("Started container: {}", self.name);
 
         Ok(())
-    }
-
-    /// Attach to the container's stdin, stdout, and stderr streams for interactive command execution.
-    async fn attach_container(&self) -> anyhow::Result<IoHandles> {
-        let options = AttachContainerOptionsBuilder::default()
-            .stderr(true)
-            .stdout(true)
-            .stdin(true)
-            .stream(true)
-            .build();
-        tracing::debug!("Attaching container: {options:?}");
-        let attach = self
-            .docker
-            .attach_container(&self.name, Some(options))
-            .await?;
-        tracing::debug!("Attached container: {}", self.name);
-
-        Ok(IoHandles {
-            input: attach.input,
-            output: attach.output,
-        })
     }
 }

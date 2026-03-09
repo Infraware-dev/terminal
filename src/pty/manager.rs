@@ -13,11 +13,13 @@ use super::io::{PtyReader, PtyWriter};
 use super::traits::PtySession;
 
 /// Enum of supported PTY session providers. Used for selecting the session type at runtime.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum PtyProvider {
     Local,
     #[cfg(feature = "pty-test_container")]
-    TestContainer,
+    TestContainer {
+        shared: Arc<super::adapters::SharedContainer>,
+    },
 }
 
 /// Manager for a PTY session. Wraps any [`PtySession`] implementation.
@@ -38,8 +40,8 @@ impl PtyManager {
                 (Box::new(session) as Box<dyn PtySession>, shell_name)
             }
             #[cfg(feature = "pty-test_container")]
-            PtyProvider::TestContainer => (
-                Box::new(super::adapters::TestContainerPtySession::new().await?)
+            PtyProvider::TestContainer { shared } => (
+                Box::new(super::adapters::TestContainerPtySession::new(shared).await?)
                     as Box<dyn PtySession>,
                 "test-container-shell".to_string(),
             ),

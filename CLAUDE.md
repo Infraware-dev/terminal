@@ -71,6 +71,11 @@ cargo llvm-cov --all-features --summary-only  # Quick summary
 │   ├── terminal/              # VTE parser, grid, cell attributes
 │   ├── args.rs                # CLI arguments (clap)
 │   ├── pty/                   # PTY session trait, adapters, async I/O
+│   │   └── adapters/
+│   │       ├── local.rs       # LocalPtySession (host shell)
+│   │       └── test_container/# Docker-based sandboxed PTY
+│   │           ├── container.rs  # Container lifecycle (pull, create, start, stop)
+│   │           └── shared.rs     # SharedContainer (Arc, exec_bash, resize_exec)
 │   ├── llm/                   # Markdown→ANSI renderer (syntect highlighting)
 │   ├── input/                 # Keyboard mapping, text selection, command classification
 │   ├── orchestrators/         # hitl.rs utility (parse_approval)
@@ -107,7 +112,10 @@ cargo llvm-cov --all-features --summary-only  # Quick summary
 │   │Terminal │     PTY Adapters:                  │
 │   │  Grid   │     ├─ LocalPtySession (default)   │
 │   └─────────┘     └─ TestContainerPtySession*    │
-│                     (*feature: pty-test_container)│
+│                     │ (*feature: pty-test_container)│
+│                     └─ SharedContainer (Arc,     │
+│                        single Docker container   │
+│                        shared across all tabs)   │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -131,8 +139,8 @@ handler pattern:
 
 **Core modules:**
 
-- `app.rs` - Main `InfrawareApp` struct, eframe::App implementation, top-level update loop
-- `app/state.rs` - Core application state struct (sessions map, buffers, flags)
+- `app.rs` - Main `InfrawareApp` struct, eframe::App implementation, `PtyProviderType` enum, top-level update loop
+- `app/state.rs` - Core application state struct (sessions map, buffers, `shared_container`, flags)
 - `state.rs` - `AppMode` state machine and `AgentState` (per-session mode tracking)
 - `session.rs` - `TerminalSession` struct (each tab/pane has independent PTY, VTE parser, state)
 

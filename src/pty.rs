@@ -5,6 +5,8 @@ mod io;
 mod manager;
 mod traits;
 
+#[cfg(feature = "pty-test_container")]
+pub use adapters::SharedContainer;
 pub use io::{PtyReader, PtyWriter};
 pub use manager::{PtyManager, PtyProvider};
 use portable_pty::PtySize;

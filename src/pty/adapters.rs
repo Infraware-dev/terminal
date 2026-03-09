@@ -6,4 +6,4 @@ mod test_container;
 
 pub use self::local::LocalPtySession;
 #[cfg(feature = "pty-test_container")]
-pub use self::test_container::TestContainerPtySession;
+pub use self::test_container::{SharedContainer, TestContainerPtySession};
