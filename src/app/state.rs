@@ -5,11 +5,11 @@
 //! testable without egui dependencies.
 
 use std::collections::HashMap;
-#[cfg(feature = "pty-test_container")]
+#[cfg(feature = "docker")]
 use std::sync::Arc;
 
 use crate::app::PtyProviderType;
-#[cfg(feature = "pty-test_container")]
+#[cfg(feature = "docker")]
 use crate::pty::SharedContainer;
 use crate::session::{SessionId, TerminalSession};
 
@@ -25,10 +25,14 @@ pub struct AppState {
     /// Pty provider type for new sessions
     pub pty_provider_type: PtyProviderType,
 
-    /// Shared test container (if using test container backend).
+    /// Shared Docker container (if using test container or arena backend).
     /// Created once at startup; cloned into each new session's `PtyProvider`.
-    #[cfg(feature = "pty-test_container")]
+    #[cfg(feature = "docker")]
     pub shared_container: Option<Arc<SharedContainer>>,
+
+    /// Pre-loaded arena scenario prompt, injected into each new session.
+    #[cfg(feature = "arena")]
+    pub scenario_prompt: Option<String>,
 
     /// Currently focused session ID
     pub active_session_id: SessionId,
@@ -52,7 +56,8 @@ impl AppState {
         sessions: HashMap<SessionId, TerminalSession>,
         active_session_id: SessionId,
         pty_provider_type: PtyProviderType,
-        #[cfg(feature = "pty-test_container")] shared_container: Option<Arc<SharedContainer>>,
+        #[cfg(feature = "docker")] shared_container: Option<Arc<SharedContainer>>,
+        #[cfg(feature = "arena")] scenario_prompt: Option<String>,
     ) -> Self {
         let next_session_id = sessions.keys().max().map(|&id| id + 1).unwrap_or(0);
 
@@ -61,8 +66,10 @@ impl AppState {
             active_session_id,
             next_session_id,
             pty_provider_type,
-            #[cfg(feature = "pty-test_container")]
+            #[cfg(feature = "docker")]
             shared_container,
+            #[cfg(feature = "arena")]
+            scenario_prompt,
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
             should_quit: false,
@@ -72,6 +79,14 @@ impl AppState {
     /// Builds a [`crate::pty::PtyProvider`] for creating a new session.
     pub fn pty_provider(&self) -> crate::pty::PtyProvider {
         match self.pty_provider_type {
+            #[cfg(feature = "arena")]
+            PtyProviderType::ArenaScenario(_) => {
+                let shared = self
+                    .shared_container
+                    .clone()
+                    .expect("SharedContainer not initialized for ArenaScenario provider");
+                crate::pty::PtyProvider::ArenaScenario { shared }
+            }
             PtyProviderType::Local => crate::pty::PtyProvider::Local,
             #[cfg(feature = "pty-test_container")]
             PtyProviderType::TestContainer { .. } => {
@@ -115,8 +130,10 @@ mod tests {
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
             pty_provider_type: PtyProviderType::Local,
-            #[cfg(feature = "pty-test_container")]
+            #[cfg(feature = "docker")]
             shared_container: None,
+            #[cfg(feature = "arena")]
+            scenario_prompt: None,
             should_quit: false,
         }
     }

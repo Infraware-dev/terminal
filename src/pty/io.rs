@@ -42,7 +42,7 @@ impl PtyReader {
     /// Use this when reading is handled by an external task (e.g., a tokio
     /// task draining an async stream) rather than by the internal blocking
     /// reader thread spawned by [`PtyReader::new`].
-    #[cfg(any(test, feature = "pty-test_container"))]
+    #[cfg(any(test, feature = "docker"))]
     pub fn with_stop_flag(stop_flag: Arc<AtomicBool>) -> Self {
         Self { stop_flag }
     }

@@ -191,6 +191,18 @@ impl SessionManager {
             return;
         }
 
+        // Arena sessions: inject the scenario prompt directly into the VTE parser
+        // after clear has been processed, so it appears on screen without going
+        // through bash (no ugly printf/hex visible to the user).
+        #[cfg(feature = "arena")]
+        if session.shell == "arena"
+            && let Some(ref prompt) = state.scenario_prompt
+        {
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, prompt.as_bytes());
+        }
+
         session.shell_initialized = true;
         tracing::info!(
             "Session {}: Shell initialized with custom prompt",
@@ -211,8 +223,10 @@ mod tests {
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
             pty_provider_type: crate::app::PtyProviderType::Local,
-            #[cfg(feature = "pty-test_container")]
+            #[cfg(feature = "docker")]
             shared_container: None,
+            #[cfg(feature = "arena")]
+            scenario_prompt: None,
             should_quit: false,
         }
     }

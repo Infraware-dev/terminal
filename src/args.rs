@@ -7,6 +7,10 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Args {
+    /// Start in Arena mode with the given scenario name (e.g., "the-502-cascade").
+    #[cfg(feature = "arena")]
+    #[arg(long)]
+    pub arena: Option<crate::pty::ArenaScenario>,
     /// Application log level (trace, debug, info, warn, error). Can also be set via RUST_LOG or LOG_LEVEL environment variables.
     #[arg(long, env = "RUST_LOG", short = 'l', default_value = "info")]
     pub log_level: LogLevel,
