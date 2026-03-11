@@ -16,14 +16,24 @@ Infraware Terminal uses a pluggable PTY (Pseudo-Terminal) backend system. Each t
                     │  Box<dyn PtySession> │
                     └──────────┬───────────┘
                                │
-              ┌────────────────┼────────────────┐
-              │                                 │
-   ┌──────────▼──────────┐          ┌───────────▼───────────┐
-   │  LocalPtySession    │          │ TestContainerPtySession│
-   │  (portable-pty)     │          │ (bollard / Docker)     │
-   │                     │          │                        │
-   │  Host shell process │          │  Debian container      │
-   └─────────────────────┘          └────────────────────────┘
+         ┌─────────────────────┼──────────────────────────┐
+         │                     │                          │
+   ┌─────▼──────────┐   ┌─────▼───────────┐   ┌─────────▼──────────┐
+   │LocalPtySession │   │DockerExecSession│   │DockerExecSession   │
+   │(portable-pty)  │   │(test-container) │   │(arena)             │
+   │                │   │                 │   │                    │
+   │Host shell      │   │Debian container │   │Scenario image +   │
+   │process         │   │                 │   │ScenarioManifest   │
+   └────────────────┘   └────────┬────────┘   └─────────┬──────────┘
+                                 │                       │
+                                 └───────────┬───────────┘
+                                             │
+                              ┌──────────────▼────────────────┐
+                              │  pty/docker/ module           │
+                              │  ├─ Container + ContainerConfig│
+                              │  ├─ SharedContainer (Arc)     │
+                              │  └─ DockerExecSession impl    │
+                              └───────────────────────────────┘
 ```
 
 All backends implement the `PtySession` trait, which provides:
@@ -32,8 +42,6 @@ All backends implement the `PtySession` trait, which provides:
 - **`take_writer`** — returns a writer handle for sending input
 - **`resize`** — changes terminal dimensions
 - **`send_sigint`** — sends Ctrl+C / SIGINT
-- **`is_running`** — checks if the session process is alive
-- **`kill`** — terminates the session
 
 ## Available Backends
 
@@ -103,11 +111,42 @@ On startup the adapter:
 
 When the session is killed, the container is stopped and removed.
 
+### Arena (Docker)
+
+The arena backend runs a Docker container configured for incident investigation challenges. Like the test container backend, it uses the Docker API via [`bollard`](https://docs.rs/bollard/). Arena differs in that the image is selected from a predefined set of scenarios, and a scenario manifest is read and displayed on startup.
+
+**Prerequisites:**
+
+- Docker daemon running and accessible (via Unix socket or TCP)
+- The `arena` Cargo feature enabled (which includes the `docker` feature)
+
+**Usage:**
+
+```bash
+# Run with a predefined arena scenario
+cargo run --features arena -- --arena the-502-cascade
+```
+
+**How it works:**
+
+Arena scenarios are defined in `src/pty/manager.rs` via the `ArenaScenario` enum. Each scenario maps to a Docker image (e.g., `The502Cascade` → `veeso/arena-the-502-cascade:latest`). On startup:
+
+1. Pull the scenario image (if not cached)
+2. Create and start a container with TTY enabled
+3. Read `/arena/scenario.json` from the container via `docker exec`
+4. Format and inject the incident prompt into the terminal output (ANSI-formatted)
+5. Hand off to the live shell stream
+
+The implementation shares code with the test container backend — both use `DockerExecSession` from `pty/docker/exec_session.rs`.
+
+See [docs/arena-mode.md](arena-mode.md) for detailed information on building scenario images and the arena challenge system.
+
 ## Configuration
 
 | Parameter | CLI Flag | Env Variable | Default |
 |-----------|----------|--------------|---------|
 | PTY backend | `--use-pty-test-container` | `USE_PTY_TEST_CONTAINER` | `false` (local) |
+| Arena scenario | `--arena <SCENARIO>` | — | *(none — arena mode is opt-in)* |
 | Container image | `--pty-test-container-image` | — | `debian:bookworm-slim` |
 | Log level | `--log-level` / `-l` | `RUST_LOG` or `LOG_LEVEL` | `info` |
 
@@ -116,7 +155,9 @@ When the session is killed, the container is stopped and removed.
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
 | *(default)* | `portable-pty` | Local PTY backend (always available) |
-| `pty-test_container` | `bollard` | Docker container backend |
+| `docker` | `bollard` | Base Docker support (shared by `pty-test_container` and `arena`) |
+| `pty-test_container` | `docker` | Test container backend (requires `docker` feature) |
+| `arena` | `docker` | Arena scenario backend (requires `docker` feature) |
 
 ## Adding a New Backend
 
@@ -126,3 +167,5 @@ When the session is killed, the container is stopped and removed.
 4. Add construction logic in `PtyManager::new()`
 5. Wire the CLI flag / env variable in `src/args.rs` and `src/main.rs`
 6. Gate behind a feature flag if it adds optional dependencies
+
+**For Docker-based backends:** If your backend needs Docker container management, reuse the `pty/docker/` module (which provides `SharedContainer`, `Container`, and `ContainerConfig`). If your backend needs a `PtySession` implementation, consider whether `DockerExecSession` can be shared or if a new implementation is needed.

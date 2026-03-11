@@ -35,6 +35,9 @@ cargo run --features pty-test_container -- --use-pty-test-container
 # Run with a custom Docker image for the PTY backend
 cargo run --features pty-test_container -- --use-pty-test-container --pty-test-container-image ubuntu:24.04
 
+# Run with arena mode (incident investigation challenges)
+cargo run --features arena -- --arena the-502-cascade
+
 # Testing
 cargo test                           # All tests
 cargo test -- test_name              # Single test by name
@@ -74,17 +77,21 @@ cargo llvm-cov --all-features --summary-only  # Quick summary
 │   ├── terminal/              # VTE parser, grid, cell attributes
 │   ├── args.rs                # CLI arguments (clap)
 │   ├── pty/                   # PTY session trait, adapters, async I/O
-│   │   └── adapters/
-│   │       ├── local.rs       # LocalPtySession (host shell)
-│   │       └── test_container/# Docker-based sandboxed PTY
-│   │           ├── container.rs  # Container lifecycle (pull, create, start, stop)
-│   │           └── shared.rs     # SharedContainer (Arc, exec_bash, resize_exec)
+│   │   ├── adapters/
+│   │   │   ├── local.rs       # LocalPtySession (host shell)
+│   │   │   └── arena/         # Arena scenario mode
+│   │   │       └── scenario.rs   # ScenarioManifest parsing
+│   │   └── docker/            # Shared Docker container primitives
+│   │       ├── container.rs    # Container lifecycle, ContainerConfig
+│   │       ├── shared.rs       # SharedContainer (Arc, exec_session)
+│   │       └── exec_session.rs # DockerExecSession (PtySession impl)
 │   ├── llm/                   # Markdown→ANSI renderer (syntect highlighting)
 │   ├── input/                 # Keyboard mapping, text selection, command classification
 │   ├── orchestrators/         # hitl.rs utility (parse_approval)
 │   └── ui/                    # egui helpers, theme, scrollbar
 └── docs/                      # User documentation and legacy design docs
     ├── pty-backends.md        # PTY backend system documentation
+    ├── arena-mode.md          # Arena scenario mode documentation
     └── legacy/                # Historical design docs and plans
 ```
 
@@ -111,14 +118,16 @@ cargo llvm-cov --all-features --summary-only  # Quick summary
 │   │ Parser  │                 │ API         │   │
 │   └────┬────┘                 └─────────────┘   │
 │        │                                        │
-│   ┌────▼────┐                                   │
-│   │Terminal │     PTY Adapters:                  │
-│   │  Grid   │     ├─ LocalPtySession (default)   │
-│   └─────────┘     └─ TestContainerPtySession*    │
-│                     │ (*feature: pty-test_container)│
-│                     └─ SharedContainer (Arc,     │
-│                        single Docker container   │
-│                        shared across all tabs)   │
+│   ┌────▼────┐          PTY Adapters:            │
+│   │Terminal │    ├─ LocalPtySession (default)   │
+│   │  Grid   │    ├─ DockerExecSession*          │
+│   └─────────┘    │  ├─ Arena mode               │
+│                  │  │  (*feature: arena)        │
+│                  │  └─ Test container           │
+│                  │     (*feature: pty-test_container) │
+│                  └─ SharedContainer (Arc,       │
+│                     single Docker container     │
+│                     shared across all tabs)     │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -258,6 +267,7 @@ MEMORY_LIMIT="200"                      # Max session memory entries
 # PTY Backend
 USE_PTY_TEST_CONTAINER="true"        # Use Docker container PTY (requires pty-test_container feature)
 # --pty-test-container-image IMAGE   # Docker image (default: debian:bookworm-slim, accepts image:tag)
+# --arena SCENARIO                   # Arena mode (requires arena feature, e.g., the-502-cascade)
 
 # Application
 LOG_LEVEL="debug"                    # debug, info, warn, error
@@ -302,7 +312,9 @@ Key dependencies in `Cargo.toml`:
 - Error: `anyhow`, `thiserror`
 - Logging: `tracing`, `tracing-subscriber`
 - AI (behind `rig` feature): `rig-core`, `chrono`, `schemars`
-- Docker PTY (behind `pty-test_container` feature): `bollard`
+- Docker (behind `docker` feature): `bollard`
+  - Test Container (behind `pty-test_container` feature, depends on `docker`)
+  - Arena Mode (behind `arena` feature, depends on `docker`)
 - CLI: `clap`
 
 ## Adding New Components
