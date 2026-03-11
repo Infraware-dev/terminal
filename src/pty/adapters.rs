@@ -1,9 +1,9 @@
 //! PTY session adapters for different transport layers.
 
+#[cfg(feature = "arena")]
+mod arena;
 mod local;
-#[cfg(feature = "pty-test_container")]
-mod test_container;
 
+#[cfg(feature = "arena")]
+pub use self::arena::ScenarioManifest;
 pub use self::local::LocalPtySession;
-#[cfg(feature = "pty-test_container")]
-pub use self::test_container::{SharedContainer, TestContainerPtySession};

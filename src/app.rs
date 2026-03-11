@@ -58,6 +58,9 @@ use crate::ui::{Scrollbar, Theme};
 /// is constructed later via [`AppState::pty_provider()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtyProviderType {
+    /// Arena scenario PTY session.
+    #[cfg(feature = "arena")]
+    ArenaScenario(crate::pty::ArenaScenario),
     /// Local PTY session (default).
     Local,
     /// Docker test container PTY session.
@@ -246,21 +249,55 @@ impl InfrawareApp {
         // Load logo texture
         let logo_texture = Self::load_logo_texture(cc);
 
-        // Initialize shared container for test container backend
-        #[cfg(feature = "pty-test_container")]
-        let shared_container =
-            if let PtyProviderType::TestContainer { image, tag } = options.pty_provider.clone() {
-                Some(
-                    runtime
-                        .block_on(crate::pty::SharedContainer::setup(&image, &tag))
-                        .expect("Failed to initialize shared Docker container"),
-                )
-            } else {
-                None
+        // Initialize shared Docker container for backends that need one.
+        // Both arena and test-container use the same SharedContainer —
+        // only the ContainerConfig differs.
+        #[cfg(feature = "docker")]
+        let shared_container = {
+            use crate::pty::ContainerConfig;
+
+            let config = match options.pty_provider.clone() {
+                #[cfg(feature = "arena")]
+                PtyProviderType::ArenaScenario(scenario) => Some(ContainerConfig {
+                    image_ref: scenario.image().to_string(),
+                    cmd: None,
+                    tty: true,
+                    open_stdin: true,
+                }),
+                #[cfg(feature = "pty-test_container")]
+                PtyProviderType::TestContainer { image, tag } => Some(ContainerConfig {
+                    image_ref: format!("{image}:{tag}"),
+                    cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+                    tty: false,
+                    open_stdin: false,
+                }),
+                _ => None,
             };
+            config.map(|c| {
+                runtime
+                    .block_on(crate::pty::SharedContainer::setup(c))
+                    .expect("Failed to initialize shared Docker container")
+            })
+        };
+
+        // Read arena scenario prompt once from the container
+        #[cfg(feature = "arena")]
+        let scenario_prompt = if let Some(ref shared) = shared_container
+            && matches!(options.pty_provider, PtyProviderType::ArenaScenario(_))
+        {
+            Self::load_scenario_prompt(&runtime, shared)
+        } else {
+            None
+        };
 
         // Build PtyProvider for initial session
         let initial_pty_provider = match &options.pty_provider {
+            #[cfg(feature = "arena")]
+            PtyProviderType::ArenaScenario(_) => crate::pty::PtyProvider::ArenaScenario {
+                shared: shared_container
+                    .clone()
+                    .expect("SharedContainer not initialized"),
+            },
             PtyProviderType::Local => crate::pty::PtyProvider::Local,
             #[cfg(feature = "pty-test_container")]
             PtyProviderType::TestContainer { .. } => crate::pty::PtyProvider::TestContainer {
@@ -294,8 +331,10 @@ impl InfrawareApp {
             sessions,
             initial_session_id,
             options.pty_provider,
-            #[cfg(feature = "pty-test_container")]
+            #[cfg(feature = "docker")]
             shared_container,
+            #[cfg(feature = "arena")]
+            scenario_prompt,
         );
 
         Self {
@@ -340,6 +379,50 @@ impl InfrawareApp {
                 None
             }
         }
+    }
+
+    /// Reads the scenario manifest from inside the container and returns the
+    /// formatted prompt string. Called once at startup.
+    ///
+    /// Retries a few times with a short delay to handle the case where the
+    /// container has just started and isn't ready for exec yet.
+    #[cfg(feature = "arena")]
+    fn load_scenario_prompt(
+        runtime: &Runtime,
+        shared: &std::sync::Arc<crate::pty::SharedContainer>,
+    ) -> Option<String> {
+        use crate::pty::adapters::ScenarioManifest;
+
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+        for attempt in 1..=MAX_RETRIES {
+            match runtime.block_on(shared.exec_read_file(ScenarioManifest::MANIFEST_PATH)) {
+                Ok(json) => match serde_json::from_str::<ScenarioManifest>(&json) {
+                    Ok(manifest) => {
+                        tracing::info!("Arena scenario loaded: {}", manifest.title);
+                        return Some(manifest.format_prompt());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse scenario manifest: {e}");
+                        return None;
+                    }
+                },
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        tracing::debug!(
+                            "Scenario manifest read attempt {attempt}/{MAX_RETRIES} failed: {e}"
+                        );
+                        std::thread::sleep(RETRY_DELAY);
+                    } else {
+                        tracing::warn!(
+                            "Failed to read scenario manifest after {MAX_RETRIES} attempts: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Sends data to the active session's PTY.

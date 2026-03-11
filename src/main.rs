@@ -96,6 +96,13 @@ fn main() -> eframe::Result<()> {
 }
 
 fn app_options(_args: &Args) -> AppOptions {
+    #[cfg(feature = "arena")]
+    if let Some(scenario) = _args.arena {
+        return AppOptions {
+            pty_provider: app::PtyProviderType::ArenaScenario(scenario),
+        };
+    }
+
     #[cfg(feature = "pty-test_container")]
     let pty_provider = if _args.use_pty_test_container {
         let (image, tag) = test_container_image_and_tag(_args);

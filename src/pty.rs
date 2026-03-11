@@ -1,13 +1,17 @@
 //! PTY (Pseudo-Terminal) module for interactive command support.
 
 pub(crate) mod adapters;
+#[cfg(feature = "docker")]
+pub(crate) mod docker;
 mod io;
 mod manager;
 mod traits;
 
-#[cfg(feature = "pty-test_container")]
-pub use adapters::SharedContainer;
+#[cfg(feature = "docker")]
+pub use docker::{ContainerConfig, SharedContainer};
 pub use io::{PtyReader, PtyWriter};
+#[cfg(feature = "arena")]
+pub use manager::ArenaScenario;
 pub use manager::{PtyManager, PtyProvider};
 use portable_pty::PtySize;
 #[expect(

@@ -15,11 +15,44 @@ use super::traits::PtySession;
 /// Enum of supported PTY session providers. Used for selecting the session type at runtime.
 #[derive(Debug, Clone)]
 pub enum PtyProvider {
+    #[cfg(feature = "arena")]
+    ArenaScenario {
+        shared: Arc<super::docker::SharedContainer>,
+    },
     Local,
     #[cfg(feature = "pty-test_container")]
     TestContainer {
-        shared: Arc<super::adapters::SharedContainer>,
+        shared: Arc<super::docker::SharedContainer>,
     },
+}
+
+/// Known arena scenarios. Each variant maps to a Docker image.
+#[cfg(feature = "arena")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ArenaScenario {
+    The502Cascade,
+}
+
+#[cfg(feature = "arena")]
+impl std::str::FromStr for ArenaScenario {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "the-502-cascade" => Ok(ArenaScenario::The502Cascade),
+            _ => Err(format!("unknown ArenaScenario: {}", s)),
+        }
+    }
+}
+
+#[cfg(feature = "arena")]
+impl ArenaScenario {
+    /// Returns the Docker image reference for this scenario.
+    pub fn image(&self) -> &'static str {
+        match self {
+            Self::The502Cascade => "veeso/arena-the-502-cascade:latest",
+        }
+    }
 }
 
 /// Manager for a PTY session. Wraps any [`PtySession`] implementation.
@@ -34,6 +67,12 @@ impl PtyManager {
     /// Create a `PtyManager` from any [`PtySession`] implementation.
     pub async fn new(provider: PtyProvider, size: PtySize) -> Result<Self> {
         let (session, shell_name) = match provider {
+            #[cfg(feature = "arena")]
+            PtyProvider::ArenaScenario { shared } => (
+                Box::new(super::docker::DockerExecSession::new(shared, None).await?)
+                    as Box<dyn PtySession>,
+                "arena".to_string(),
+            ),
             PtyProvider::Local => {
                 let (session, shell_name) = LocalPtySession::spawn_shell(size)?;
 
@@ -41,7 +80,7 @@ impl PtyManager {
             }
             #[cfg(feature = "pty-test_container")]
             PtyProvider::TestContainer { shared } => (
-                Box::new(super::adapters::TestContainerPtySession::new(shared).await?)
+                Box::new(super::docker::DockerExecSession::new(shared, None).await?)
                     as Box<dyn PtySession>,
                 "test-container-shell".to_string(),
             ),

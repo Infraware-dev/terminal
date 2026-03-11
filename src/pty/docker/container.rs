@@ -1,4 +1,8 @@
-//! Container builder for debian latest slim container image.
+//! Docker container lifecycle management.
+//!
+//! Provides [`Container`] for creating and managing Docker containers via
+//! [bollard](https://docs.rs/bollard/latest/bollard/). Used by both the
+//! test-container and arena adapters.
 
 use bollard::Docker;
 use bollard::config::ContainerCreateBody;
@@ -7,56 +11,65 @@ use bollard::query_parameters::{
 };
 use futures::StreamExt;
 
-/// Builder for creating and managing a Debian container using [bollard](https://docs.rs/bollard/latest/bollard/).
+use super::parse_image_ref;
+
+/// Configuration for creating a Docker container.
+#[derive(Debug, Clone)]
+pub struct ContainerConfig {
+    /// Full image reference (`image:tag`).
+    pub image_ref: String,
+    /// Command to run inside the container. When `None`, the image's default
+    /// `CMD`/`ENTRYPOINT` is used.
+    pub cmd: Option<Vec<String>>,
+    /// Allocate a TTY for the container's main process.
+    pub tty: bool,
+    /// Keep stdin open for the container's main process.
+    pub open_stdin: bool,
+}
+
+/// Handle to a running Docker container.
 ///
-/// The container runs `sleep infinity` as its main process, keeping it alive
-/// indefinitely. Individual bash sessions are created via exec.
+/// Created via [`Container::setup`] with a [`ContainerConfig`].
+/// The container is not automatically cleaned up on drop; call [`stop`](Self::stop)
+/// explicitly (or use [`super::SharedContainer`] which handles cleanup).
 pub struct Container {
     pub(super) docker: Docker,
     pub(super) name: String,
-    /// Full image reference (`image:tag`) used when creating the container.
     pub(super) image_ref: String,
 }
 
+impl std::fmt::Debug for Container {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Container")
+            .field("name", &self.name)
+            .field("image_ref", &self.image_ref)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Container {
-    /// Sets up a Debian container using bollard and returns a handle to it.
-    ///
-    /// The container starts with `sleep infinity` as entrypoint; individual
-    /// bash sessions must be spawned via [`super::SharedContainer::exec_bash`].
-    ///
-    /// ## Summary flow
-    ///
-    /// ```text
-    ///   connect_with_local_defaults()
-    ///           │
-    ///      create_image()          ← pull <image>:<tag>
-    ///           │
-    ///      create_container()      ← cmd=["sleep","infinity"]
-    ///           │
-    ///      start_container()
-    /// ```
-    pub async fn setup(image: &str, tag: &str) -> anyhow::Result<Container> {
+    /// Pulls the image, creates the container, and starts it.
+    pub async fn setup(config: ContainerConfig) -> anyhow::Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
         let name = format!("infraware_{}", uuid::Uuid::new_v4());
-        let image_ref = format!("{image}:{tag}");
-        let container = Container {
+        let container = Self {
             docker,
             name,
-            image_ref,
+            image_ref: config.image_ref.clone(),
         };
-        container.pull_image(image, tag).await?;
-        container.create_container().await?;
+
+        let (repo, tag) = parse_image_ref(&config.image_ref);
+        container.pull_image(repo, tag).await?;
+        container.create_container(&config).await?;
         container.start_container().await?;
 
         Ok(container)
     }
 
-    /// Stops and removes the container to clean up resources after use.
+    /// Stops and removes the container.
     ///
-    /// Stop is best-effort: even if the stop call fails (e.g., container
-    /// already exited or a transient network error), removal is always
-    /// attempted with `force(true)` which tells Docker to kill and remove
-    /// in one shot.
+    /// Stop is best-effort: even if the stop call fails, removal is always
+    /// attempted with `force(true)`.
     pub async fn stop(&self) -> anyhow::Result<()> {
         tracing::debug!("Stopping container {}", self.name);
         if let Err(e) = self.docker.stop_container(&self.name, None).await {
@@ -76,7 +89,6 @@ impl Container {
         Ok(())
     }
 
-    /// Create the container image by pulling it from the registry if not already present.
     async fn pull_image(&self, image: &str, tag: &str) -> anyhow::Result<()> {
         let options = CreateImageOptionsBuilder::default()
             .from_image(image)
@@ -101,34 +113,30 @@ impl Container {
         Ok(())
     }
 
-    /// Create the container with `sleep infinity` as the idle entrypoint.
-    ///
-    /// The container stays alive indefinitely; individual bash sessions are
-    /// created via `docker exec`.
-    async fn create_container(&self) -> anyhow::Result<()> {
-        tracing::debug!("Creating Container: {}", self.name);
+    async fn create_container(&self, config: &ContainerConfig) -> anyhow::Result<()> {
+        tracing::debug!("Creating container: {}", self.name);
 
         let options = CreateContainerOptionsBuilder::default()
             .name(&self.name)
             .build();
 
-        let config = ContainerCreateBody {
+        let body = ContainerCreateBody {
             image: Some(self.image_ref.clone()),
-            cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+            cmd: config.cmd.clone(),
+            tty: Some(config.tty),
+            open_stdin: Some(config.open_stdin),
             ..Default::default()
         };
 
-        self.docker.create_container(Some(options), config).await?;
+        self.docker.create_container(Some(options), body).await?;
         tracing::debug!("Created container: {}", self.name);
         Ok(())
     }
 
-    /// Start the container so that exec sessions can be spawned inside it.
     async fn start_container(&self) -> anyhow::Result<()> {
         tracing::debug!("Starting container: {}", self.name);
         self.docker.start_container(&self.name, None).await?;
         tracing::debug!("Started container: {}", self.name);
-
         Ok(())
     }
 }
