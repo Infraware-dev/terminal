@@ -21,15 +21,15 @@ Arena mode launches a user-specified Docker image as a PTY backend. On startup, 
          ┌─────────────────────┼────────────────────────┐
          │                     │                         │
 ┌────────▼────────┐ ┌─────────▼──────────┐ ┌────────────▼────────────┐
-│ LocalPtySession │ │TestContainerPty    │ │  ArenaPtySession        │
-│ (default)       │ │Session             │ │  (arena feature)        │
-│                 │ │(pty-test_container)│ │                         │
+│ LocalPtySession │ │DockerExecSession   │ │  DockerExecSession      │
+│ (default)       │ │(test-container)    │ │  (arena)                │
+│                 │ │(pty-test_container)│ │  (arena feature)        │
 │ Host shell      │ │ Debian container   │ │  User-specified image   │
 └─────────────────┘ └────────────────────┘ │  + scenario manifest    │
                                            └─────────────────────────┘
 ```
 
-Arena is implemented as a `PtySession` adapter (`ArenaPtySession`), meaning it is invisible to the UI, state machine, agent, and HITL layers. It's just another tab backed by a Docker container.
+Arena mode uses `DockerExecSession` (shared implementation in `pty/docker/`), the same PtySession implementation used by the test container backend. Both backends are invisible to the UI, state machine, agent, and HITL layers — arena is just another tab backed by a Docker container.
 
 ## Prerequisites
 
@@ -39,14 +39,14 @@ Arena is implemented as a `PtySession` adapter (`ArenaPtySession`), meaning it i
 ## Usage
 
 ```bash
-# Run with an arena scenario image
-cargo run --features arena -- --arena <IMAGE>
+# Run with an arena scenario
+cargo run --features arena -- --arena <SCENARIO>
 
 # Example
-cargo run --features arena -- --arena infraware/arena-the-cascade:latest
+cargo run --features arena -- --arena the-502-cascade
 ```
 
-When the `--arena` flag is provided, the app opens a single tab backed by `ArenaPtySession` instead of the default local PTY.
+When the `--arena` flag is provided, the app opens a single tab backed by `DockerExecSession` (configured for the specified scenario) instead of the default local PTY. The scenario name is mapped to a Docker image via the `ArenaScenario` enum (e.g., `the-502-cascade` → `veeso/arena-the-502-cascade:latest`).
 
 ## Startup Sequence
 
@@ -126,17 +126,22 @@ CMD ["/bin/bash"]
 | Scenario environment | Real Docker container | Total realism — any command works, no simulation gaps |
 | Metadata location | `/arena/scenario.json` inside image | Self-contained, single artifact per scenario |
 | Agent command execution | All through PTY | Same as normal mode, commands run inside the container |
-| Adapter approach | Fork of TestContainerPtySession | Arena will diverge (scoring, variants) over time |
+| Adapter approach | Shared DockerExecSession | Arena and test container backends use identical implementation; scenario selection is done at the `PtyProvider` level |
 | UI treatment | No special chrome | Arena is just another PTY tab, no overlays or timers |
-| Feature gating | `--features arena` | Users who don't need arena don't pay for the dependency |
+| Feature gating | `--features arena` (depends on `docker`) | Users who don't need arena don't pay for the dependency |
 
 ## File Structure
 
 ```
 src/pty/adapters/arena/
-  mod.rs          -- ArenaPtySession struct + PtySession impl
-  container.rs    -- ArenaContainer (Docker lifecycle, image pull, exec)
-  scenario.rs     -- ScenarioManifest and ScenarioPrompt structs
+  arena.rs        -- Re-export of ScenarioManifest
+  scenario.rs     -- ScenarioManifest, ScenarioPrompt, MANIFEST_PATH
+
+src/pty/docker/
+  docker.rs       -- Module root (re-exports), IoHandles, OutputStream, bridges
+  container.rs    -- Container struct, ContainerConfig
+  shared.rs       -- SharedContainer (Arc, exec_session)
+  exec_session.rs -- DockerExecSession (PtySession impl for Docker backends)
 ```
 
 ## Configuration
@@ -149,7 +154,7 @@ src/pty/adapters/arena/
 
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
-| `arena` | `bollard` | Arena mode Docker container backend |
+| `arena` | `docker` (which provides `bollard`) | Arena mode Docker container backend |
 
 ## Future Work
 
