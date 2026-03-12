@@ -177,12 +177,12 @@ impl PendingInterrupt {
     /// Create a new pending question interrupt with tool call metadata
     pub fn question_with_tool(
         question: String,
-        _options: Option<Vec<String>>,
+        options: Option<Vec<String>>,
         tool_call_id: Option<String>,
         tool_args: Option<serde_json::Value>,
     ) -> Self {
         Self {
-            resume_context: ResumeContext::Question { question },
+            resume_context: ResumeContext::Question { question, options },
             tool_call_id,
             tool_args,
         }
@@ -243,6 +243,8 @@ pub enum ResumeContext {
     Question {
         /// The question that was asked
         question: String,
+        /// Predefined answer choices the user was shown (if any)
+        options: Option<Vec<String>>,
     },
     /// Waiting for operator to confirm starting the incident investigation pipeline
     IncidentConfirmation {
@@ -401,8 +403,9 @@ mod tests {
         );
 
         match interrupt.resume_context {
-            ResumeContext::Question { question } => {
+            ResumeContext::Question { question, options } => {
                 assert_eq!(question, "Which option?");
+                assert_eq!(options, Some(vec!["A".to_string(), "B".to_string()]));
             }
             _ => panic!("Expected Question context"),
         }

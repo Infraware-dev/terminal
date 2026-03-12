@@ -160,6 +160,118 @@ fn to_chat_history(messages: &[Message]) -> Vec<RigMessage> {
         .collect()
 }
 
+/// Classify a user response to a yes/no question using either a matching by text if possible,
+/// or by a simple query to LLM in case it was not possible to do just text matching
+async fn classify_user_response(
+    client: &anthropic::Client,
+    config: &RigAgentConfig,
+    question: &str,
+    options: &[&str],
+    user_answer: &str,
+) -> bool {
+    if let Some(answer) = classify_user_response_from_text_matching(options, user_answer) {
+        answer
+    } else {
+        classify_user_response_with_llm(client, config, question, options, user_answer).await
+    }
+}
+
+/// Classify a user response to a yes/no question using a lightweight LLM call.
+///
+/// Sends a minimal prompt asking the model to interpret the user's answer
+/// relative to the original question and numbered options. Returns `true`
+/// when the model considers the response affirmative, `false` otherwise.
+///
+/// Falls back to `false` on any API or parsing error.
+async fn classify_user_response_with_llm(
+    client: &anthropic::Client,
+    config: &RigAgentConfig,
+    question: &str,
+    options: &[&str],
+    user_answer: &str,
+) -> bool {
+    // check whether we can resolve the user's answer without querying the LLM.
+
+    let numbered_options: Vec<String> = options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| format!("  {}. {}", i + 1, opt))
+        .collect();
+
+    let user_prompt = format!(
+        "A user was asked the following question:\n\n\
+         \"{question}\"\n\n\
+         The available options were:\n{options}\n\n\
+         The user responded with: \"{user_answer}\"\n\n\
+         Does the user's response indicate option 1 (affirmative) or option 2 (negative)?\n\
+         Reply with exactly one word: \"yes\" or \"no\".",
+        options = numbered_options.join("\n"),
+    );
+
+    let classifier = client
+        .agent(&config.model)
+        .preamble(
+            "You are a response classifier. You interpret user answers to yes/no questions. \
+                    Reply with exactly one word: \"yes\" or \"no\".",
+        )
+        .max_tokens(8)
+        .temperature(0.0)
+        .build();
+
+    let result: Result<String, _> = classifier.prompt(&user_prompt).await;
+
+    match result {
+        Ok(response) => {
+            let trimmed = response.trim().to_lowercase();
+            trimmed == "yes" || trimmed.starts_with("yes")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to classify user response, defaulting to negative");
+            false
+        }
+    }
+}
+
+/// Classify the user response by matching the text against known patterns.
+///
+/// Returns `Some(true)` for clear affirmatives, `Some(false)` for clear negatives,
+/// and `None` when the answer is ambiguous and needs LLM interpretation.
+///
+/// Recognized patterns (case-insensitive, trimmed):
+/// - Option index: `"1"` → first option (affirmative), `"2"` → second option (negative)
+/// - Exact option text match (case-insensitive)
+/// - Common affirmatives: `""` (Enter), `"y"`, `"yes"`
+/// - Common negatives: `"n"`, `"no"`
+fn classify_user_response_from_text_matching(options: &[&str], user_answer: &str) -> Option<bool> {
+    let trimmed = user_answer.trim().to_lowercase();
+
+    // Empty input (just Enter) → affirmative
+    if trimmed.is_empty() {
+        return Some(true);
+    }
+
+    // Numeric index: "1" → first option, "2" → second option
+    if let Ok(idx) = trimmed.parse::<usize>() {
+        if idx >= 1 && idx <= options.len() {
+            return Some(idx == 1);
+        }
+    }
+
+    // Exact option text match (case-insensitive)
+    for (i, opt) in options.iter().enumerate() {
+        if trimmed == opt.to_lowercase() {
+            return Some(i == 0);
+        }
+    }
+
+    // Common affirmatives / negatives
+    match trimmed.as_str() {
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 /// Process a potentially intercepted tool call and produce the HITL interrupt and SSE event.
 ///
 /// Returns `Some((interrupt, event))` when the tool was recognized and should pause for HITL.
@@ -511,10 +623,19 @@ pub fn create_resume_stream(
             }
 
             // Question answered - continue with agent using hook
-            (ResumeResponse::Answer { text }, ResumeContext::Question { question }) => {
+            (ResumeResponse::Answer { text }, ResumeContext::Question { question, options }) => {
+                let options_context = options.as_ref().map_or_else(String::new, |opts| {
+                    let numbered: Vec<String> = opts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, opt)| format!("  {}. {}", i + 1, opt))
+                        .collect();
+                    format!("\n\nThe available options were:\n{}", numbered.join("\n"))
+                });
+
                 let continuation = format!(
-                    "The user answered the question \"{}\" with: {}\n\nPlease continue based on this response.",
-                    question, text
+                    "The user answered the question \"{question}\" with: {text}{options_context}\n\n\
+                     Please continue based on this response.",
                 );
 
                 let history = state.get_messages(&thread_id).await.unwrap_or_default();
@@ -533,9 +654,13 @@ pub fn create_resume_stream(
 
             // Operator confirmed incident investigation — start the pipeline
             (ResumeResponse::Answer { text }, ResumeContext::IncidentConfirmation { incident_description }) => {
-                let confirmed = text.trim().to_lowercase();
-                let is_affirmative =
-                    confirmed == "y" || confirmed == "yes" || confirmed.starts_with("yes");
+                let is_affirmative = classify_user_response(
+                    &client,
+                    &config,
+                    "Start multi-agent incident investigation?",
+                    &["Yes, start investigation", "No, cancel"],
+                    text,
+                ).await;
                 if !is_affirmative {
                     let msg = "Incident investigation cancelled.".to_string();
                     yield Ok(AgentEvent::Message(MessageEvent::assistant(&msg)));
@@ -628,5 +753,130 @@ mod tests {
         // Test that the tool names match what we expect
         assert_eq!(<ShellCommandTool as Tool>::NAME, "execute_shell_command");
         assert_eq!(<AskUserTool as Tool>::NAME, "ask_user");
+    }
+
+    // --- classify_user_response_from_text_matching ---
+
+    const INVESTIGATION_OPTIONS: &[&str] = &["Yes, start investigation", "No, cancel"];
+
+    #[test]
+    fn test_text_classify_empty_is_affirmative() {
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, ""),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "   "),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_text_classify_numeric_index() {
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "1"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "2"),
+            Some(false)
+        );
+        // Out-of-range index falls through to None
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "0"),
+            None
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "3"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_text_classify_exact_option_text() {
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "Yes, start investigation"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "yes, start investigation"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "No, cancel"),
+            Some(false)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "NO, CANCEL"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_text_classify_common_yes_no() {
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "y"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "Y"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "yes"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "YES"),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "n"),
+            Some(false)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "no"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_text_classify_ambiguous_falls_through() {
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "sure"),
+            None
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "start"),
+            None
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "ok"),
+            None
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "nah"),
+            None
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "go ahead"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_text_classify_whitespace_trimmed() {
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "  1  "),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "  yes  "),
+            Some(true)
+        );
+        assert_eq!(
+            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "\tno\t"),
+            Some(false)
+        );
     }
 }
