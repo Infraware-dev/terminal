@@ -30,7 +30,7 @@ Two new `IncidentPhase` variants:
 Five new variants (split planner/executor questions to avoid ambiguity):
 
 - `IncidentPlanConfirmation { context, analysis_text, report_path }` — gate before planning. User confirms or rejects plan creation.
-- `IncidentPlannerQuestion { question, options, context, analysis_text, revision_round }` — HITL questions during planning (PlannerAgent asks clarifying questions or review loop asks for changes). Carries `revision_round` to enforce max-10 safety guard.
+- `IncidentPlannerQuestion { question, options, context, analysis_text, revision_round, is_review, plan_content, plan_path }` — HITL questions during planning (PlannerAgent asks clarifying questions or review loop asks for changes). Carries `revision_round` to enforce max-10 safety guard. `is_review` distinguishes review loop questions from scoping questions. `plan_content`/`plan_path` are present when `is_review` is true.
 - `IncidentExecutionConfirmation { context, plan_content, plan_path }` — gate before execution. User confirms or rejects execution.
 - `IncidentPlanCommand { command, motivation, needs_continuation, risk_level, expected_diagnostic_value, plan_content, plan_path }` — HITL during execution (per-command approval).
 - `IncidentExecutorQuestion { question, options, plan_content, plan_path }` — HITL questions during execution (e.g., rollback/skip/abort on failure).
