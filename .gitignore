@@ -10,13 +10,14 @@
 *.swo
 *~
 
-# Secrets (never commit)
+# Environment (never commit secrets)
+.env
 .env.secrets
 
 # Local settings
 .claude/settings.local.json
 
-# Python (legacy backend)
+# Python
 __pycache__/
 *.pyc
 .venv/
