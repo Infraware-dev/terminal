@@ -1,257 +1,186 @@
 # Infraware Terminal
 
-Terminal emulator con assistente AI integrato per DevOps. Prefissa qualsiasi comando con `?` per query in linguaggio
-naturale.
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![CI](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
-## Requisiti
+An AI-powered terminal emulator with an integrated LLM agent for DevOps assistance.
+Prefix any command with `?` to ask questions in natural language.
 
-- **Rust** 1.85+ (edition 2024)
-- **Linux**: dipendenze di sistema
+> **Early Stage**: This project is under active development. APIs, features, and behavior may change
+> without notice. Contributions and feedback are welcome!
 
-```bash
-# Ubuntu/Debian
-sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
-```
+![Infraware Terminal](docs/assets/screenshot.png)
+
+## Features
+
+- **Natural language queries** -- prefix any command with `?` to ask the AI agent
+  (e.g., `? how do I revert the last git commit`)
+- **Human-in-the-loop** -- the agent proposes shell commands for your approval before executing them
+- **Incident investigation pipeline** -- structured multi-phase investigation with post-mortem reports and
+  remediation plans
+- **Tabbed terminal** -- multiple tabs and split panes via `egui_tiles`
+- **VTE terminal emulation** -- full ANSI/xterm-256color support
+- **Docker sandbox** -- optionally run commands inside a disposable Docker container
+- **Arena mode** -- incident investigation challenges in preconfigured Docker environments
+- **Session memory** -- the agent remembers facts about you and your environment across sessions
 
 ## Quick Start
 
+### Prerequisites
+
+- **Rust** 1.88+ (edition 2024)
+- **Anthropic API key** (for the default Rig engine)
+
+**Linux only:**
+
 ```bash
-# Clona e entra nella directory
+sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
+```
+
+### Build and Run
+
+```bash
+git clone https://github.com/Infraware-dev/infraware-terminal.git
 cd infraware-terminal
 
-# Avvia con MockEngine (nessuna dipendenza esterna)
-ENGINE_TYPE=mock cargo run
+# Copy the example env file and add your API key
+cp .env.example .env
+# Edit .env and set ANTHROPIC_API_KEY=sk-...
 
-# Oppure con RigEngine (default, richiede API key Anthropic)
+# Run (uses the Rig engine by default)
+cargo run
+
+# Or pass the API key directly
 cargo run -- --api-key sk-...
 
-# Oppure con l'API key come variabile d'ambiente
-ANTHROPIC_API_KEY=sk-... cargo run
+# Or try with the mock engine (no API key needed)
+ENGINE_TYPE=mock cargo run
 ```
 
-### Usa l'assistente AI
+### Use the AI Assistant
 
-Nel terminale, prefissa con `?` per query in linguaggio naturale:
+In the terminal, prefix with `?` for natural language queries:
 
 ```
-? come faccio a vedere i container docker in esecuzione
-? elenca i file nella directory corrente
-? come faccio un revert dell'ultimo commit git
+? show me running Docker containers
+? list files larger than 100MB in this directory
+? how do I revert the last git commit
 ```
 
-## Configurazione Engine
+The agent will propose commands for your approval before running them.
 
-L'engine gira in-process nel terminale (nessun backend separato).
+## Configuration
 
-| Engine            | Uso                           | Comando                                            |
-|-------------------|-------------------------------|----------------------------------------------------|
-| **RigEngine**     | Agente Rust nativo (default)  | `cargo run -- --api-key sk-...`                    |
-| **MockEngine**    | Testing/sviluppo              | `ENGINE_TYPE=mock cargo run`                       |
+Configuration is done via environment variables (or a `.env` file). See [`.env.example`](.env.example) for all options.
 
-## Variabili d'Ambiente
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENGINE_TYPE` | `rig` | Engine backend: `rig` or `mock` |
+| `ANTHROPIC_API_KEY` | -- | Anthropic API key (required for `rig`) |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Model to use |
+| `RIG_MAX_TOKENS` | `4096` | Max tokens per response |
+| `RIG_TEMPERATURE` | `0.7` | Sampling temperature |
+| `RIG_TIMEOUT_SECS` | `300` | Request timeout in seconds |
+| `MEMORY_PATH` | `./.infraware/memory.json` | Persistent memory storage path |
+| `MEMORY_LIMIT` | `200` | Max memory entries (FIFO eviction) |
+| `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+
+### CLI Flags
 
 ```bash
-# Engine
-ENGINE_TYPE=rig|mock             # Default: rig
-ANTHROPIC_API_KEY=sk-...         # Fallback per --api-key (se non passato da CLI)
-ANTHROPIC_MODEL=claude-sonnet-4-20250514  # Opzionale, ha un default
-RIG_MAX_TOKENS=4096              # Opzionale
-RIG_TEMPERATURE=0.7              # Opzionale
-RIG_TIMEOUT_SECS=300             # Opzionale
+cargo run -- --api-key <KEY>                    # Pass API key directly
+cargo run -- --log-level debug                  # Set log level
 
-# Memory
-MEMORY_PATH=./.infraware/memory.json  # Path sessione memoria
-MEMORY_LIMIT=200                      # Max entries memoria
+# Docker sandbox (requires pty-test_container feature)
+cargo run --features pty-test_container -- --use-pty-test-container
+cargo run --features pty-test_container -- --use-pty-test-container --pty-test-container-image ubuntu:24.04
 
-# MockEngine
-MOCK_WORKFLOW_FILE=path/to/workflow.json  # Opzionale
-
-# Logging (oppure --log-level da CLI)
-LOG_LEVEL=debug|info|warn|error  # Default: info
+# Arena mode (requires arena feature)
+cargo run --features arena -- --arena the-502-cascade
 ```
-
-## Comandi Utili
-
-```bash
-# Build
-cargo build
-
-# Test
-cargo test
-
-# Lint
-cargo +nightly fmt --all && cargo clippy
-
-# Watch mode (ricompila automaticamente)
-cargo watch -x run
-```
-
-## Struttura Progetto
-
-```
-infraware-terminal/
-├── Cargo.toml                  # Single crate, no workspace
-├── src/
-│   ├── main.rs
-│   ├── app.rs                  # Main InfrawareApp, eframe::App impl
-│   ├── app/                    # Handler modules
-│   │   ├── input_handler.rs    # Keyboard input
-│   │   ├── hitl_handler.rs     # Human-in-the-loop
-│   │   ├── llm_controller.rs   # Drives agent directly
-│   │   ├── llm_event_handler.rs
-│   │   ├── session_manager.rs
-│   │   ├── tiles_manager.rs
-│   │   └── ...
-│   ├── agent.rs                # Agent module root (re-exports)
-│   ├── agent/                  # Agentic engine (in-process)
-│   │   ├── traits.rs           # Agent trait, EventStream
-│   │   ├── adapters/
-│   │   │   ├── mock.rs         # MockAgent (testing)
-│   │   │   └── rig/            # RigAgent (Anthropic Claude)
-│   │   └── shared/             # Event types, models
-│   ├── terminal/               # VTE parser, grid, cell
-│   ├── pty/                    # PTY session, async I/O
-│   ├── markdown/               # Markdown → ANSI renderer
-│   ├── input/                  # Keyboard mapping, command classification
-│   ├── ui/                     # egui helpers, theme
-│   └── config.rs
-└── docs/
-```
-
-## Architettura
-
-```
-┌─────────────────────────────────────────────┐
-│ infraware-terminal (single binary)          │
-│                                             │
-│  ┌───────────┐     ┌─────────────────────┐  │
-│  │ Terminal   │     │ Agent (trait)        │  │
-│  │ UI (egui) │◄───►│ (in-process)        │  │
-│  └─────┬─────┘     │ ┌────────┐ ┌──────┐ │  │
-│        │           │ │ Mock   │ │ Rig  │ │  │
-│   ┌────▼────┐      │ │ Agent  │ │Agent │ │  │
-│   │   PTY   │      │ └────────┘ └──┬───┘ │  │
-│   │ Session │      └───────────────┼─────┘  │
-│   └────┬────┘                      │        │
-│   ┌────▼────┐               ┌──────▼──────┐ │
-│   │  VTE    │               │ Anthropic   │ │
-│   │ Parser  │               │ API         │ │
-│   └─────────┘               └─────────────┘ │
-└─────────────────────────────────────────────┘
-```
-
-I comandi vengono eseguiti tramite il PTY del terminale, non internamente dall'agent.
 
 ## Keyboard Shortcuts
 
-| Shortcut                       | Action             | Platform      |
-|--------------------------------|--------------------|---------------|
-| `Cmd+T` / `Ctrl+Shift+T`       | New tab            | macOS / Linux |
-| `Cmd+W` / `Ctrl+Shift+W`       | Close tab          | macOS / Linux |
-| `Ctrl+Tab`                     | Next tab           | All           |
-| `Ctrl+Shift+Tab`               | Previous tab       | All           |
-| `Cmd+Shift+H` / `Ctrl+Shift+H` | Split horizontal   | macOS / Linux |
-| `Cmd+Shift+J` / `Ctrl+Shift+J` | Split vertical     | macOS / Linux |
-| `Cmd+C` / `Ctrl+Shift+C`       | Copy               | macOS / Linux |
-| `Cmd+V` / `Ctrl+Shift+V`       | Paste              | macOS / Linux |
-| `Ctrl+C`                       | SIGINT (interrupt) | All           |
-| `Ctrl+D`                       | EOF                | All           |
-| `Ctrl+L`                       | Clear screen       | All           |
-| `Ctrl+Shift+/`                 | Enter LLM mode     | All           |
+| Shortcut | Action | Platform |
+|----------|--------|----------|
+| `Cmd+T` / `Ctrl+Shift+T` | New tab | macOS / Linux |
+| `Cmd+W` / `Ctrl+Shift+W` | Close tab | macOS / Linux |
+| `Ctrl+Tab` | Next tab | All |
+| `Ctrl+Shift+Tab` | Previous tab | All |
+| `Cmd+Shift+H` / `Ctrl+Shift+H` | Split horizontal | macOS / Linux |
+| `Cmd+Shift+J` / `Ctrl+Shift+J` | Split vertical | macOS / Linux |
+| `Cmd+C` / `Ctrl+Shift+C` | Copy | macOS / Linux |
+| `Cmd+V` / `Ctrl+Shift+V` | Paste | macOS / Linux |
+| `Ctrl+C` | SIGINT (interrupt) | All |
+| `Ctrl+D` | EOF | All |
+| `Ctrl+L` | Clear screen | All |
+| `Ctrl+Shift+/` | Enter LLM mode | All |
 
-## Mock Workflow File
+## Architecture
 
-This file lets you create a playbook for the MockEngine.
+Infraware Terminal is a single Rust binary that combines a GPU-accelerated terminal emulator (egui/eframe)
+with an in-process agentic LLM engine.
 
-### Workflow JSON Schema
-
-The workflow file defines the scripted investigation the agent follows.
-
-```json
-{
-  "run_commands": true,
-  "playbooks": {
-    "my-playbook": {
-      "name": "My Playbook",
-      "intents": [
-        "can you investigate docker issues",
-        "could you troubleshoot container problems"
-      ],
-      "phases": [
-        {
-          "phase": 1,
-          "name": "Phase Name",
-          "description": "What this phase accomplishes",
-          "duration_minutes": 5,
-          "steps": [
-            {
-              "step": 1,
-              "action": "Human-readable description of what agent is doing",
-              "command": "shell command to execute",
-              "output": "expected output (used for static replay or validation)",
-              "analysis": "Agent's interpretation of the results"
-            }
-          ],
-          "conclusion": "Summary at end of phase (optional)"
-        }
-      ]
-    }
-  }
-}
+```
++---------------------------------------------------+
+| infraware-terminal                                |
+|                                                   |
+|  +-------------+     +------------------------+  |
+|  | Terminal UI  |     | AgenticEngine (trait)  |  |
+|  | (egui)      |<--->| +--------+ +---------+ |  |
+|  +------+------+     | | Mock   | | Rig     | |  |
+|         |            | | Engine | | Engine  | |  |
+|    +----v----+       | +--------+ +----+----+ |  |
+|    |   PTY   |       +----------------+-------+  |
+|    | Session |                        |           |
+|    +----+----+                        |           |
+|    +----v----+                 +------v------+    |
+|    |  VTE    |                 | Anthropic   |    |
+|    | Parser  |                 | API         |    |
+|    +---------+                 +-------------+    |
++---------------------------------------------------+
 ```
 
-#### Root Workflow Fields
+For a detailed architecture description, see [docs/architecture.md](docs/architecture.md).
 
-| Field          | Type                    | Required | Description                                                      |
-|----------------|-------------------------|----------|------------------------------------------------------------------|
-| `run_commands` | `bool`                  | Yes      | Whether to actually run commands or just return the output field |
-| `playbooks`    | `Map<String, Playbook>` | Yes      | Collection of playbooks identified by unique keys                |
+## Documentation
 
-#### Playbook Object
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/architecture.md) | System architecture and module overview |
+| [PTY Backends](docs/pty-backends.md) | Pluggable PTY backend system |
+| [Memory System](docs/memory-system.md) | Persistent and session memory |
+| [Incident Investigation](docs/incident-investigation.md) | Multi-phase incident investigation pipeline |
+| [Arena Mode](docs/arena-mode.md) | Incident investigation challenges |
+| [Contributing](CONTRIBUTING.md) | How to contribute |
 
-| Field     | Type          | Required | Description                                 |
-|-----------|---------------|----------|---------------------------------------------|
-| `name`    | `String`      | Yes      | Display name (e.g., "Docker Investigation") |
-| `intents` | `Vec<String>` | Yes      | List of intents the playbook addresses      |
-| `phases`  | `Vec<Phase>`  | Yes      | Ordered list of phases                      |
+## Feature Flags
 
-#### Phase Object
+| Feature | Description |
+|---------|-------------|
+| `rig` *(default)* | Anthropic Claude agent via rig-rs |
+| `docker` | Base Docker support (bollard) |
+| `pty-test_container` | Docker container PTY sandbox |
+| `arena` | Arena incident investigation challenges |
 
-| Field                  | Type                  | Required | Description                                            |
-|------------------------|-----------------------|----------|--------------------------------------------------------|
-| `phase`                | `u32`                 | Yes      | 1-indexed phase number                                 |
-| `name`                 | `String`              | Yes      | Display name (e.g., "Symptom Verification")            |
-| `description`          | `String`              | Yes      | What this phase accomplishes                           |
-| `duration_minutes`     | `u32`                 | No       | Estimated duration for display                         |
-| `steps`                | `Vec<Step>`           | No       | Steps to execute (absent in documentation-only phases) |
-| `conclusion`           | `String`              | No       | Summary statement at phase end                         |
-| `root_cause`           | `RootCause`           | No       | Present only in root cause phase                       |
-| `verification_summary` | `Map<String, String>` | No       | Present only in verification phase                     |
-
-#### Step Object
-
-| Field      | Type     | Required | Description                                  |
-|------------|----------|----------|----------------------------------------------|
-| `step`     | `u32`    | Yes      | Global step number (continues across phases) |
-| `action`   | `String` | Yes      | What the agent is about to do                |
-| `command`  | `String` | Yes      | Shell command to execute/mock                |
-| `output`   | `String` | Yes      | Expected output or recorded output           |
-| `analysis` | `String` | Yes      | Agent's reasoning about the result           |
-
-#### RootCause Object
-
-| Field        | Type     | Description                                   |
-|--------------|----------|-----------------------------------------------|
-| `issue`      | `String` | Technical description of the problem          |
-| `impact`     | `String` | User-facing impact                            |
-| `drift_type` | `String` | Classification (e.g., "Infrastructure drift") |
-
-### Run with a Workflow file
+## Development
 
 ```bash
-MOCK_WORKFLOW_FILE=~/Downloads/workflow.json ENGINE_TYPE=mock cargo run
+cargo build                          # Build
+cargo test                           # Run tests
+cargo +nightly fmt --all             # Format (requires nightly for rustfmt.toml rules)
+cargo clippy -- -D warnings          # Lint (CI-strict mode)
+cargo watch -x run                   # Watch mode (requires cargo-watch)
+LOG_LEVEL=debug cargo run            # Run with debug logging
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-Apache 2.0
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Copyright 2026 Infraware S.R.L.
