@@ -4,7 +4,7 @@
 [![CI](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
-An AI-powered terminal emulator with an integrated LLM agent for DevOps assistance.
+An AI-native terminal for cloud infrastructure operations
 Prefix any command with `?` to ask questions in natural language.
 
 > **Early Stage**: This project is under active development. APIs, features, and behavior may change
