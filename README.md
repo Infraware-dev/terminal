@@ -2,35 +2,37 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![CI](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 
-An AI-native terminal for cloud infrastructure operations
+An AI-native terminal for cloud infrastructure operations, with an integrated agentic engine for DevOps assistance.
 Prefix any command with `?` to ask questions in natural language.
 
 > **Early Stage**: This project is under active development. APIs, features, and behavior may change
 > without notice. Contributions and feedback are welcome!
 
-![Infraware Terminal](resources/screenshot.png)
+<!-- TODO: Add screenshot — place it at docs/assets/screenshot.png -->
+<!-- ![Infraware Terminal](docs/assets/screenshot.png) -->
 
 ## Features
 
-- **Natural language queries** -- prefix any command with `?` to ask the AI agent
+- **Natural language queries** — prefix any command with `?` to ask the AI agent
   (e.g., `? how do I revert the last git commit`)
-- **Human-in-the-loop** -- the agent proposes shell commands for your approval before executing them
-- **Incident investigation pipeline** -- structured multi-phase investigation with post-mortem reports and
+- **Human-in-the-loop** — the agent proposes shell commands for your approval before executing them
+- **Incident investigation pipeline** — structured multi-phase investigation with post-mortem reports and
   remediation plans
-- **Tabbed terminal** -- multiple tabs and split panes via `egui_tiles`
-- **VTE terminal emulation** -- full ANSI/xterm-256color support
-- **Docker sandbox** -- optionally run commands inside a disposable Docker container
-- **Arena mode** -- incident investigation challenges in preconfigured Docker environments
-- **Session memory** -- the agent remembers facts about you and your environment across sessions
+- **Tabbed terminal** — multiple tabs and split panes via `egui_tiles`
+- **VTE terminal emulation** — full ANSI/xterm-256color support
+- **Docker sandbox** — optionally run commands inside a disposable Docker container
+- **Arena mode** — incident investigation challenges in preconfigured Docker environments
+- **Session memory** — the agent remembers facts about you and your environment across sessions
 
 ## Quick Start
 
 ### Prerequisites
 
-- **Rust** 1.88+ (edition 2024)
-- **Anthropic API key** (for the default Rig engine)
+- **Rust** 1.94+ (edition 2024) — install via [rustup](https://rustup.rs/)
+- **Supported platforms**: macOS (arm64, x86_64), Linux (x86_64, aarch64). Windows is not yet supported.
+- **Anthropic API key** for the AI agent (optional — you can try the terminal without one using mock mode)
 
 **Linux only:**
 
@@ -44,21 +46,19 @@ sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
 git clone https://github.com/Infraware-dev/infraware-terminal.git
 cd infraware-terminal
 
-# Copy the example env file and add your API key
-cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY=sk-...
+# Try it immediately — no API key needed
+ENGINE_TYPE=mock cargo run
 
-# Run (uses the Rig engine by default)
+# Or, to use the AI agent: set your Anthropic API key
+cp .env.example .env
+# Edit .env and paste your key after ANTHROPIC_API_KEY=
 cargo run
 
 # Or pass the API key directly
-cargo run -- --api-key sk-...
-
-# Or try with the mock engine (no API key needed)
-ENGINE_TYPE=mock cargo run
+cargo run -- --api-key sk-ant-...
 ```
 
-### Use the AI Assistant
+### Use the AI Agent
 
 In the terminal, prefix with `?` for natural language queries:
 
@@ -77,7 +77,7 @@ Configuration is done via environment variables (or a `.env` file). See [`.env.e
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENGINE_TYPE` | `rig` | Engine backend: `rig` or `mock` |
-| `ANTHROPIC_API_KEY` | -- | Anthropic API key (required for `rig`) |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key (required for `rig`) |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Model to use |
 | `RIG_MAX_TOKENS` | `4096` | Max tokens per response |
 | `RIG_TEMPERATURE` | `0.7` | Sampling temperature |
@@ -96,7 +96,7 @@ cargo run -- --log-level debug                  # Set log level
 cargo run --features pty-test_container -- --use-pty-test-container
 cargo run --features pty-test_container -- --use-pty-test-container --pty-test-container-image ubuntu:24.04
 
-# Arena mode (requires arena feature)
+# Arena mode (requires arena feature + Docker)
 cargo run --features arena -- --arena the-502-cascade
 ```
 
@@ -119,7 +119,7 @@ cargo run --features arena -- --arena the-502-cascade
 
 ## Architecture
 
-Infraware Terminal is a single Rust binary that combines a GPU-accelerated terminal emulator (egui/eframe)
+Infraware Terminal is a single Rust binary that combines a GPU-accelerated terminal (egui/eframe)
 with an in-process agentic LLM engine.
 
 ```
@@ -127,10 +127,10 @@ with an in-process agentic LLM engine.
 | infraware-terminal                                |
 |                                                   |
 |  +-------------+     +------------------------+  |
-|  | Terminal UI  |     | AgenticEngine (trait)  |  |
+|  | Terminal UI  |     | Agent (trait)           |  |
 |  | (egui)      |<--->| +--------+ +---------+ |  |
 |  +------+------+     | | Mock   | | Rig     | |  |
-|         |            | | Engine | | Engine  | |  |
+|         |            | | Agent  | | Agent   | |  |
 |    +----v----+       | +--------+ +----+----+ |  |
 |    |   PTY   |       +----------------+-------+  |
 |    | Session |                        |           |
